@@ -23,7 +23,7 @@ class TestWebSearchCitations:
                 "query": "product e price october",
                 "results": [
                     {"title": "Oil price today", "url": "https://example.com/oil", "description": "..."},
-                    {"title": "Brent crude", "url": "https://example.com/brent", "description": "..."},
+                    {"title": "Benchmark A crude", "url": "https://example.com/benchmark_a", "description": "..."},
                 ],
                 "count": 2,
             },
@@ -38,10 +38,10 @@ class TestWebSearchCitations:
                 "kind": "web",
             },
             {
-                "source_id": "https://example.com/brent",
-                "source_name": "Brent crude",
+                "source_id": "https://example.com/benchmark_a",
+                "source_name": "Benchmark A crude",
                 "rows": None,
-                "url": "https://example.com/brent",
+                "url": "https://example.com/benchmark_a",
                 "kind": "web",
             },
         ]

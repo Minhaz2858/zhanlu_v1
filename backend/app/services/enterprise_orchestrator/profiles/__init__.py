@@ -163,7 +163,7 @@ def resolve_dimension(profile: Profile, facet_id: str) -> Optional[str]:
     that ``facet_id`` starts with. Returns None only when no match exists.
 
     Why two-stage: the profiler LLM might emit slightly variant ids
-    (e.g. ``core_metrics_brent`` instead of ``core_metrics``). Prefix
+    (e.g. ``core_metrics_benchmark_a`` instead of ``core_metrics``). Prefix
     matching keeps coverage accurate without forcing a sanitization step
     on the agent LLM's output.
     """

@@ -79,15 +79,15 @@ three.
 Query ALL C5/C9 products in ONE query using the unified LIVE views. Do NOT
 query product-specific views one at a time (`sale_erp_v_原料A_data`,
 `sale_erp_v_材料B_data`, …) — each holds a single product and silently
-produces a one-product report. The C5/C9 portfolio covers: 原料A石油树脂,
-材料B, 电子元件, 包装材料, 原料A, 材料C, 工业用裂解材料M.
+produces a one-product report. The C5/C9 portfolio covers: 原料A复合材料,
+材料B, 电子元件, 包装材料, 原料A, 材料C, 工业用分解材料M.
 
 **Call A — Sales (ALL products):**
 `ask_data_agent("weekly sales volume, shipment quantity and revenue for ALL
 C5/C9 products in ONE query from v_sale_order (or erp_t_sal_outstock)
 grouped by product name; include latest date via MAX(date_column); products:
-原料A石油树脂, 材料B, 电子元件, 包装材料, 原料A, 材料C,
-工业用裂解材料M — do not restrict to a single product")`
+原料A复合材料, 材料B, 电子元件, 包装材料, 原料A, 材料C,
+工业用分解材料M — do not restrict to a single product")`
 
 **Call B — Inventory (ALL products):**
 `ask_data_agent("current inventory for ALL C5/C9 products from

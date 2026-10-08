@@ -24,7 +24,7 @@ def sqlite_engine():
             ("r3", 200, "2018-07-02", 9350.0, 1870000.0, "电子元件", "中石化华中"),
             ("r4", 300, "2026-06-30", 12000.0, 3600000.0, "电子元件", "恒河材料"),
             ("r5", 100, "2026-07-01", 12050.0, 1205000.0, "电子元件", "恒河材料"),
-            ("r6", 100, "2026-07-02", 9999.0, 999900.0, "苯乙烯", "中石化华中"),  # wrong product
+            ("r6", 100, "2026-07-02", 9999.0, 999900.0, "材料J", "中石化华中"),  # wrong product
         ]
         for r in rows:
             conn.execute(text(
@@ -131,5 +131,5 @@ def test_erp_loader_no_product_filter_takes_all(sqlite_engine):
         window_start=date(2018, 1, 1),
         window_end=date(2026, 12, 31),
     )
-    # All 6 rows, but r6 (苯乙烯) is on its own day, so 5 distinct days
+    # All 6 rows, but r6 (材料J) is on its own day, so 5 distinct days
     assert len(df) == 5

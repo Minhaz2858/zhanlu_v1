@@ -287,7 +287,7 @@ def _significant_tokens(query: str) -> list[str]:
 
     ASCII: words >= 3 letters plus short alphanumerics with a digit
     ("c5", "c9", "5g").  CJK: every 2-char bigram of each Chinese run
-    ("裂解原料A" -> 裂解/解碳/原料A) — the standard Chinese relevance unit.
+    ("分解原料A" -> 分解/解碳/原料A) — the standard Chinese relevance unit.
     """
     tokens: list[str] = []
     for m in re.finditer(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}", query.lower()):

@@ -197,9 +197,9 @@ class TestBuildDocx(unittest.TestCase):
 
     def test_unicode_preserved(self):
         from app.services.document_service import build_docx
-        data = build_docx("碳五石油树脂", "## 概述\n- 营收增长 12%")
+        data = build_docx("原料A复合材料", "## 概述\n- 营收增长 12%")
         doc_xml = _read_docx_xml(data, "word/document.xml")
-        self.assertIn("碳五石油树脂", doc_xml)
+        self.assertIn("原料A复合材料", doc_xml)
         self.assertIn("营收增长", doc_xml)
 
 
@@ -329,12 +329,12 @@ class TestBuildPptx(unittest.TestCase):
 
     def test_unicode_preserved(self):
         from app.services.document_service import build_pptx
-        data = build_pptx("碳五石油树脂", [
+        data = build_pptx("原料A复合材料", [
             {"title": "概述", "bullets": ["营收增长 12%"]},
         ])
         slide_xmls = _pptx_all_slide_xmls(data)
         joined = "".join(slide_xmls)
-        self.assertIn("碳五石油树脂", joined)
+        self.assertIn("原料A复合材料", joined)
         self.assertIn("营收增长", joined)
 
 

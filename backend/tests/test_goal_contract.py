@@ -185,7 +185,7 @@ def test_is_effective_empty_all_zero_numeric() -> None:
 def test_is_effective_empty_partial_signal_is_not_empty() -> None:
     # ANY non-null/non-zero/non-empty value means the payload has signal.
     assert is_effective_empty([{"quantity": 0, "revenue": 5}]) is False
-    assert is_effective_empty([{"quantity": None, "revenue": "乙烯"}]) is False
+    assert is_effective_empty([{"quantity": None, "revenue": "材料丙"}]) is False
     assert is_effective_empty([{"quantity": 1}]) is False
 
 
@@ -232,19 +232,19 @@ def test_record_query_result_all_null_numeric_counts_as_zero_row() -> None:
 
 def test_catalog_oracle_feedback_combines_filters_and_tables() -> None:
     def distinct_executor(col: str):
-        return ["乙烯", "丙烯"]
+        return ["材料丙", "丙烯"]
 
     def table_executor(table: str) -> str:
         return f"{table}: last date 2026-07-31"
 
     lines = catalog_oracle_feedback(
-        [("fname", "乙烯")],
+        [("fname", "材料丙")],
         ["erp_t_sal_outstock"],
         distinct_executor=distinct_executor,
         table_executor=table_executor,
     )
     # Distinct feedback present...
-    assert any("乙烯" in l for l in lines)
+    assert any("材料丙" in l for l in lines)
     # Table coverage is only emitted when there are NO filters.
     assert not any("erp_t_sal_outstock" in l for l in lines)
 
@@ -266,10 +266,10 @@ def test_catalog_oracle_feedback_degrades_without_executors() -> None:
 
 
 def test_distinct_values_uses_catalog_samples() -> None:
-    catalog = {"fname": ["乙烯", "丙烯", "丁二烯"]}
-    lines = distinct_values_feedback([("fname", "乙烯")], catalog_meta=catalog)
+    catalog = {"fname": ["材料丙", "丙烯", "丁二烯"]}
+    lines = distinct_values_feedback([("fname", "材料丙")], catalog_meta=catalog)
     assert lines
-    assert "乙烯" in lines[0]
+    assert "材料丙" in lines[0]
 
 
 def test_distinct_values_falls_back_to_executor() -> None:

@@ -81,7 +81,7 @@ class TestBuildPooledDataset:
             "product_c": pd.Series(np.random.uniform(80, 120, 100), index=dates),
         }
         exog = pd.DataFrame(
-            {"brent": np.random.uniform(70, 90, 100)},
+            {"benchmark_a": np.random.uniform(70, 90, 100)},
             index=dates,
         )
         exog_map = {"product_c": exog}

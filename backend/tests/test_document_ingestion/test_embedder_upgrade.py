@@ -71,13 +71,13 @@ class TestLocalHashEmbeddingFunction:
 
     def test_deterministic_across_calls(self):
         fn = LocalHashEmbeddingFunction()
-        a = fn(["乙烯价格"])
-        b = fn(["乙烯价格"])
+        a = fn(["材料丙价格"])
+        b = fn(["材料丙价格"])
         assert a == b
 
     def test_different_texts_produce_different_vectors(self):
         fn = LocalHashEmbeddingFunction()
-        a = fn(["乙烯价格上涨"])
+        a = fn(["材料丙价格上涨"])
         b = fn(["原油市场波动"])
         # Vectors should not be identical
         assert a != b
@@ -102,7 +102,7 @@ class TestLocalHashEmbeddingFunction:
 
     def test_chinese_bigrams_have_nonzero_signal(self):
         fn = LocalHashEmbeddingFunction()
-        out = fn(["乙烯价格"])[0]
+        out = fn(["材料丙价格"])[0]
         # At least some dimensions should be non-zero
         nonzero = sum(1 for v in out if v != 0.0)
         assert nonzero > 10

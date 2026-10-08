@@ -61,7 +61,7 @@ def test_writes_audit_row_on_drift(db):
 
 
 def test_no_audit_when_stable(db):
-    target = ForecastTarget(product_key="苯乙烯", name="苯乙烯", org_id="default-org")
+    target = ForecastTarget(product_key="材料J", name="材料J", org_id="default-org")
     db.add(target); db.commit()
     _seed_realized(db, target, [0.10, 0.10, 0.10], [0.11, 0.10, 0.10])
 

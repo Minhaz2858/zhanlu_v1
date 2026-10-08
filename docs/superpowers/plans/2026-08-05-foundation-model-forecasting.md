@@ -14,16 +14,16 @@
 
 | Product | Rows | Span (days) |
 |---|---|---|
-| 裂解C5-裂解C5均价 | 203 | 412 |
-| 裂解C5-日本石脑油 | 113 | 411 |
-| 裂解C5-扬子裂解C5 | 99 | 411 |
+| 分解C5-分解C5均价 | 203 | 412 |
+| 分解C5-日本原料油 | 113 | 411 |
+| 分解C5-扬子分解C5 | 99 | 411 |
 | 电子元件-华东市场价 | 88 | 409 |
 | SIS-巴陵1105 | 85 | 409 |
 | 材料C-华东市场价 | 85 | 409 |
 | 材料J-中石化华东 | 78 | 409 |
 | 材料B-华东市场价 | 76 | 409 |
-| 裂解C9-裂解C9均价 | 75 | 409 |
-| 裂解C5-布伦特 | 44 | 117 |
+| 分解C9-分解C9均价 | 75 | 409 |
+| 分解C5-布伦特 | 44 | 117 |
 | 包装材料-华东市场价 | 35 | 93 |
 
 ### `v_*` views — rich, multiple entries per day (13 views, only 2 used)
@@ -39,7 +39,7 @@
 
 | Table | Top SKU rows | Span | Used? |
 |---|---|---|---|
-| sale_erp_v_原料A石油树脂_data | 1422 | 2932d (~8y) | YES |
+| sale_erp_v_原料A复合材料_data | 1422 | 2932d (~8y) | YES |
 | sale_erp_v_原料A_data | 74 | 504d | YES |
 | (+ 10 more: product_d, product_f, product_b, sis, etc.) | up to 8 years | | NO |
 
@@ -134,7 +134,7 @@ Example for `cracked_c5`:
     {"table": "v_demo_data",
      "time_col": "biz_date(业务日期)",
      "measure": "tax_price(含税单价)",
-     "where": "`material_name(产品名称)` = '裂解C5'"},  # adjust per discovery
+     "where": "`material_name(产品名称)` = '分解C5'"},  # adjust per discovery
 ],
 ```
 

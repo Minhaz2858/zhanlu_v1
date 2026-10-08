@@ -14,7 +14,7 @@ The MySQL warehouse at `10.10.10.49:3306` (KB id `650a2505-...` for `demo_wareho
 |---|---|---|---|---|
 | `monthly_prices` | — | — | — | **Confirmed: does not exist (1146).** |
 | `actual_price` | 2,340 | `date` | 2025-05-01 → 2025-07-31 | Normal English column names. 9 distinct `material_id` (A001, A002, A004-A006, A008-A010, A012). No `product` column. |
-| `v_lz_data` | 10,872 | `biz_date(业务日期)` | 2025-03-07 → 2026-03-20 | **Column names have parens** (`material_name(产品名称)`, `tax_price(含税单价)`). Contains LZ001 Lanzhou prices. Sample row: `裂解C5 / 2025-06-13 / 4300`. |
+| `v_lz_data` | 10,872 | `biz_date(业务日期)` | 2025-03-07 → 2026-03-20 | **Column names have parens** (`material_name(产品名称)`, `tax_price(含税单价)`). Contains LZ001 Lanzhou prices. Sample row: `分解C5 / 2025-06-13 / 4300`. |
 | `v_market_data` | 10,476 | `biz_date` | 2025-03-07 → 2026-03-20 | Similar structure to v_lz_data. |
 | `v_forecast_price` | 672 | `forecast_date` | 2025-05-26 → 2025-06-06 | Acme forecast results (read-only history). |
 | `v_partner_forecast_price` | 610 | `date` | 2025-05-01 → 2025-05-30 | Partner forecasts. |
@@ -70,7 +70,7 @@ Pack uses `time_col` and `dims` (dict). Engine uses `time_column` and `dimension
 
 ### Blocker 3 — `v_lz_data` has Chinese material names
 
-`v_lz_data.material_name(产品名称)` contains values like `'裂解C5'`, `'电子元件'`, `'材料J'`. The pack's `dims.product = "cracked_c5"` doesn't match these Chinese names.
+`v_lz_data.material_name(产品名称)` contains values like `'分解C5'`, `'电子元件'`, `'材料J'`. The pack's `dims.product = "cracked_c5"` doesn't match these Chinese names.
 
 **Required:** A `product_key → Chinese name` mapping. ~9 of 16 products have a direct LZ view (`v_demo_data` ↔ `cracked_c5`, etc.), but 7 products (product_c, feedstock_a, product_a, hydrogenated_c9, product_e, butadiene, sbs) have no corresponding LZ view.
 
@@ -81,7 +81,7 @@ These are options the user should choose from. None of them is a simple "fix the
 ### Option 1: Per-product table repoint + name mapping (medium effort, partial coverage)
 
 - Rewrite the pack to use the engine's schema (rename `time_col → time_column`, restructure `dims` dict → `dimensions` list).
-- Add a `name_mapping` field per product (e.g. `cracked_c5 → 裂解C5`).
+- Add a `name_mapping` field per product (e.g. `cracked_c5 → 分解C5`).
 - Repoint each product to its corresponding `v_*_data` view (or `v_lz_data` with the right name filter).
 - 9/16 products get data; 7/16 (`product_c`, `feedstock_a`, `product_a`, `hydrogenated_c9`, `product_e`, `butadiene`, `sbs`) return `insufficient_data`.
 

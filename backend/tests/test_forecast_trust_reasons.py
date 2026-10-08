@@ -27,7 +27,7 @@ def test_high_tier_code():
 
 
 def test_medium_weekly_code():
-    out = compute_forecast_trust_tier("raffinate_c5", below_naive=False, cadence_class="weekly")
+    out = compute_forecast_trust_tier("feedstock_a", below_naive=False, cadence_class="weekly")
     assert out["tier"] == "medium"
     assert "weekly_cadence" in out["reason_codes"]
 

@@ -957,7 +957,7 @@ git commit -m "feat(forecast): wire directional classifier + decision badge into
 | `v_材料J_data` | styrene | 2025-03 → 2026-07 | 304 | Extend market history +3mo |
 | `sale_erp_v_电子元件_data` | product_d | 2018-06 → 2026-07 | 531 | Exogenous ERP features |
 | `sale_erp_v_材料B_data` | PRODUCT_B | 2018-06 → 2026-07 | 1381 | Exogenous ERP features |
-| `sale_erp_v_原料A石油树脂_data` | product_a | 2018-07 → 2026-07 | 2365 | Exogenous ERP features |
+| `sale_erp_v_原料A复合材料_data` | product_a | 2018-07 → 2026-07 | 2365 | Exogenous ERP features |
 
 **Caveat**: ERP transaction prices ≠ market quotations — never naively concatenate into the forecast target series. Use `v_*` (also Longzhong market data) for target extension; use `sale_erp_v_*` only as exogenous features.
 

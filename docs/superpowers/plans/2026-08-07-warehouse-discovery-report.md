@@ -76,7 +76,7 @@ The procurement questionnaire is no longer blocking.
 ### Upstream Market Data from 隆众资讯 (Oilchem)
 | Table | Rows | Date Range | Columns |
 |-------|------|------------|---------|
-| `oilchem_data` | 74 | 2026-04 → 2026-08 | brent_crude, japan_product_c, industrial_cracking_c5, industrial_cracking_c9 |
+| `oilchem_data` | 74 | 2026-04 → 2026-08 | benchmark_a_crude, japan_product_c, industrial_cracking_c5, industrial_cracking_c9 |
 
 This is **daily upstream market data** scraped from oilchem.net (隆众资讯). Currently only 4 months, but actively updated (last: 2026-08-07). This provides:
 - **Benchmark A crude** — the ultimate upstream feedstock price
@@ -164,4 +164,4 @@ Standalone product tables with 日期Time column (2025-03 to 2026-03):
 
 4. **`erp_t_stk_inventory.FBASEQTY`** has some negative values (min -1,390) — likely returns or adjustments. Filter or handle as signed quantities.
 
-5. **`oilchem_data`** price columns (brent_crude, japan_product_c, etc.) appear to be NULL in the sample rows — only `source_status` (JSON with URL) is populated. Need to check if prices are in the JSON or if the scraper isn't extracting them.
+5. **`oilchem_data`** price columns (benchmark_a_crude, japan_product_c, etc.) appear to be NULL in the sample rows — only `source_status` (JSON with URL) is populated. Need to check if prices are in the JSON or if the scraper isn't extracting them.

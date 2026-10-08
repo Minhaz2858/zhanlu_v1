@@ -113,7 +113,7 @@ def dimension_for_market_facet(facet_id: str) -> str | None:
         return None
     if fid in _MARKET_FACET_TO_DIMENSION:
         return _MARKET_FACET_TO_DIMENSION[fid]
-    # Prefix match — handles LLM variants like "core_metrics_brent"
+    # Prefix match — handles LLM variants like "core_metrics_benchmark_a"
     for prefix, dim in _MARKET_FACET_TO_DIMENSION.items():
         if fid.startswith(prefix):
             return dim

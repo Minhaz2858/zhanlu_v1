@@ -135,7 +135,7 @@ All read sites use `safe_get(setting, key, default)` to tolerate NULL/missing co
 CREATE TABLE alert_product_baselines (
   product_id   VARCHAR(64) PRIMARY KEY,
   baseline_pct FLOAT       NOT NULL,        -- e.g. 2.5 means ±2.5% is "normal weekly noise"
-  reasoning    TEXT,                        -- "石脑油 historically tracks crude; 2-3% weekly swings are normal"
+  reasoning    TEXT,                        -- "原料油 historically tracks crude; 2-3% weekly swings are normal"
   computed_at  TIMESTAMPTZ DEFAULT NOW(),
   model_used   VARCHAR(64)
 );
@@ -148,7 +148,7 @@ Output JSON (validated):
 ```json
 {
   "baseline_7d_pct": 2.5,
-  "reasoning": "石脑油 historically tracks product e; weekly 2-3% swings are normal; only ±5%+ is actionable"
+  "reasoning": "原料油 historically tracks product e; weekly 2-3% swings are normal; only ±5%+ is actionable"
 }
 ```
 

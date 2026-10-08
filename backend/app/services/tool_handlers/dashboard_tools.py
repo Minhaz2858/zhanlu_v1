@@ -759,7 +759,7 @@ class CreateFullstackDashboardArgs(BaseModel):
     panels: list[dict] = Field(default_factory=list)
     # Page header extras (executive dashboard): {"greeting": str,
     #   "snapshot": [{label, value, delta, delta_tone}], "period": str}.
-    # Snapshot chips render like "布伦特 $79.4 ↓$1.2 · 石脑油 $642 ↓$9".
+    # Snapshot chips render like "布伦特 $79.4 ↓$1.2 · 原料油 $642 ↓$9".
     header: Optional[dict] = None
     # Page footer (data provenance): {"sources": str} — e.g. "数据来源：ERP + 市场数据".
     footer: Optional[dict] = None

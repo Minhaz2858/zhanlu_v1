@@ -4,7 +4,7 @@ Covers:
   - Profile registry: ``get_profile("market")`` returns the 8-dimension profile.
   - Coverage signal: ``synthesize_market_report`` always emits
     ``coverage_dimensions`` reflecting which dimensions had successful facets.
-  - Prefix-matching: a slightly variant facet_id (``core_metrics_brent``) still
+  - Prefix-matching: a slightly variant facet_id (``core_metrics_benchmark_a``) still
     resolves to its parent dimension.
 """
 from __future__ import annotations
@@ -85,7 +85,7 @@ class TestResolveDimension:
     def test_prefix_match(self):
         # LLM might emit slightly variant ids; resolve_dimension should
         # still find the parent dimension via prefix matching.
-        assert resolve_dimension(self.p, "core_metrics_brent") == "core_metrics"
+        assert resolve_dimension(self.p, "core_metrics_benchmark_a") == "core_metrics"
         assert resolve_dimension(self.p, "supply_side_refinery") == "supply_side"
         assert resolve_dimension(self.p, "forward_indicators_oil") == "forward_indicators"
 
@@ -184,7 +184,7 @@ class TestSynthesizeMarketReport:
             "profile_name": "market",
             "domain": "energy",
             "period": ("2026-08-01", "2026-08-25"),
-            "primary_metric": "avg_price_brent",
+            "primary_metric": "avg_price_benchmark_a",
             "segments": [],
             "facets": [],
         }

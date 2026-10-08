@@ -62,24 +62,24 @@ class TestChineseTokenEstimation:
         assert CHARS_PER_CN_TOKEN == 1.5
 
     def test_approx_tokens_chinese_basic(self):
-        # 6 Chinese chars → 6 / 1.5 = 4 tokens
-        assert _approx_tokens_chinese("乙烯价格走势") == 4
+        # 6 Chinese chars -> 6 / 1.5 = 4 tokens
+        assert _approx_tokens_chinese("材料价格走势") == 4
 
     def test_approx_tokens_chinese_pure_short(self):
-        # 4 Chinese chars → 4 / 1.5 = 2.67 → int = 2 tokens
-        assert _approx_tokens_chinese("乙烯价格") == 2
+        # 4 Chinese chars -> 4 / 1.5 = 2.67 -> int = 2 tokens
+        assert _approx_tokens_chinese("材料价格") == 2
 
     def test_approx_tokens_chinese_mixed(self):
         # Mixed text → use char count / 1.5
-        text = "乙烯 PRODUCT_B 价格"
-        # len(text) = 10 (including spaces) → 10 / 1.5 = 6.67 → int = 6 tokens
-        assert _approx_tokens_chinese(text) == 6
+        text = "材料价格 PRODUCT_B"
+        # len(text) = 14 (incl. space) -> 14 / 1.5 = 9.33 -> int = 9 tokens
+        assert _approx_tokens_chinese(text) == 9
 
     def test_approx_tokens_chinese_empty(self):
         assert _approx_tokens_chinese("") >= 1
 
     def test_mode_chinese_chunks_pure_chinese(self):
-        text = "乙烯价格持续上涨。" * 50  # ~600 chars
+        text = "材料丙价格持续上涨。" * 50  # ~600 chars
         out = chunk_text(text, max_tokens=20, overlap=5, mode="chinese")
         assert len(out) > 1
 
@@ -92,7 +92,7 @@ class TestChineseTokenEstimation:
             assert chunk["text"].strip()
 
     def test_chunk_text_chinese_helper(self):
-        text = "乙烯" * 200  # 400 chars → ~267 tokens
+        text = "材料丙" * 200  # 400 chars → ~267 tokens
         out = chunk_text_chinese(text, max_tokens=50, overlap=10)
         assert len(out) > 1
         for chunk in out:

@@ -18,7 +18,7 @@ def test_intent_result_round_trip():
         intent=Intent.RESEARCH,
         confidence=0.92,
         suggested_tools=["web_search"],
-        suggested_query="brent oil price today",
+        suggested_query="benchmark_a oil price today",
         reasoning="real-time",
     )
     d = r.to_dict()
@@ -41,11 +41,11 @@ def test_parses_valid_json():
             "intent": "research",
             "confidence": 0.95,
             "suggested_tools": ["web_search"],
-            "suggested_query": "brent oil price today",
+            "suggested_query": "benchmark_a oil price today",
             "reasoning": "real-time price",
         })
 
-    out = asyncio.run(classify_intent("give me today brent oil price", llm_call=fake_llm))
+    out = asyncio.run(classify_intent("give me today benchmark_a oil price", llm_call=fake_llm))
     assert out.intent == Intent.RESEARCH
     assert out.confidence == 0.95
     assert "web_search" in out.suggested_tools
@@ -140,7 +140,7 @@ def test_caches_per_session():
         })
 
     classifier = IntentClassifier(llm_call=fake_llm, enable_cache=True)
-    msg = "give me today brent oil price"
+    msg = "give me today benchmark_a oil price"
     asyncio.run(classifier.classify(msg, session_id="s1"))
     asyncio.run(classifier.classify(msg, session_id="s1"))  # cached
     asyncio.run(classifier.classify(msg, session_id="s2"))  # different session

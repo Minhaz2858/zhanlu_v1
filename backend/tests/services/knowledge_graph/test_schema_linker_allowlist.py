@@ -50,7 +50,7 @@ def test_resolve_returns_none_for_empty_kb_list(db):
 
 
 def test_resolve_returns_allowlist_when_bound_to_acme_agent(db):
-    """If any AgentApp named in ECISCO_BI_AGENT_NAMES is bound to one of
+    """If any AgentApp named in BI_AGENT_NAMES is bound to one of
     the requested kb_ids, the allowlist is returned."""
     _enable()
     from app.models.agent_app import AgentApp

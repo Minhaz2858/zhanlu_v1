@@ -159,13 +159,13 @@ class TestProductService:
         ok = ProductService().upsert_product(
             product_id="p1",
             name="PRODUCT_B",
-            aliases=["dicyclopentadiene", "双环戊二烯"],
+            aliases=["dicyclopentadiene", "材料B"],
             category="C5",
         )
         assert ok is True
 
     def test_query_by_alias(self, mock_kb):
-        out = ProductService().query("双环戊二烯", top_k=3)
+        out = ProductService().query("材料B", top_k=3)
         assert isinstance(out, list)
 
 

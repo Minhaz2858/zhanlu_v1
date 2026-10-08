@@ -33,7 +33,7 @@
 ## Flag: FORECAST_DEMAND_SIGNAL_ENABLED=true (2026-08-06)
 
 **Status:** ON — display-only (no model impact), safe to keep.
-**Verification:** 2/4 upstream products now show demand signal in AI Brief 供需研判 section (原油, 裂解材料M have ERP volume data).
+**Verification:** 2/4 upstream products now show demand signal in AI Brief 供需研判 section (原油, 分解材料M have ERP volume data).
 
 ## Flag: FORECAST_DECISION_LOGGING_ENABLED=true (2026-08-06)
 

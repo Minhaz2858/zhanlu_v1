@@ -37,7 +37,7 @@ class FakeDB:
         return FakeQuery(self, model)
 
 
-def _target(product_key="乙烯"):
+def _target(product_key="材料丙"):
     return ForecastTarget(product_key=product_key, name=product_key,
                           org_id="default-org", id=1)
 
@@ -59,12 +59,12 @@ def test_compute_what_if_returns_full_shape(monkeypatch):
         lambda **kw: {"causal_pct": 5.0},
     )
     result = what_if.compute_what_if(
-        product_key="乙烯",
+        product_key="材料丙",
         market_delta_pct=0.0,
         feedstock_delta_pct=10.0,
         db=FakeDB(target=_target(), run=_run()),
     )
-    assert result["product_key"] == "乙烯"
+    assert result["product_key"] == "材料丙"
     assert result["base_forecast"] == [100.0, 101.0, 102.0]
     assert result["total_impact_pct"] == 5.0
     # The root-feedstock driver label is config-driven; empty config → generic
@@ -97,7 +97,7 @@ def test_compute_what_if_market_uses_08_elasticity_proxy(monkeypatch):
 
     monkeypatch.setattr(what_if, "compute_domain_signal_adjustment", fake_adjustment)
     result = what_if.compute_what_if(
-        product_key="乙烯",
+        product_key="材料丙",
         market_delta_pct=5.0,
         feedstock_delta_pct=0.0,
         db=FakeDB(target=_target(), run=_run()),

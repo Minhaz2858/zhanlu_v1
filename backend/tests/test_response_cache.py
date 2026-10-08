@@ -81,23 +81,23 @@ class TestStoreAndLookup:
             db,
             agent_app_id=AGENT,
             user_id=None,
-            question_text="苯乙烯今日价格",
+            question_text="材料J今日价格",
             intent_class="price_report",
             embedding=_v(1, 0, 0),
-            response_content="今日苯乙烯价格 9800 元/吨。",
+            response_content="今日材料J价格 9800 元/吨。",
             data_version=DV,
         )
         hit = rc.lookup_cached_response(
             db,
             agent_app_id=AGENT,
             user_id=None,
-            question_text="苯乙烯今天价格",
+            question_text="材料J今天价格",
             intent_class="price_report",
             embedding=_v(1, 0, 0),
             data_version=DV,
         )
         assert hit is not None
-        assert hit.response_content == "今日苯乙烯价格 9800 元/吨。"
+        assert hit.response_content == "今日材料J价格 9800 元/吨。"
 
     def test_hit_increments_counter(self, db):
         rc.store_cached_response(

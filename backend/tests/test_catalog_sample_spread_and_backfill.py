@@ -54,7 +54,7 @@ def _column(name: str, data_type: str, **kw) -> dict:
 def big_table(tmp_path):
     """500 rows where the interesting vocabulary lives ONLY in the tail.
 
-    Rows 1-450 sell P<n>; the last 50 sell 混三甲苯.  One ordered page of 100
+    Rows 1-450 sell P<n>; the last 50 sell 材料H.  One ordered page of 100
     therefore cannot see it — which is exactly the live defect.
     """
     path = str(tmp_path / "spread.sqlite")
@@ -70,7 +70,7 @@ def big_table(tmp_path):
             for i in range(1, 451)
         ]
         + [
-            (i, "混三甲苯", float(i), "2026-09-19")
+            (i, "材料H", float(i), "2026-09-19")
             for i in range(451, 501)
         ],
     )
@@ -122,7 +122,7 @@ def test_a_single_page_would_miss_the_vocabulary(big_table):
     one_page = cs.compute_column_stats(
         rows, [_column("product", "varchar(32)")], cap=100, dialect="sqlite"
     )
-    assert "混三甲苯" not in _top_values(one_page, "product"), (
+    assert "材料H" not in _top_values(one_page, "product"), (
         "fixture is wrong: the vocabulary is supposed to be tail-only"
     )
 
@@ -132,7 +132,7 @@ def test_the_spread_sample_sees_both_ends(big_table):
     product = stats["product"]
     assert product["rows_sampled"] == 200, "a head page and a tail page"
     assert product["basis"] == "sample"
-    assert "混三甲苯" in _top_values(stats, "product"), (
+    assert "材料H" in _top_values(stats, "product"), (
         "the customer's own word, from the tail the old sample never read"
     )
     # The temporal range now covers the newest rows, not just the oldest.
@@ -152,7 +152,7 @@ def test_a_table_smaller_than_one_page_is_still_a_COMPLETE_read(tmp_path):
     raw.execute("CREATE TABLE tiny (id INTEGER PRIMARY KEY, product TEXT)")
     raw.executemany(
         "INSERT INTO tiny (id, product) VALUES (?,?)",
-        [(i, "混三甲苯" if i > 80 else "P1") for i in range(1, 86)],
+        [(i, "材料H" if i > 80 else "P1") for i in range(1, 86)],
     )
     raw.commit()
     raw.close()
@@ -173,7 +173,7 @@ def test_an_unorderable_table_still_profiles_from_one_page(tmp_path):
     path = str(tmp_path / "nokey.sqlite")
     raw = sqlite3.connect(path)
     raw.execute("CREATE TABLE nokey (product TEXT)")
-    raw.executemany("INSERT INTO nokey (product) VALUES (?)", [("混三甲苯",)] * 5)
+    raw.executemany("INSERT INTO nokey (product) VALUES (?)", [("材料H",)] * 5)
     raw.commit()
     raw.close()
     with SQLiteConnector(SimpleNamespace(api_url=path, file_url=None)) as conn:
@@ -181,7 +181,7 @@ def test_an_unorderable_table_still_profiles_from_one_page(tmp_path):
             conn, "nokey", [_column("product", "varchar(8)")]
         )
     assert stats["product"]["basis"] == "full"
-    assert _top_values(stats, "product") == ["混三甲苯"]
+    assert _top_values(stats, "product") == ["材料H"]
 
 
 # ══ B. varbinary(0) is a declaration, not a payload ════════════════════════
@@ -351,14 +351,14 @@ def test_the_compact_selector_line_carries_a_tighter_vocabulary_hint():
         "table_name": "v_sale_order", "description": "销售订单明细",
         "row_count": 14589, "table_role": "fact",
         "sample_values": {
-            "material_name": ["混三甲苯", "碳五石油树脂", "双环戊二烯", "电子元件"],
+            "material_name": ["材料H", "原料A复合材料", "材料B", "电子元件"],
             "region": ["华东", "华南", "华北", "华中"],
         },
     }
     full = sl._toc_line(row)
     compact = sl._toc_line(row, compact=True)
 
-    assert "混三甲苯" in compact, "the rest-of-catalog block needs the vocabulary too"
+    assert "材料H" in compact, "the rest-of-catalog block needs the vocabulary too"
     hint = next(p for p in compact.split(", ") if p.startswith("values "))
     assert hint.count(":") == 1, "one column on a compact line"
     assert len(hint) <= 30, "the compact size promise still holds"

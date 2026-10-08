@@ -130,14 +130,14 @@ def test_deterministic_fallback_runs_when_synthesis_throws():
     from app.routers.agents import _build_deterministic_fallback
     test_rows = [
         {
-            "material_name": "30#工业用裂解碳五",
+            "material_name": "30#工业用原料A",
             "total_delivery_qty": 1130.205,
             "total_amount": 19107079.64,
             "avg_price": 11793.1998137368,
             "customer_names": "北京万邦达",
         },
         {
-            "material_name": "双环戊二烯",
+            "material_name": "材料B",
             "total_delivery_qty": 10719.06,
             "total_amount": 74332427.984,
             "avg_price": 5825.978500449,

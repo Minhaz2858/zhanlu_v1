@@ -70,7 +70,7 @@ Return ONLY a JSON object with EXACTLY these keys:
   "suggested_tools": array of tool names the user likely needs
                      (e.g. ["web_search"], ["create_artifact", "ask_data_agent"])
   "suggested_query": a clean, search-optimized version of the user's
-                     request (e.g. "brent oil price today"), empty
+                     request (e.g. "benchmark_a oil price today"), empty
                      string if not applicable
   "reasoning"      : one short sentence explaining the classification
 

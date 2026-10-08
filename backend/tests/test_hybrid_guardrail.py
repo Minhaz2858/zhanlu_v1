@@ -22,12 +22,12 @@ def test_intent_uses_llm_when_available():
             "intent": "research",
             "confidence": 0.95,
             "suggested_tools": ["web_search"],
-            "suggested_query": "brent oil price today",
+            "suggested_query": "benchmark_a oil price today",
         })
 
     intent, conf, tools, query, source = asyncio.run(
         classify_user_intent(
-            "give me today brent oil price",
+            "give me today benchmark_a oil price",
             llm_call=fake_llm,
         )
     )
@@ -103,12 +103,12 @@ def test_refusal_detected_by_llm():
             "confidence": 0.95,
             "reasoning": "Assistant refused real-time data",
             "corrective_tool": "web_search",
-            "corrective_args": {"query": "brent oil price today"},
+            "corrective_args": {"query": "benchmark_a oil price today"},
         })
 
     async def main():
         return await detect_and_correct_refusal(
-            user_message="give me today brent oil price",
+            user_message="give me today benchmark_a oil price",
             assistant_text="I'm sorry, but I cannot provide real-time data.",
             llm_call=fake_llm,
             session_id="test",
@@ -219,7 +219,7 @@ def test_run_hybrid_guardrail_orchestrates():
 
     async def main():
         return await run_hybrid_guardrail(
-            user_message="give me today brent oil price",
+            user_message="give me today benchmark_a oil price",
             assistant_text="I cannot provide real-time data.",
             llm_call=fake_llm,
             session_id="test",

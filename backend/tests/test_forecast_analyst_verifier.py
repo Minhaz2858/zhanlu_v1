@@ -7,7 +7,7 @@ def _brief(**over):
     b = {
         "market_update_zh": "市场动态:市场情报中性,当前波动正常。",
         "price_data_zh": "价格数据:现价 6,940 元/吨。",
-        "upstream_logic_zh": "上游裂解碳五近30日-2.8%,按 0.66 弹性传导约 -1.9%。",
+        "upstream_logic_zh": "上游原料A近30日-2.8%,按 0.66 弹性传导约 -1.9%。",
         "supply_demand_zh": "供需研判:8模型间分歧偏大。",
         "forecast_zh": "价格预测:预计未来 7 天 6,350–6,950 元/吨,↘ 偏弱,上涨概率 42%。",
         "watch_triggers_zh": ["方向准确率回升至 55% 以上"],

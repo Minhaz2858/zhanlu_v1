@@ -67,7 +67,7 @@ class EdiaMysqlDataSource:
                 "table": "md_market_price",
                 "time_col": "FDATE",
                 "measure": "FTAXPRICE",
-                "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
+                "where": "FMATERIAL_NAME = '分解C5-分解C5均价'",
                 "granularity": "day"
             }
         Returns DataFrame with columns ['ds', 'y'] where:
@@ -111,7 +111,7 @@ FORECAST_TARGETS: list[dict] = [
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '裂解C5-布伦特'",
+            "where": "FMATERIAL_NAME = '分解C5-布伦特'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
@@ -127,18 +127,18 @@ def seed_acme_forecast_targets(db: Session, org_id: str = "default-org", app_id:
 **Product → source mapping** (matches `PRODUCT_TABLE_MAP` primary config):
 | product_id | source table | where clause | report_order |
 |---|---|---|---|
-| `product_e` | `md_market_price` | `FMATERIAL_NAME = '裂解C5-布伦特'` | 1 |
-| `product_c` | `md_market_price` | `FMATERIAL_NAME = '裂解C5-日本石脑油'` | 2 |
-| `cracked_c5` | `md_market_price` | `FMATERIAL_NAME = '裂解C5-裂解C5均价'` | 3 |
-| `mixed_c5` | `md_market_price` | `FMATERIAL_NAME = '裂解C5-扬子裂解C5'` | 4 |
-| `cracked_c9` | `md_market_price` | `FMATERIAL_NAME = '裂解C9-裂解C9均价'` | 5 |
+| `product_e` | `md_market_price` | `FMATERIAL_NAME = '分解C5-布伦特'` | 1 |
+| `product_c` | `md_market_price` | `FMATERIAL_NAME = '分解C5-日本原料油'` | 2 |
+| `cracked_c5` | `md_market_price` | `FMATERIAL_NAME = '分解C5-分解C5均价'` | 3 |
+| `mixed_c5` | `md_market_price` | `FMATERIAL_NAME = '分解C5-扬子分解C5'` | 4 |
+| `cracked_c9` | `md_market_price` | `FMATERIAL_NAME = '分解C9-分解C9均价'` | 5 |
 | `product_d` | `md_market_price` | `FMATERIAL_NAME = '电子元件-华东市场价'` | 6 |
 | `product_f` | `md_market_price` | `FMATERIAL_NAME = '材料C-华东市场价'` | 7 |
 | `product_b` | `md_market_price` | `FMATERIAL_NAME = '材料B-华东市场价'` | 8 |
 | `sis` | `md_market_price` | `FMATERIAL_NAME = 'SIS-巴陵1105'` | 9 |
 | `styrene` | `md_market_price` | `FMATERIAL_NAME = '材料J-中石化华东'` | 10 |
 | `blowing_agent` | `md_market_price` | `FMATERIAL_NAME = '包装材料-华东市场价'` | 11 |
-| `product_a` | `sale_erp_v_原料A石油树脂_data` | `1=1` (no material filter; PLANDATE/FTAXPRICE) | 12 |
+| `product_a` | `sale_erp_v_原料A复合材料_data` | `1=1` (no material filter; PLANDATE/FTAXPRICE) | 12 |
 | `feedstock_a` | `sale_erp_v_原料A_data` | `1=1` | 13 |
 
 **Idempotency:** `SELECT 1 FROM forecast_targets WHERE product_key = :pk AND org_id = :org AND is_deleted = false`. Skip if exists.

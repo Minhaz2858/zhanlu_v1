@@ -844,7 +844,7 @@ BUILTIN_AGENTS: list[AgentDefinition] = [
             # a product price next week?" without a target_id lookup or KB
             # binding — the nightly scheduler pre-computes from the external MySQL.
             "forecast_brief",
-            # What-if scenario simulation: "what if brent rises 5%?"
+            # What-if scenario simulation: "what if benchmark_a rises 5%?"
             # Causal-chain elasticity math shared with the dashboard.
             "forecast_what_if",
         ],

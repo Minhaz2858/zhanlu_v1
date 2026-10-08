@@ -1,7 +1,7 @@
 # Benchmark A-Oil Real-Time Data Fix — Verification Report
 
 **Date:** 2026-07-23
-**User-reported issue:** "give me today brent oil price" → "I'm sorry, but I cannot provide real-time data such as today's Benchmark A oil price. Please check a financial news website or use a dedicated data service for the latest prices."
+**User-reported issue:** "give me today benchmark_a oil price" → "I'm sorry, but I cannot provide real-time data such as today's Benchmark A oil price. Please check a financial news website or use a dedicated data service for the latest prices."
 
 ## TL;DR
 
@@ -24,7 +24,7 @@ r"\b(collect|fetch|search|find|lookup|...)\b.*\b(news|article|update|...|online|
 The user's actual scenarios broke these patterns:
 1. **"I cannot provide real-time data"** — "provide" wasn't in the verb list
 2. **"I cannot give you today's price"** — "give" wasn't in the verb list
-3. **"give me today brent oil price"** — "give me" wasn't an online-research verb, and "brent oil price" doesn't contain "news" / "article" / "online"
+3. **"give me today benchmark_a oil price"** — "give me" wasn't an online-research verb, and "benchmark_a oil price" doesn't contain "news" / "article" / "online"
 
 ## The Fix
 
@@ -34,7 +34,7 @@ The user's actual scenarios broke these patterns:
 |---|---|---|
 | 1 | Explicit research verbs + online object | "collect news from website" |
 | 2 | Explicit "search the web" / "look it up online" | "look it up online" |
-| 3 | "give me / show me / what's X" + temporal | "give me today brent oil price" |
+| 3 | "give me / show me / what's X" + temporal | "give me today benchmark_a oil price" |
 | 4 | "[topic] today/now" | "price of bitcoin today" |
 | 5 | "live/real-time/current" + topic | "show me the live score" |
 
@@ -74,7 +74,7 @@ PASS: 14/14
 
 ### User message cases (all MUST match)
 ```
-✓ give me today brent oil price          (the user's exact message)
+✓ give me today benchmark_a oil price          (the user's exact message)
 ✓ what is the current Apple stock price
 ✓ show me the latest weather in Tokyo
 ✓ what's bitcoin price today
@@ -134,10 +134,10 @@ tests/test_result_block_processor.py ....... 6  ✓  (existing — preserved)
 1. Push the local changes to your git remote.
 2. Pull the changes on the `zhanlui.ai:8000` server.
 3. Restart the backend service on that server.
-4. Re-test the user's exact message: "give me today brent oil price"
+4. Re-test the user's exact message: "give me today benchmark_a oil price"
 5. Expected: the agent now auto-runs `web_search` and returns real Benchmark A oil price with source links.
 
-If the LLM still refuses despite the system prompt strengthening, the self-healing guardrail auto-runs `web_search(query="brent oil price today")` and appends the results.
+If the LLM still refuses despite the system prompt strengthening, the self-healing guardrail auto-runs `web_search(query="benchmark_a oil price today")` and appends the results.
 
 ## Files Changed
 

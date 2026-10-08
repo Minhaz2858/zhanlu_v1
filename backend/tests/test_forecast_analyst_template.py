@@ -6,7 +6,7 @@ from tests.test_forecast_analyst_pack import _explanation, _history
 
 def _product_b_pack():
     return build_pack(
-        product_id="product_b", name_zh="双环戊二烯", day=7,
+        product_id="product_b", name_zh="材料B", day=7,
         history_rows=_history(start=7000.0, step=-0.8),
         upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)},
         run_results={"7": {"base": [6660.0, 6650.0], "bull": [6900.0, 6950.0], "bear": [6400.0, 6350.0]}},
@@ -27,7 +27,7 @@ def test_brief_schema_and_source():
 
 def test_brief_upstream_names_elasticity():
     b = render_template_brief(_product_b_pack())
-    assert "裂解碳五" in b["upstream_logic_zh"]        # upstream named
+    assert "原料A" in b["upstream_logic_zh"]        # upstream named
     assert "弹性" in b["upstream_logic_zh"]            # elasticity mentioned
 
 
@@ -56,7 +56,7 @@ def test_brief_watch_triggers_actionable():
     b = render_template_brief(_product_b_pack())
     joined = "。".join(b["watch_triggers_zh"])
     assert "55%" in joined                        # accuracy recovery trigger
-    assert "裂解碳五" in joined or "上游" in joined  # upstream stabilization trigger
+    assert "原料A" in joined or "上游" in joined  # upstream stabilization trigger
 
 
 def test_brief_zero_intel_risk_note():
@@ -86,7 +86,7 @@ def test_brief_buy_case():
 
 def test_brief_missing_data_degrades():
     pack = build_pack(
-        product_id="product_b", name_zh="双环戊二烯", day=7,
+        product_id="product_b", name_zh="材料B", day=7,
         history_rows=[], upstream_histories={},
         run_results={}, model_detail=None, explanation={}, as_of_month=8,
     )
@@ -111,7 +111,7 @@ def test_brief_upstream_uses_macro_supply_demand():
     # product_c has a parent (product_e) but is upstream → macro supply/demand,
     # NOT the ERP-demand seasonal section.
     b = render_template_brief(_upstream_pack(
-        "product_c", "石脑油", {"product_e": _history(start=5000.0, step=1.0)}))
+        "product_c", "原料油", {"product_e": _history(start=5000.0, step=1.0)}))
     assert b["supply_demand_zh"].startswith("宏观供需")
     assert "传统需求旺季" not in b["supply_demand_zh"]
 
@@ -128,7 +128,7 @@ def test_brief_downstream_keeps_erp_supply_demand():
     # downstream (product_a) still uses the seasonal ERP-demand section, not the
     # upstream macro section. (product_a has a month-8 seasonal rule → 旺季.)
     b = render_template_brief(build_pack(
-        product_id="product_a", name_zh="C5石油树脂", day=7,
+        product_id="product_a", name_zh="C5复合材料", day=7,
         history_rows=_history(start=12000.0, step=2.0),
         upstream_histories={"cracked_c5": _history(start=5800.0, step=1.0)},
         run_results={"7": {"base": [12500.0, 12600.0], "bull": [12900.0, 13100.0], "bear": [12100.0, 12000.0]}},

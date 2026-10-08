@@ -19,7 +19,7 @@ def test_payload_slides_are_preserved_through_model_validation():
     raw = {
         "title": "C5/C9 Market Insight",
         "slides": [
-            {"title": "C5/C9 裂解产品市场洞察报告", "subtitle": "数据驱动", "bullets": ["a"]},
+            {"title": "C5/C9 分解产品市场洞察报告", "subtitle": "数据驱动", "bullets": ["a"]},
             {"title": "执行摘要", "bullets": ["x", "y"], "layout": "executive_brief"},
             {"title": "战略建议", "bullets": ["z"], "layout": "recommendations"},
         ],
@@ -46,9 +46,9 @@ def test_slides_plan_renders_agent_structure_not_generic_filler():
             },
         },
         "slides": [
-            {"title": "C5/C9 裂解产品市场洞察报告", "subtitle": "数据驱动的产品线分析", "bullets": ["覆盖主体：示例工厂"]},
+            {"title": "C5/C9 分解产品市场洞察报告", "subtitle": "数据驱动的产品线分析", "bullets": ["覆盖主体：示例工厂"]},
             {"title": "执行摘要", "bullets": ["2026年8月合同销售额 ¥1.52亿，环比下降 9.7%"], "layout": "executive_brief"},
-            {"title": "产品线结构分析", "bullets": ["碳五石油树脂 ¥20.25亿"], "layout": "data_table"},
+            {"title": "产品线结构分析", "bullets": ["原料A复合材料 ¥20.25亿"], "layout": "data_table"},
             {"title": "月度趋势与波动", "bullets": ["3月–4月需求旺盛"], "layout": "chart_full"},
             {"title": "战略建议", "bullets": ["深挖高附加值产品"], "layout": "recommendations"},
             {"title": "结论", "bullets": ["产品线整体健康"], "layout": "closing"},
@@ -61,7 +61,7 @@ def test_slides_plan_renders_agent_structure_not_generic_filler():
     titles = [s.title for s in plan.slides]
     # The agent's authored titles — NOT "Notes" / "Key Metrics" filler.
     assert titles == [
-        "C5/C9 裂解产品市场洞察报告",
+        "C5/C9 分解产品市场洞察报告",
         "执行摘要",
         "产品线结构分析",
         "月度趋势与波动",
@@ -198,7 +198,7 @@ def test_sample_payload_roundtrip_keeps_consulting_structure():
     from app.services.synexia.contracts import ReportCardPayload
 
     raw = {
-        "title": "C5/C9 裂解产品市场洞察报告",
+        "title": "C5/C9 分解产品市场洞察报告",
         "summary": "2026年8月实现合同销售额 ¥1.52亿",
         "chart": {
             "title": "C5/C9 月度合同销售额与量 (2026.03–08)",
@@ -210,13 +210,13 @@ def test_sample_payload_roundtrip_keeps_consulting_structure():
             },
         },
         "slides": [
-            {"title": "C5/C9 裂解产品市场洞察报告", "subtitle": "数据驱动的产品线分析与战略建议",
+            {"title": "C5/C9 分解产品市场洞察报告", "subtitle": "数据驱动的产品线分析与战略建议",
              "bullets": ["数据来源：ERP 销售订单", "覆盖主体：示例工厂"]},
             {"title": "执行摘要", "bullets": ["2026年8月 C5/C9 产品线实现合同销售额 ¥1.52亿"], "layout": "executive_brief"},
-            {"title": "产品线结构分析", "bullets": ["碳五石油树脂 ¥20.25亿 第一大类"], "layout": "data_table"},
+            {"title": "产品线结构分析", "bullets": ["原料A复合材料 ¥20.25亿 第一大类"], "layout": "data_table"},
             {"title": "月度趋势与波动", "bullets": ["3月–4月为上半年高点"], "layout": "chart_full"},
             {"title": "组织贡献分析", "bullets": ["示例工厂 89.9%"], "layout": "kpi_grid"},
-            {"title": "战略建议", "bullets": ["优先级1 — 深挖碳五石油树脂"], "layout": "recommendations"},
+            {"title": "战略建议", "bullets": ["优先级1 — 深挖原料A复合材料"], "layout": "recommendations"},
             {"title": "结论", "bullets": ["C5/C9 产品线整体健康"], "layout": "closing"},
         ],
     }
@@ -226,7 +226,7 @@ def test_sample_payload_roundtrip_keeps_consulting_structure():
     assert plan is not None
     assert len(plan.slides) == 7
     assert [s.title for s in plan.slides] == [
-        "C5/C9 裂解产品市场洞察报告",
+        "C5/C9 分解产品市场洞察报告",
         "执行摘要",
         "产品线结构分析",
         "月度趋势与波动",

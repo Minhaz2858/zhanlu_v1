@@ -35,3 +35,26 @@ c5c9-daily-sales
 c5c9-live-market-reference
 sales-perf-dashboard-c5c9
 sales-performance-c5c9
+
+# Extended vertical scope (must match the substitution map)
+双环戊二烯
+间戊二烯
+戊二烯
+异戊烷
+正戊烷
+环戊烷
+甲基四氢苯酐
+混三甲苯
+苯乙烯
+抽余碳五
+裂解
+碳五
+碳九
+石油树脂
+石脑油
+乙烯
+raffinate
+piperylene
+Raffinate
+Piperylene
+Brent

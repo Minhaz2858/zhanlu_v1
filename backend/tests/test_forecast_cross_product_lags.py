@@ -72,7 +72,7 @@ class TestCrossProductLagFeatures:
         spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
         upstream = {
             "product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index),
-            "brent": pd.Series(np.random.uniform(60, 90, 30), index=y.index),
+            "benchmark_a": pd.Series(np.random.uniform(60, 90, 30), index=y.index),
         }
 
         result = build_features(
@@ -83,7 +83,7 @@ class TestCrossProductLagFeatures:
             cross_product_lags_enabled=True,
         )
         assert "upstream_product_c_lag1" in result.feature_names
-        assert "upstream_brent_lag1" in result.feature_names
+        assert "upstream_benchmark_a_lag1" in result.feature_names
 
     def test_lag_values_are_shifted(self):
         """Lag values should be from previous days, not current day."""

@@ -25,7 +25,7 @@ The what-if math already exists in the backend (`GET /forecast-ops/what-if/{prod
 ```
                      ┌────────────────────────────────────────────┐
                      │        compute_what_if(product_key,        │
-                     │          brent_delta_pct, product_c_delta_pct,│
+                     │          benchmark_a_delta_pct, product_c_delta_pct,│
                      │          db)  ← NEW pure function          │
                      └───────────────▲────────────┬───────────────┘
                                      │            │
@@ -43,7 +43,7 @@ The what-if math already exists in the backend (`GET /forecast-ops/what-if/{prod
                           (forecast_agent, acme_bi_assistant, general_assistant)
 ```
 
-- **Helper extraction**: the body of `forecast_ops.py:get_what_if_simulation` (lines 710–792) moves into a pure function `compute_what_if(product_key, brent_delta_pct, product_c_delta_pct, db)`. The router endpoint remains (still useful for dashboards/tests) but delegates to it.
+- **Helper extraction**: the body of `forecast_ops.py:get_what_if_simulation` (lines 710–792) moves into a pure function `compute_what_if(product_key, benchmark_a_delta_pct, product_c_delta_pct, db)`. The router endpoint remains (still useful for dashboards/tests) but delegates to it.
 - **New tool**: `forecast_what_if` in `backend/app/services/tool_handlers/forecast_tool.py`.
 - **Product resolution**: the tool accepts `product_id` (dashboard product family, e.g. `product_a`) — consistent with `forecast_get` / `forecast_run`. Internally it resolves to the **headline SKU**: the first active `ForecastTarget` row for that family ordered by `report_order.asc()` with `is_deleted=False` and matching `org_id` — the same selection used by `forecast_list_skus` (`forecast_tool.py:394-398`). Its `product_key` (format `acme.<product_id>.<material_code>`) is then passed to `compute_what_if`.
 - **No artifact, no chart** — the tool returns a plain dict; the agent narrates it as a short paragraph + markdown table.
@@ -62,14 +62,14 @@ The what-if math already exists in the backend (`GET /forecast-ops/what-if/{prod
 ### 4.1 Schema (`FORECAST_WHAT_IF_SCHEMA`)
 
 ```
-forecast_what_if(product_id, brent_delta_pct=0, product_c_delta_pct=0)
+forecast_what_if(product_id, benchmark_a_delta_pct=0, product_c_delta_pct=0)
 
   product_id        str   required  — dashboard product family ('product_a', 'feedstock_a', 'product_b', ...)
-  brent_delta_pct   float optional — Benchmark A price shock in percent (10 = +10%); default 0
+  benchmark_a_delta_pct   float optional — Benchmark A price shock in percent (10 = +10%); default 0
   product_c_delta_pct float optional — Product_C price shock in percent (-3 = -3%); default 0
 ```
 
-Rule: **at least one delta must be non-zero**; otherwise the tool returns `{success: False, error: "specify at least one price shock (brent_delta_pct or product_c_delta_pct)"}`.
+Rule: **at least one delta must be non-zero**; otherwise the tool returns `{success: False, error: "specify at least one price shock (benchmark_a_delta_pct or product_c_delta_pct)"}`.
 
 ### 4.2 Return shape (text + table, no artifact)
 
@@ -82,7 +82,7 @@ Rule: **at least one delta must be non-zero**; otherwise the tool returns `{succ
   "adjusted_forecast":  [a0, a1, ..., a6],
   "total_impact_pct": 2.34,
   "drivers": [
-    {"driver": "brent",   "delta_pct": 10.0, "impact_pct": 1.80, "note": "Benchmark A +10% -> product_c +8% -> +1.80%"},
+    {"driver": "benchmark_a",   "delta_pct": 10.0, "impact_pct": 1.80, "note": "Benchmark A +10% -> product_c +8% -> +1.80%"},
     {"driver": "product_c", "delta_pct": 0.0,  "impact_pct": 0.00, "note": "no shock"}
   ],
   "horizon_table": [      # ready for the agent to render as a markdown table
@@ -99,7 +99,7 @@ The agent formats `narration_hint` + `horizon_table` into a short paragraph and 
 ## 5. Math Contract (kept as-is from the router)
 
 - `compute_domain_signal_adjustment(product_id, as_of_date, product_c_pct_change)` from `app.services.forecasting.domain_signals` returns a dict containing a `causal_pct` key — the per-driver impact. The what-if math uses this.
-- **Benchmark A is a 0.8-elasticity proxy to product_c** (existing simplification in `forecast_ops.py:763-778`): a Benchmark A shock is converted to a product_c-equivalent shock (`product_c_eff = brent_delta_pct * 0.8 + product_c_delta_pct`) before applying the domain-signal adjustment. **This is kept as-is; not extended in this task.**
+- **Benchmark A is a 0.8-elasticity proxy to product_c** (existing simplification in `forecast_ops.py:763-778`): a Benchmark A shock is converted to a product_c-equivalent shock (`product_c_eff = benchmark_a_delta_pct * 0.8 + product_c_delta_pct`) before applying the domain-signal adjustment. **This is kept as-is; not extended in this task.**
 - The total impact is applied to the day-7 base forecast, and the horizon table (`day 1..7`) shows base vs adjusted per horizon. The horizon conventions must match `format_run_answer` / `select_headline_day` from `app.services.forecasting.answer_format` for parity with the dashboard and the existing `forecast_get`/`forecast_run` tools.
 
 ## 6. Wiring
@@ -116,7 +116,7 @@ The agent formats `narration_hint` + `horizon_table` into a short paragraph and 
 ### 6.1 System prompt text (forecast_agent)
 
 ```
-- forecast_what_if(product_id, brent_delta_pct, product_c_delta_pct): simulate a forecast under
+- forecast_what_if(product_id, benchmark_a_delta_pct, product_c_delta_pct): simulate a forecast under
   upstream price shocks (Benchmark A, Product_C) and return base vs adjusted forecast per horizon.
   Call this for "what if ..." / "如果...涨...%会怎样" questions about price scenarios.
   Resolve product_id from conversation context, or ask the user which product.
@@ -135,7 +135,7 @@ The agent formats `narration_hint` + `horizon_table` into a short paragraph and 
 |---|---|
 | `frontend/src/pages/MarketDashboard/MarketDashboardPage.jsx:17` | Remove `import WhatIfPanel from './components/WhatIfPanel';` |
 | `frontend/src/pages/MarketDashboard/MarketDashboardPage.jsx:203` | Remove the `<WhatIfPanel productKey={selectedProductId} lang={lang} />` JSX block. The sidebar slot collapses; existing `BacktestReplayChart` / `DriverWaterfallChart` stay untouched. |
-| `frontend/src/api/marketDashboard.js:118-119` | Remove the `whatIf: (productKey, brentDelta, product_cDelta) => getJson(...)` method. |
+| `frontend/src/api/marketDashboard.js:118-119` | Remove the `whatIf: (productKey, benchmark_aDelta, product_cDelta) => getJson(...)` method. |
 | `frontend/src/api/marketDashboard.js:125` | Remove `export const getWhatIf = marketDashboardApi.whatIf;` (verified: only used by the panel). |
 | `frontend/src/pages/MarketDashboard/components/WhatIfPanel.jsx` | **Delete the file.** |
 
@@ -147,7 +147,7 @@ Note: `getWhatIf` was verified this session as referenced only by `WhatIfPanel.j
 |---|---|
 | No active SKU target for `product_id` | `{success: False, error: "no forecast target for '<product_id>'"}` |
 | No latest forecast run | Mirror the router's existing "No forecast available for simulation" message. |
-| Both deltas are 0 | `{success: False, error: "specify at least one price shock (brent_delta_pct or product_c_delta_pct)"}` |
+| Both deltas are 0 | `{success: False, error: "specify at least one price shock (benchmark_a_delta_pct or product_c_delta_pct)"}` |
 | `compute_domain_signal_adjustment` raises | Caught + logged; return `{success: False, error: "simulation failed: <exc>"}` |
 | Forecast module fails to import (missing xgboost/statsmodels) | Tool not registered (invisible to agents) — existing dependency-guard behavior, no extra handling needed. |
 

@@ -201,7 +201,7 @@ def _build_default_skills_block() -> str:
 "- `panels` (typed AI-analysis, narrate ONLY from data you actually queried — compute figures via execute_query / profile_data / metric deltas, NEVER invent):\n"
 "  • alerts — severity rail (crit|warn|opp|info); EVERY alert body = data → why it matters → recommended action; add cta + time. \"电子元件报价超市场 3.1% — 正在流失现货询盘\" with body explaining cost baseline shift, competitor prices, and the exact suggested price, cta \"批准调价 →\", time \"2 h前\".\n"
 "  • decisions — approval cards with tag, product+action, reasoning, quantified P&L impact badge (pnl: \"维持现价损失风险：−¥8,000/周\"), buttons [批准, 调整, 延期].\n"
-"  • chain — cost/value cascade (布伦特 → 石脑油 → C5成本 → IP成本) with per-node value, delta, delta_tone, and P&L note.\n"
+"  • chain — cost/value cascade (布伦特 → 原料油 → C5成本 → IP成本) with per-node value, delta, delta_tone, and P&L note.\n"
 "  • narrative — long-form AI 综合研判 block (market context + trend reading + action).\n"
 "  • customers — account-health rows (avatar, name, sub, revenue, status, status_tone).\n"
 "  • inventory — coverage bars (label, weeks, max, tone; <2 red, <3 amber, else green).\n"
@@ -731,7 +731,7 @@ authoring:
      size & growth, price levels/trends, key players & market structure,
      recent news / policy / capacity changes. Search in BOTH English and
      Chinese when the topic is China-relevant (e.g. "C5 C9 petroleum
-     resin market size 2026" AND "裂解原料A 石油树脂 市场 价格 2026").
+     resin market size 2026" AND "分解原料A 复合材料 市场 价格 2026").
   2. EXTRACT — for the 2-3 most authoritative results (industry reports,
      exchanges, news agencies, 生意社/百川盈孚-class price trackers),
      call ``web_extract`` to pull CONCRETE figures (market size, growth
@@ -1852,7 +1852,7 @@ ONLINE_RESEARCH_PATTERN = re.compile(
     r"on\s+(the\s+)?(web|internet|online))"
     # Sub-pattern 3: "give me X today" / "show me X now" / "what's X
     # right now" — broader than the verb+object form, catches the
-    # user's "give me today brent oil price" and similar.
+    # user's "give me today benchmark_a oil price" and similar.
     r"|\b("
     r"give\s+me|show\s+me|tell\s+me|find\s+me|get\s+me|"
     r"what'?s|what\s+is|what\s+are|how'?s|how\s+is"
@@ -1870,7 +1870,7 @@ ONLINE_RESEARCH_PATTERN = re.compile(
     r"stock|stocks|equity|equities|share|shares|"
     r"index|indices|fund|funds|etf|etfs|"
     r"crypto|bitcoin|ethereum|coin|coins|token|tokens|"
-    r"oil|gas|gold|silver|brent|wti|commodity|commodities|"
+    r"oil|gas|gold|silver|benchmark_a|wti|commodity|commodities|"
     r"news|headline|headlines|tweet|tweets|"
     r"traffic|delay|status|"
     r"game|match|fixture|"
@@ -1892,7 +1892,7 @@ ONLINE_RESEARCH_PATTERN = re.compile(
     r"stock|stocks|equity|equities|share|shares|"
     r"index|indices|fund|funds|etf|etfs|"
     r"crypto|bitcoin|ethereum|coin|coins|token|tokens|"
-    r"oil|gas|gold|silver|brent|wti|commodity|commodities|"
+    r"oil|gas|gold|silver|benchmark_a|wti|commodity|commodities|"
     r"news|headline|headlines|tweet|tweets|"
     r"data|feeds?|update|updates|results|"
     r"market|markets"
@@ -1970,7 +1970,7 @@ WEB_BROWSE_REFUSAL_PATTERN = re.compile(
     r"(?:"  # The refusal always ends with one of these real-time/external phrases
     r"real\s*-?\s*time|live\s+data|external\s+(?:api|service|data|site|web)|"
     r"current\s+(?:price|prices|data|news|weather|score|market|exchange|rate|value|trend|trends)|"
-    r"today'?s\s+(?:price|prices|data|news|weather|score|market|exchange|rate|brent|stock|stocks|bitcoin|oil|gas|gold|value)|"
+    r"today'?s\s+(?:price|prices|data|news|weather|score|market|exchange|rate|benchmark_a|stock|stocks|bitcoin|oil|gas|gold|value)|"
     r"the\s+current\s+(?:price|prices|data|news|weather|score|market|exchange|rate|value|trend|trends)|"
     r"the\s+latest\s+(?:price|prices|data|news|weather|score|market|exchange|rate|value|trend|trends|update|updates)|"
     r"the\s+latest\s+"

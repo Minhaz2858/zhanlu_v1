@@ -513,7 +513,7 @@ def test_inject_entity_masters_appends_map(monkeypatch):
                     "entity_type": "product",
                     "filter_columns": ["FNAME"],
                     "category_column": "FNAME",
-                    "sample_categories": ["碳五石油树脂", "双环戊二烯"],
+                    "sample_categories": ["原料A复合材料", "材料B"],
                 },
             )
         ]

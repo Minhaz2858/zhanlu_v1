@@ -48,8 +48,8 @@ class TestQueryTerms:
 
     def test_pure_chinese_extracts_bigrams(self):
         # 单个汉字长度 < 2 不应包含；连续 CJK 序列应提取 bigram
-        result = query_terms("乙烯价格")
-        assert "乙烯" in result
+        result = query_terms("材料丙价格")
+        assert "材料丙" in result
         assert "烯价" in result
         assert "价格" in result
 
@@ -95,8 +95,8 @@ class TestQueryTerms:
 
     def test_two_char_chinese_minimum(self):
         # Exactly 2 CJK chars → 1 bigram, no singletons
-        result = query_terms("乙烯")
-        assert "乙烯" in result
+        result = query_terms("材料丙")
+        assert "材料丙" in result
         assert "乙" not in result
         assert "烯" not in result
 

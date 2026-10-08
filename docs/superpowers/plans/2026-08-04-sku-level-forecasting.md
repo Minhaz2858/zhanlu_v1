@@ -27,7 +27,7 @@ Phase B is **independent of Phase A** — it can be executed before, after, or i
 - **Frontend:** Bind-mounted to nginx. After component changes: `cd /home/ysk2025/zhanlu_7_30/frontend && npm run build` (auto-rebuilds on save too).
 - **Alembic:** No new migration needed — SKU identity is encoded in existing `product_key` (VARCHAR 100) + `datasource` (JSON) columns. The unique constraint is `(product_key, org_id)`, and SKU keys like `acme.product_a.201000018` are unique within an org.
 - **Code style:** Follow existing patterns — `from __future__ import annotations`, dataclasses for result types, `TimestampedBase` for DB models, lazy imports for heavy deps, type hints everywhere.
-- **ERP tables:** `sale_erp_v_原料A石油树脂_data` (product_a) and `sale_erp_v_原料A_data` (feedstock_a). Columns: `PLANDATE` (date), `FTAXPRICE` (decimal), `material_code` (varchar, the SKU key), `material_name` (varchar, the product family). `FTAXPRICE > 0` filter is required to exclude cancelled/reversed entries.
+- **ERP tables:** `sale_erp_v_原料A复合材料_data` (product_a) and `sale_erp_v_原料A_data` (feedstock_a). Columns: `PLANDATE` (date), `FTAXPRICE` (decimal), `material_code` (varchar, the SKU key), `material_name` (varchar, the product family). `FTAXPRICE > 0` filter is required to exclude cancelled/reversed entries.
 - **md_market_price tables:** Already keyed by `FMATERIAL_NAME` (one series per product). The `groupby` aggregation is a no-op here because duplicate dates have identical prices. ERP tables have multiple order entries per date with different prices — `groupby` averages them into a daily mean price.
 - **Minimum SKU history:** 50 rows. SKUs with fewer than 50 rows are skipped (insufficient for forecasting).
 - **Primary SKU selection:** Highest row count (= highest transaction volume) gets `report_order` = the family's original value (12 for both product_a and feedstock_a). Secondary SKUs get `report_order` 13, 14, 15, ... in descending volume order.
@@ -133,10 +133,10 @@ def test_groupby_averages_duplicate_dates():
 def test_groupby_noop_when_dates_already_unique():
     """md_market_price has duplicate dates with identical prices — avg is a no-op."""
     rows = [
-        ("2026-07-01", 5500.0, "裂解C5-裂解C5均价"),
-        ("2026-07-01", 5500.0, "裂解C5-裂解C5均价"),  # triplicate, same price
-        ("2026-07-01", 5500.0, "裂解C5-裂解C5均价"),
-        ("2026-07-02", 5600.0, "裂解C5-裂解C5均价"),
+        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),
+        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),  # triplicate, same price
+        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),
+        ("2026-07-02", 5600.0, "分解C5-分解C5均价"),
     ]
     eng = _make_mock_engine_with_duplicates(rows)
     src = EdiaMysqlDataSource(engine=eng)
@@ -145,7 +145,7 @@ def test_groupby_noop_when_dates_already_unique():
         "table": "erp_test",
         "time_col": "PLANDATE",
         "measure": "FTAXPRICE",
-        "where": "material_code = '裂解C5-裂解C5均价'",
+        "where": "material_code = '分解C5-分解C5均价'",
         "granularity": "day",
     })
     # Identical prices → avg = same value → no-op
@@ -272,19 +272,19 @@ def db_session():
 
 
 def _make_mock_erp_engine(rows: list[tuple]) -> object:
-    """Build an in-memory SQLite engine simulating sale_erp_v_原料A石油树脂_data.
+    """Build an in-memory SQLite engine simulating sale_erp_v_原料A复合材料_data.
 
     Each row is (material_code, plandate, ftaxprice).
     """
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE sale_erp_v_原料A石油树脂_data "
+            "CREATE TABLE sale_erp_v_原料A复合材料_data "
             "(material_code TEXT, PLANDATE TEXT, FTAXPRICE REAL)"
         ))
         for code, dt, price in rows:
             conn.execute(text(
-                "INSERT INTO sale_erp_v_原料A石油树脂_data "
+                "INSERT INTO sale_erp_v_原料A复合材料_data "
                 "(material_code, PLANDATE, FTAXPRICE) VALUES (:c, :d, :p)"
             ), {"c": code, "d": dt, "p": price})
         conn.commit()
@@ -411,7 +411,7 @@ def test_discover_skus_handles_both_erp_products(db_session):
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE sale_erp_v_原料A石油树脂_data "
+            "CREATE TABLE sale_erp_v_原料A复合材料_data "
             "(material_code TEXT, PLANDATE TEXT, FTAXPRICE REAL)"
         ))
         conn.execute(text(
@@ -420,7 +420,7 @@ def test_discover_skus_handles_both_erp_products(db_session):
         ))
         for i in range(55):
             conn.execute(text(
-                "INSERT INTO sale_erp_v_原料A石油树脂_data VALUES (:c, :d, :p)"
+                "INSERT INTO sale_erp_v_原料A复合材料_data VALUES (:c, :d, :p)"
             ), {"c": "RESIN_1", "d": f"2025-01-{(i % 28) + 1:02d}", "p": 5000.0 + i})
         for i in range(55):
             conn.execute(text(
@@ -451,7 +451,7 @@ Expected: FAIL — `discover_and_seed_sku_targets` doesn't exist yet, and the st
 
 In `backend/app/services/forecasting/seed_acme_targets.py`:
 
-**3a.** Remove the 2 ERP entries from `FORECAST_TARGETS` (the last 2 entries, lines 166-195 — the ones with `"table": "sale_erp_v_原料A石油树脂_data"` and `"table": "sale_erp_v_原料A_data"`).
+**3a.** Remove the 2 ERP entries from `FORECAST_TARGETS` (the last 2 entries, lines 166-195 — the ones with `"table": "sale_erp_v_原料A复合材料_data"` and `"table": "sale_erp_v_原料A_data"`).
 
 **3b.** Add the `discover_and_seed_sku_targets` function at the bottom of the file, before the `seed_acme_forecast_targets` function's closing:
 
@@ -461,7 +461,7 @@ In `backend/app/services/forecasting/seed_acme_targets.py`:
 # The seeder queries SELECT DISTINCT material_code from these tables
 # and creates one ForecastTarget per SKU (material_code) with >= 50 rows.
 _ERP_PRODUCT_TABLES: dict[str, str] = {
-    "product_a":     "sale_erp_v_原料A石油树脂_data",
+    "product_a":     "sale_erp_v_原料A复合材料_data",
     "feedstock_a": "sale_erp_v_原料A_data",
 }
 
@@ -871,7 +871,7 @@ def test_no_sku_forecasts_for_md_lz_products(db_session):
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '裂解C5-布伦特'",
+            "where": "FMATERIAL_NAME = '分解C5-布伦特'",
             "granularity": "day",
         },
         level=2,

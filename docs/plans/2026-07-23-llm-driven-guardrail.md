@@ -59,12 +59,12 @@ Per the user's explicit feedback, I replaced the brittle keyword-based intent de
 
 ### Old (keyword-based)
 - `ONLINE_RESEARCH_PATTERN` had 5 sub-patterns covering ~30 keywords
-- Missed "give me today brent oil price" (no "search/find" verb)
+- Missed "give me today benchmark_a oil price" (no "search/find" verb)
 - Missed "I cannot provide real-time data" ("provide" not in verb list)
 - Required constant maintenance as the LLM found new refusal phrasings
 
 ### New (LLM-driven)
-- The LLM understands **semantic intent** — "give me today brent oil price" is obviously a real-time data request
+- The LLM understands **semantic intent** — "give me today benchmark_a oil price" is obviously a real-time data request
 - The LLM understands **refusal context** — "I cannot provide real-time data" is obviously a refusal
 - The LLM **suggests the corrective action** — not just "call web_search" but "call web_search with this query, or call web_extract on this URL, or call ask_data_agent on this table"
 - The LLM is the source of truth; the keyword patterns are a **fast pre-filter** for the happy path
@@ -105,7 +105,7 @@ tests/test_result_block_processor.py ..... 6  ✓  (preserved)
 
 | User message | LLM intent | LLM refusal | Regex fallback | Action |
 |---|---|---|---|---|
-| "give me today brent oil price" | research / web_search | detects "I cannot provide real-time data" | (regex matches) | auto-runs web_search, appends results |
+| "give me today benchmark_a oil price" | research / web_search | detects "I cannot provide real-time data" | (regex matches) | auto-runs web_search, appends results |
 | "look up the latest AI news online" | research / web_search | detects refusal | (regex matches) | auto-runs web_search |
 | "what is the capital of France" | chitchat | not refused | (no match) | no action |
 | "I went to the store yesterday" | unclassified | not refused | (no match) | no action |
@@ -116,7 +116,7 @@ tests/test_result_block_processor.py ..... 6  ✓  (preserved)
 
 1. Pull the new code (`git pull` on the live server).
 2. Restart the backend service.
-3. Test the user's exact message: "give me today brent oil price"
+3. Test the user's exact message: "give me today benchmark_a oil price"
 4. Expected behavior:
    - LLM-based intent classifier runs (≤200ms)
    - Main LLM generates response

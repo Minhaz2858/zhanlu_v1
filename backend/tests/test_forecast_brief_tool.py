@@ -6,7 +6,7 @@ from app.services.forecasting.analyst import service as analyst_service
 
 
 def test_forecast_brief_success(monkeypatch):
-    brief = {"market_update_zh": "双环戊二烯市场情报中性。",
+    brief = {"market_update_zh": "材料B市场情报中性。",
              "price_data_zh": "现价 6,940 元/吨。",
              "upstream_logic_zh": "上游下跌。", "supply_demand_zh": "供需平稳。",
              "forecast_zh": "预计走弱。",
@@ -16,7 +16,7 @@ def test_forecast_brief_success(monkeypatch):
     out = asyncio.run(forecast_tool._forecast_brief(
         {"product_id": "product_b", "day": 7}, db=None, user_id=None, context=None))
     assert out["success"] is True
-    assert out["brief"]["market_update_zh"].startswith("双环戊二烯")
+    assert out["brief"]["market_update_zh"].startswith("材料B")
     assert out["brief"]["source"] == "template"
 
 

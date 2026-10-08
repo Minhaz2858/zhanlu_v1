@@ -13,7 +13,7 @@ from app.services.forecasting.forecast_trust_tier import (
 def test_high_skill_products_includes_known_set():
     """Products with documented ARIMA skill vs naive baseline."""
     assert "product_d" in _HIGH_SKILL_PRODUCTS
-    assert "piperylene" in _HIGH_SKILL_PRODUCTS
+    assert "product_f" in _HIGH_SKILL_PRODUCTS
     assert "product_a" in _HIGH_SKILL_PRODUCTS
     assert "product_b" in _HIGH_SKILL_PRODUCTS
 
@@ -23,7 +23,7 @@ def test_weekly_cadence_products_includes_known_set():
     assert "cracked_c9" in _WEEKLY_CADENCE_PRODUCTS
     assert "mixed_c9" in _WEEKLY_CADENCE_PRODUCTS
     assert "trimethylbenzene" in _WEEKLY_CADENCE_PRODUCTS
-    assert "raffinate_c5" in _WEEKLY_CADENCE_PRODUCTS
+    assert "feedstock_a" in _WEEKLY_CADENCE_PRODUCTS
 
 
 def test_high_tier_for_skilled_product_beating_naive():

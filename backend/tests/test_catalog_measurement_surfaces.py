@@ -209,7 +209,7 @@ def test_the_selector_line_carries_bounded_vocabulary():
         "table_name": "v_sale_order", "description": "销售订单明细",
         "row_count": 14589, "table_role": "fact",
         "sample_values": {
-            "material_name": ["混三甲苯", "碳五石油树脂", "双环戊二烯", "电子元件", "他"],
+            "material_name": ["材料H", "原料A复合材料", "材料B", "电子元件", "他"],
             "region": ["华东", "华南", "华北", "华中"],
             "status": ["paid", "pending"],
             "amount": ["1", "2"],
@@ -217,7 +217,7 @@ def test_the_selector_line_carries_bounded_vocabulary():
     })
     assert line.startswith("  v_sale_order"), "the name stays first"
     assert "values " in line
-    assert "混三甲苯" in line, "the customer's own words must reach the selector"
+    assert "材料H" in line, "the customer's own words must reach the selector"
     # bounded: 3 columns, 4 values each, 60 chars for the whole hint
     hint = next(p for p in line.split(", ") if p.startswith("values "))
     assert hint.count(":") <= 3
@@ -259,7 +259,7 @@ def test_the_compact_selector_line_carries_a_tighter_hint():
 def test_the_toc_carries_the_measured_vocabulary_from_the_catalog(db, monkeypatch):
     kb = _kb_row(db)
     meta = _table_row(db, kb, table_name="v_sale_order")
-    meta.sample_values = {"material_name": ["混三甲苯", "碳五石油树脂"]}
+    meta.sample_values = {"material_name": ["材料H", "原料A复合材料"]}
     db.commit()
 
     # Freshness probing would reach for the datasource; this test is about the
@@ -270,9 +270,9 @@ def test_the_toc_carries_the_measured_vocabulary_from_the_catalog(db, monkeypatc
 
     toc = sl.build_full_toc(db, [kb.id])
     assert toc and toc[0]["sample_values"] == {
-        "material_name": ["混三甲苯", "碳五石油树脂"]
+        "material_name": ["材料H", "原料A复合材料"]
     }
-    assert "混三甲苯" in sl._toc_line(toc[0])
+    assert "材料H" in sl._toc_line(toc[0])
 
 
 # ── 3. the embedded documents (retrieval targets) ──────────────────────────
@@ -386,7 +386,7 @@ def test_the_sql_author_sees_the_measurement_through_the_real_loader(db, monkeyp
             ordinal=2, data_type="varchar(64)", is_nullable=True,
             is_primary_key=False, description_zh="物料名称",
             semantic_type="dimension", stats_json=FULL_STATS,
-            enum_values=["混三甲苯", "碳五石油树脂"],
+            enum_values=["材料H", "原料A复合材料"],
         ),
         KBColumnMeta(
             id=str(uuid.uuid4()), table_meta_id=meta.id, column_name="unmeasured",
@@ -403,7 +403,7 @@ def test_the_sql_author_sees_the_measurement_through_the_real_loader(db, monkeyp
     # measured columns carry their figures…
     assert "FAMOUNT" in ddl and "实测(200 行抽样)" in ddl and "nulls 12%" in ddl
     assert "material_name" in ddl and "实测(全表)" in ddl
-    assert "values: 混三甲苯, 碳五石油树脂" in ddl, "the enum dictionary still renders"
+    assert "values: 材料H, 原料A复合材料" in ddl, "the enum dictionary still renders"
     # …an unmeasured column contributes no figure at all, not a zero
     unmeasured_line = next(
         line for line in ddl.splitlines() if "unmeasured" in line

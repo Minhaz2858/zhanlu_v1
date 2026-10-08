@@ -69,8 +69,8 @@ class TestOnlineResearchPattern:
         assert not ONLINE_RESEARCH_PATTERN.search("show me top customers last month")
 
     def test_matches_give_me_today_price(self):
-        """The user's actual scenario: 'give me today brent oil price'."""
-        assert ONLINE_RESEARCH_PATTERN.search("give me today brent oil price")
+        """The user's actual scenario: 'give me today benchmark_a oil price'."""
+        assert ONLINE_RESEARCH_PATTERN.search("give me today benchmark_a oil price")
 
     def test_matches_what_is_current(self):
         assert ONLINE_RESEARCH_PATTERN.search("what is the current Apple stock price")
@@ -126,7 +126,7 @@ class TestWebBrowseRefusalPattern:
     def test_matches_cannot_provide_real_time_data(self):
         """The user's actual scenario: 'I cannot provide real-time data'."""
         assert WEB_BROWSE_REFUSAL_PATTERN.search(
-            "I'm sorry, but I cannot provide real-time data such as today's Brent oil price."
+            "I'm sorry, but I cannot provide real-time data such as today's Benchmark A oil price."
         )
 
     def test_matches_cannot_give_today(self):

@@ -34,7 +34,7 @@ class TestSeedRecipesGeneric:
     """Seed recipes must contain NO domain-specific examples."""
 
     def test_no_domain_terms_in_seeds(self):
-        forbidden = ["C5", "C9", "ethylene", "product_c", "裂解", "乙烯", "石脑油"]
+        forbidden = ["C5", "C9", "ethylene", "product_c", "分解", "材料丙", "原料油"]
         for recipe in SEED_RECIPES:
             blob = str(recipe)
             for term in forbidden:

@@ -9,12 +9,12 @@ Replace the Market Dashboard **What-If Analysis sidebar panel** (sliders + Run S
 
 **Approved architecture:**
 - Extract the what-if math from `GET /forecast-ops/what-if/{product_key}` into a shared pure helper `compute_what_if(...)` that BOTH the router endpoint and the agent tool call (single source of truth, no drift).
-- New tool `forecast_what_if(product_id, brent_delta_pct=0, product_c_delta_pct=0)` → text + inline-table dict (no chart artifact, no `Artifact` DB write).
+- New tool `forecast_what_if(product_id, benchmark_a_delta_pct=0, product_c_delta_pct=0)` → text + inline-table dict (no chart artifact, no `Artifact` DB write).
 - Wire into 3 agents + intent planner; remove the frontend panel.
 
 ## Context & Key Facts (all verified this session)
 
-- What-if math body: `forecast_ops.py:710-792` inside `get_what_if_simulation` (endpoint at `:681`). Uses `compute_domain_signal_adjustment(product_id, as_of_date, product_c_pct_change)` from `app.services.forecasting.domain_signals` (returns `causal_pct`). Benchmark A is a 0.8-elasticity proxy to product_c (`product_c_eff = brent_delta_pct * 0.8 + product_c_delta_pct`) — **keep as-is**, do not extend.
+- What-if math body: `forecast_ops.py:710-792` inside `get_what_if_simulation` (endpoint at `:681`). Uses `compute_domain_signal_adjustment(product_id, as_of_date, product_c_pct_change)` from `app.services.forecasting.domain_signals` (returns `causal_pct`). Benchmark A is a 0.8-elasticity proxy to product_c (`product_c_eff = benchmark_a_delta_pct * 0.8 + product_c_delta_pct`) — **keep as-is**, do not extend.
 - Tool handler pattern to mirror: `_forecast_list_skus` (`forecast_tool.py:375-380`, `async def ... (args, db, user_id, context=None) -> dict`); headline-SKU selection mirrors `forecast_tool.py:394-398` (`product_key.like(f"acme.{product_id}.%")`, `org_id==`, `is_deleted==False`, `order_by(report_order.asc())`).
 - Tool schema/registration pattern to mirror: `FORECAST_BRIEF_SCHEMA` (`forecast_tool.py:1008-1031`) + registration tuple at `forecast_tool.py:1038-1102` (entries: `(name, schema, handler, enabled, description)`).
 - `_resolve_org_context(context)` returns `(org_id, _app_id)` — used by all forecast handlers.
@@ -44,7 +44,7 @@ Replace the Market Dashboard **What-If Analysis sidebar panel** (sliders + Run S
 - Modify: `backend/app/routers/forecast_ops.py:681-792`
 
 **Interfaces:**
-- New: `compute_what_if(product_key: str, brent_delta_pct: float, product_c_delta_pct: float, db) -> dict`
+- New: `compute_what_if(product_key: str, benchmark_a_delta_pct: float, product_c_delta_pct: float, db) -> dict`
   - Moves lines 710-792 verbatim (math is **kept as-is** per spec §5).
   - Returns the same shape the endpoint returns today: `{product_key, base_forecast, adjusted_forecast, total_impact_pct, adjustments}`.
   - Raises `LookupError("no forecast target for '<product_key>'")` when no `ForecastTarget` matches.
@@ -53,7 +53,7 @@ Replace the Market Dashboard **What-If Analysis sidebar panel** (sliders + Run S
 - [ ] **Step 1: Write the failing test** — Create `backend/tests/test_what_if_helper.py` (flat, mirrors repo convention):
   - `test_compute_what_if_returns_dict_shape` — fake `ForecastTarget` row + monkeypatch `app.services.forecasting.what_if.compute_domain_signal_adjustment` to return `{"causal_pct": 2.34}`; assert all 5 keys present + `total_impact_pct == 2.34`.
   - `test_compute_what_if_raises_lookup_error_when_target_missing` — no rows → `pytest.raises(LookupError)`.
-  - `test_compute_what_if_brent_proxy` — assert the helper calls `compute_domain_signal_adjustment` with `product_c_pct_change == brent*0.8 + product_c` (locks in the 0.8-elasticity proxy).
+  - `test_compute_what_if_benchmark_a_proxy` — assert the helper calls `compute_domain_signal_adjustment` with `product_c_pct_change == benchmark_a*0.8 + product_c` (locks in the 0.8-elasticity proxy).
 - [ ] **Step 2: Run — fails** (module `what_if.py` doesn't exist).
 - [ ] **Step 3: Create `backend/app/services/forecasting/what_if.py`** — move the 710-792 body into `compute_what_if`; replace the endpoint's inline `HTTPException(404, ...)` for missing target with `raise LookupError(...)`. Keep `compute_domain_signal_adjustment` import module-local.
 - [ ] **Step 4: Slim the endpoint in `forecast_ops.py`** — keep route decorator + param parsing; delegate to `compute_what_if`; wrap `LookupError` → `HTTPException(404, detail=str(exc))`. Remove now-unused local imports if safe.
@@ -69,16 +69,16 @@ Replace the Market Dashboard **What-If Analysis sidebar panel** (sliders + Run S
 - Modify: `backend/app/services/tool_handlers/forecast_tool.py`
 
 **Interfaces (per spec §4):**
-- Schema `FORECAST_WHAT_IF_SCHEMA` (mirror `FORECAST_BRIEF_SCHEMA` at `:1008-1031`): `product_id` (str, required), `brent_delta_pct` (float, default 0), `product_c_delta_pct` (float, default 0). Description: simulate a forecast under upstream price shocks (Benchmark A/Product_C) — use for "what if"/scenario questions.
+- Schema `FORECAST_WHAT_IF_SCHEMA` (mirror `FORECAST_BRIEF_SCHEMA` at `:1008-1031`): `product_id` (str, required), `benchmark_a_delta_pct` (float, default 0), `product_c_delta_pct` (float, default 0). Description: simulate a forecast under upstream price shocks (Benchmark A/Product_C) — use for "what if"/scenario questions.
 - Handler `async def _forecast_what_if(args, db, user_id, context=None) -> dict`:
   1. `product_id = (args.get("product_id") or "").strip().lower()`; empty → `{"success": False, "error": "no forecast target for '<product_id>'"}` (product_id empty → same message).
-  2. `brent_delta_pct = float(args.get("brent_delta_pct") or 0.0)`; `product_c_delta_pct = float(args.get("product_c_delta_pct") or 0.0)`; wrap `float()` in try → `{"success": False, "error": "simulation failed: <exc>"}`.
-  3. **Both deltas 0** → `{"success": False, "error": "specify at least one price shock (brent_delta_pct or product_c_delta_pct)"}` (spec §8).
+  2. `benchmark_a_delta_pct = float(args.get("benchmark_a_delta_pct") or 0.0)`; `product_c_delta_pct = float(args.get("product_c_delta_pct") or 0.0)`; wrap `float()` in try → `{"success": False, "error": "simulation failed: <exc>"}`.
+  3. **Both deltas 0** → `{"success": False, "error": "specify at least one price shock (benchmark_a_delta_pct or product_c_delta_pct)"}` (spec §8).
   4. `org_id, _ = _resolve_org_context(context)`.
   5. Headline SKU (mirror `:394-398`): `db.query(ForecastTarget).filter(product_key.like(f"acme.{product_id}.%"), org_id==org_id, is_deleted==False).order_by(report_order.asc()).first()`. None → `{"success": False, "error": "no forecast target for '<product_id>'"}`.
-  6. `try: result = compute_what_if(target.product_key, brent_delta_pct, product_c_delta_pct, db) except LookupError as e: → {"success": False, "error": str(e)} except Exception as e: log + {"success": False, "error": f"simulation failed: {e}"}` (spec §8).
+  6. `try: result = compute_what_if(target.product_key, benchmark_a_delta_pct, product_c_delta_pct, db) except LookupError as e: → {"success": False, "error": str(e)} except Exception as e: log + {"success": False, "error": f"simulation failed: {e}"}` (spec §8).
   7. If `result.get("adjusted_forecast")` empty → mirror router's `{"success": False, "error": "No forecast available for simulation"}`.
-  8. Build spec §4.2 return: `drivers` (normalize `result["adjustments"]` → `[{"driver", "delta_pct", "impact_pct", "note"}]`; include both brent + product_c entries even when one is zero — "no shock" note), `horizon_table` (7 rows `{day: 1..7, base, adjusted, delta_pct}` from the 7 base/adjusted points, `delta_pct = (a-b)/b*100` guarded for b==0 → None), `narration_hint` = `"<Driver> <sign>% -> {product_id} <total_impact>% on day 7 (X -> Y)."` using the day-7 headline (per `answer_format.select_headline_day` convention).
+  8. Build spec §4.2 return: `drivers` (normalize `result["adjustments"]` → `[{"driver", "delta_pct", "impact_pct", "note"}]`; include both benchmark_a + product_c entries even when one is zero — "no shock" note), `horizon_table` (7 rows `{day: 1..7, base, adjusted, delta_pct}` from the 7 base/adjusted points, `delta_pct = (a-b)/b*100` guarded for b==0 → None), `narration_hint` = `"<Driver> <sign>% -> {product_id} <total_impact>% on day 7 (X -> Y)."` using the day-7 headline (per `answer_format.select_headline_day` convention).
   9. Return `{"success": True, "product_id": product_id, "product_key": target.product_key, "base_forecast": [...], "adjusted_forecast": [...], "total_impact_pct": ..., "drivers": [...], "horizon_table": [...], "narration_hint": "..."}`.
 - Register in the tuple list at `:1038-1102`:
   ```python
@@ -127,7 +127,7 @@ Replace the Market Dashboard **What-If Analysis sidebar panel** (sliders + Run S
 
 - [ ] **Step 1: `FORECAST_AGENT_PROMPT` TOOLS section (`:557-568`)** — after the `forecast_brief` bullet, add (verbatim from spec §6.1):
   ```
-  - forecast_what_if(product_id, brent_delta_pct, product_c_delta_pct): simulate a forecast under
+  - forecast_what_if(product_id, benchmark_a_delta_pct, product_c_delta_pct): simulate a forecast under
     upstream price shocks (Benchmark A, Product_C) and return base vs adjusted forecast per horizon.
     Call this for "what if ..." / "如果...涨...%会怎样" questions about price scenarios.
     Resolve product_id from conversation context, or ask the user which product.

@@ -119,5 +119,5 @@ def test_empty_project_id_raises():
 
 def test_tokenize_cjk_safe():
     toks = tokenize_for_match("电子元件价格")
-    assert any("异戊二" in t for t in toks)
+    assert any("电子" in t for t in toks)
     assert "价格" not in toks  # single CJK chars not tokens

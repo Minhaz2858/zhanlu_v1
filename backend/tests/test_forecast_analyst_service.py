@@ -37,7 +37,7 @@ def _patch_reads(monkeypatch):
     monkeypatch.setattr(analyst_service.mds, "PRODUCT_FORECAST_TARGET_KEY",
                         {"product_b": "acme.product_b"})
     monkeypatch.setattr(analyst_service, "PRODUCT_LABELS",
-                        {"product_b": {"label_zh": "双环戊二烯"}})
+                        {"product_b": {"label_zh": "材料B"}})
 
 
 def test_cache_hit_returns_without_llm(monkeypatch):
@@ -71,7 +71,7 @@ def test_llm_upgrade_when_enabled(monkeypatch):
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: True)
     good = {"market_update_zh": "市场情报中性。",
             "price_data_zh": "现价 6,940 元/吨。",
-            "upstream_logic_zh": "上游裂解碳五下跌,弹性 0.66 传导。",
+            "upstream_logic_zh": "上游原料A下跌,弹性 0.66 传导。",
             "supply_demand_zh": "8模型分歧偏大。",
             "forecast_zh": "预计跌至 6,660 元/吨,↘ 偏弱。",
             "watch_triggers_zh": ["准确率 55% 以上再评估"], "risk_zh": "近期无重大市场事件。"}

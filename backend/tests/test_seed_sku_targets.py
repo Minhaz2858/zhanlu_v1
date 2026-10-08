@@ -13,7 +13,7 @@ from app.services.forecasting.seed_targets import (
     seed_forecast_targets,
 )
 
-ECISCO_FORECAST_TARGETS = get_domain_config("").get("forecast_targets", [])
+FORECAST_TARGETS = get_domain_config("").get("forecast_targets", [])
 
 
 @pytest.fixture
@@ -28,19 +28,19 @@ def db_session():
 
 
 def _make_mock_erp_engine(rows: list[tuple]) -> object:
-    """Build an in-memory SQLite engine simulating sale_erp_v_碳五石油树脂_data.
+    """Build an in-memory SQLite engine simulating sale_erp_v_原料A复合材料_data.
 
     Each row is (material_code, plandate, ftaxprice).
     """
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE sale_erp_v_碳五石油树脂_data "
+            "CREATE TABLE sale_erp_v_原料A复合材料_data "
             "(material_code TEXT, PLANDATE TEXT, FTAXPRICE REAL)"
         ))
         for code, dt, price in rows:
             conn.execute(text(
-                "INSERT INTO sale_erp_v_碳五石油树脂_data "
+                "INSERT INTO sale_erp_v_原料A复合材料_data "
                 "(material_code, PLANDATE, FTAXPRICE) VALUES (:c, :d, :p)"
             ), {"c": code, "d": dt, "p": price})
         conn.commit()
@@ -51,7 +51,7 @@ def test_static_targets_no_longer_include_erp_where_1_1():
     """ERP-primary targets are discovered dynamically by the SKU seeder;
     no static target may use a degenerate WHERE 1=1 datasource."""
     degenerate = [
-        t["product_key"] for t in ECISCO_FORECAST_TARGETS
+        t["product_key"] for t in FORECAST_TARGETS
         if "1=1" in str(t["datasource"].get("where", ""))
     ]
     assert len(degenerate) == 0, (
@@ -63,13 +63,13 @@ def test_static_targets_no_longer_include_erp_where_1_1():
 def test_static_targets_use_md_lz_price_as_primary():
     """All 11 static targets are md_market_price-primary (the canonical set).
 
-    Matches app.services.forecasting.seed_acme_targets.ECISCO_FORECAST_TARGETS
+    Matches app.services.forecasting.seed_acme_targets.FORECAST_TARGETS
     and migration 037: 11 entries, every one sourced from md_market_price. The
     longer-history ERP views for the same products ride along as
     ``extra_sources`` — they are not a different primary table.
     """
     md_lz_count = sum(
-        1 for t in ECISCO_FORECAST_TARGETS
+        1 for t in FORECAST_TARGETS
         if t["datasource"].get("table") == "md_market_price"
     )
     assert md_lz_count == 11
@@ -169,24 +169,24 @@ def test_discover_skus_is_idempotent(db_session):
 
 
 def test_discover_skus_handles_both_erp_products(db_session):
-    """Both product_a and raffinate_c5 should be discovered."""
+    """Both product_a and feedstock_a should be discovered."""
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE sale_erp_v_碳五石油树脂_data "
+            "CREATE TABLE sale_erp_v_原料A复合材料_data "
             "(material_code TEXT, PLANDATE TEXT, FTAXPRICE REAL)"
         ))
         conn.execute(text(
-            "CREATE TABLE sale_erp_v_抽余碳五_data "
+            "CREATE TABLE sale_erp_v_原料A_data "
             "(material_code TEXT, PLANDATE TEXT, FTAXPRICE REAL)"
         ))
         for i in range(55):
             conn.execute(text(
-                "INSERT INTO sale_erp_v_碳五石油树脂_data VALUES (:c, :d, :p)"
+                "INSERT INTO sale_erp_v_原料A复合材料_data VALUES (:c, :d, :p)"
             ), {"c": "RESIN_1", "d": f"2025-01-{(i % 28) + 1:02d}", "p": 5000.0 + i})
         for i in range(55):
             conn.execute(text(
-                "INSERT INTO sale_erp_v_抽余碳五_data VALUES (:c, :d, :p)"
+                "INSERT INTO sale_erp_v_原料A_data VALUES (:c, :d, :p)"
             ), {"c": "RAFF_1", "d": f"2025-01-{(i % 28) + 1:02d}", "p": 4000.0 + i})
         conn.commit()
 
@@ -198,7 +198,7 @@ def test_discover_skus_handles_both_erp_products(db_session):
         ForecastTarget.product_key == "acme.product_a.RESIN_1"
     ).one()
     raff = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "acme.raffinate_c5.RAFF_1"
+        ForecastTarget.product_key == "acme.feedstock_a.RAFF_1"
     ).one()
     assert resin.report_order == 12
     assert raff.report_order == 12  # both families start at 12

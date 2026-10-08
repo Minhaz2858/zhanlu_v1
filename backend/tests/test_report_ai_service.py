@@ -15,7 +15,7 @@ from app.services.report_ai_service import (
 def mock_execution_chart():
     return [
         {"product": "C5树脂", "contract_qty": 500.0, "out_qty": 380.0, "execution_rate": 76.0},
-        {"product": "间戊二烯", "contract_qty": 200.0, "out_qty": 190.0, "execution_rate": 95.0},
+        {"product": "材料C", "contract_qty": 200.0, "out_qty": 190.0, "execution_rate": 95.0},
     ]
 
 
@@ -44,7 +44,7 @@ class TestBuildAiContext:
         )
         assert "示例工厂" in ctx
         assert "C5树脂" in ctx
-        assert "间戊二烯" in ctx
+        assert "材料C" in ctx
         assert "76" in ctx or "76.0" in ctx
         assert "未出库" in ctx
 

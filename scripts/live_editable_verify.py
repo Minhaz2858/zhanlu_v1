@@ -14,7 +14,7 @@ plan = DeckPlan(
     title="C5/C9 Market View",
     theme_recommendation="bold_signal",
     slides=[
-        SlidePlan(layout="cover", title="C5/C9 裂解产品市场洞察", subtitle="Q3 2026 Outlook · Market Data"),
+        SlidePlan(layout="cover", title="C5/C9 分解产品市场洞察", subtitle="Q3 2026 Outlook · Market Data"),
         SlidePlan(layout="kpi_grid", title="关键指标",
                   kpi_specs=[KPISpecInSlide(label="总营收", value="¥920.97M", delta="+6.2%"),
                              KPISpecInSlide(label="总销量", value="101.47K tons", delta="+3.1%")]),

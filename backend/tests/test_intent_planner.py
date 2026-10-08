@@ -31,7 +31,7 @@ class TestKeywordClassify:
         assert "decision" in result
 
     def test_what_if_keyword(self):
-        result = _keyword_classify("what if brent rises 5%")
+        result = _keyword_classify("what if benchmark_a rises 5%")
         assert result is not None
         assert "what_if" in result
 

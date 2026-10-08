@@ -89,7 +89,7 @@ class TestDegeneracyGate:
     def test_multi_row_real_data_passes(self):
         rows = [
             {"product": "product_d", "volume": 123.45},
-            {"product": "piperylene", "volume": 67.89},
+            {"product": "product_f", "volume": 67.89},
         ]
         avail, why = _check_degeneracy(rows)
         assert avail is True

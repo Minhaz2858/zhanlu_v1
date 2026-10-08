@@ -41,7 +41,7 @@ class TestUserProfileDefaults:
 
     def test_profile_roundtrip(self, tmp_store):
         update_user_profile(
-            "agent-1", "user-1", "苯乙烯的价格是多少", storage_dir=tmp_store,
+            "agent-1", "user-1", "材料J的价格是多少", storage_dir=tmp_store,
         )
         p = get_user_profile("agent-1", "user-1", storage_dir=tmp_store)
         assert p.agent_app_id == "agent-1"
@@ -50,7 +50,7 @@ class TestUserProfileDefaults:
 
 class TestLanguageDetection:
     def test_chinese_content(self, tmp_store):
-        update_user_profile("agent-1", "user-1", "苯乙烯今天多少钱", storage_dir=tmp_store)
+        update_user_profile("agent-1", "user-1", "材料J今天多少钱", storage_dir=tmp_store)
         p = get_user_profile("agent-1", "user-1", storage_dir=tmp_store)
         assert p.language == "zh"
 
@@ -60,22 +60,22 @@ class TestLanguageDetection:
         assert p.language == "en"
 
     def test_mixed_content_prefers_chinese(self, tmp_store):
-        update_user_profile("agent-1", "user-1", "苯乙烯 price 多少", storage_dir=tmp_store)
+        update_user_profile("agent-1", "user-1", "材料J price 多少", storage_dir=tmp_store)
         p = get_user_profile("agent-1", "user-1", storage_dir=tmp_store)
         assert p.language == "zh"
 
 
 class TestTopProducts:
     def test_chinese_product_detected(self, tmp_store):
-        update_user_profile("agent-1", "user-1", "苯乙烯的行情怎么样", storage_dir=tmp_store)
+        update_user_profile("agent-1", "user-1", "材料J的行情怎么样", storage_dir=tmp_store)
         p = get_user_profile("agent-1", "user-1", storage_dir=tmp_store)
-        assert any(x.name == "苯乙烯" for x in p.top_products)
+        assert any(x.name == "材料J" for x in p.top_products)
 
     def test_product_count_incremented(self, tmp_store):
-        update_user_profile("agent-1", "user-1", "苯乙烯的价格", storage_dir=tmp_store)
-        update_user_profile("agent-1", "user-1", "苯乙烯会涨吗", storage_dir=tmp_store)
+        update_user_profile("agent-1", "user-1", "材料J的价格", storage_dir=tmp_store)
+        update_user_profile("agent-1", "user-1", "材料J会涨吗", storage_dir=tmp_store)
         p = get_user_profile("agent-1", "user-1", storage_dir=tmp_store)
-        product = next((x for x in p.top_products if x.name == "苯乙烯"), None)
+        product = next((x for x in p.top_products if x.name == "材料J"), None)
         assert product is not None
         assert product.count == 2
 
@@ -109,30 +109,30 @@ class TestProfilePrompt:
 
     def test_prompt_contains_profile(self, tmp_store):
         update_user_profile(
-            "agent-1", "user-1", "给我详细的苯乙烯分析", storage_dir=tmp_store,
+            "agent-1", "user-1", "给我详细的材料J分析", storage_dir=tmp_store,
         )
         prompt = get_profile_prompt("agent-1", "user-1", storage_dir=tmp_store)
-        assert "苯乙烯" in prompt
+        assert "材料J" in prompt
         assert "detailed" in prompt
         assert "Preferred language" in prompt
         assert "中文" in prompt
 
     def test_isolated_per_user(self, tmp_store):
-        update_user_profile("agent-1", "user-1", "苯乙烯的价格", storage_dir=tmp_store)
+        update_user_profile("agent-1", "user-1", "材料J的价格", storage_dir=tmp_store)
         p2 = get_user_profile("agent-1", "user-2", storage_dir=tmp_store)
         assert p2.top_products == []
 
 
 class TestFeedback:
     def test_positive_feedback_updates_profile(self, tmp_store):
-        update_user_profile("agent-1", "user-1", "苯乙烯价格", storage_dir=tmp_store)
+        update_user_profile("agent-1", "user-1", "材料J价格", storage_dir=tmp_store)
         add_feedback("agent-1", "user-1", rating=1, storage_dir=tmp_store)
         p = get_user_profile("agent-1", "user-1", storage_dir=tmp_store)
         assert p.thumbs_up == 1
         assert p.thumbs_down == 0
 
     def test_negative_feedback_updates_profile(self, tmp_store):
-        update_user_profile("agent-1", "user-1", "苯乙烯价格", storage_dir=tmp_store)
+        update_user_profile("agent-1", "user-1", "材料J价格", storage_dir=tmp_store)
         add_feedback("agent-1", "user-1", rating=-1, storage_dir=tmp_store)
         p = get_user_profile("agent-1", "user-1", storage_dir=tmp_store)
         assert p.thumbs_down == 1

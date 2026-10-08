@@ -26,7 +26,7 @@ def test_self_critic_decision_round_trip():
         confidence=0.92,
         reasoning="assistant refused real-time data",
         corrective_tool="web_search",
-        corrective_args={"query": "brent oil price today"},
+        corrective_args={"query": "benchmark_a oil price today"},
     )
     j = json.dumps(d.to_dict())
     assert "web_search" in j
@@ -40,7 +40,7 @@ def test_critic_parses_valid_refusal():
         "confidence": 0.95,
         "reasoning": "Assistant claims it cannot provide real-time data",
         "corrective_tool": "web_search",
-        "corrective_args": {"query": "brent oil price today"},
+        "corrective_args": {"query": "benchmark_a oil price today"},
     })
 
     async def fake_llm(messages, **kwargs):
@@ -48,13 +48,13 @@ def test_critic_parses_valid_refusal():
 
     critic = SelfCritic(llm_call=fake_llm)
     decision = asyncio.run(critic.critique(
-        user_message="give me today brent oil price",
+        user_message="give me today benchmark_a oil price",
         assistant_text="I'm sorry, but I cannot provide real-time data.",
     ))
     assert decision.refused is True
     assert decision.confidence == 0.95
     assert decision.corrective_tool == "web_search"
-    assert decision.corrective_args["query"] == "brent oil price today"
+    assert decision.corrective_args["query"] == "benchmark_a oil price today"
 
 
 def test_critic_parses_valid_no_refusal():
@@ -183,7 +183,7 @@ def test_critic_caches_per_session():
         })
 
     critic = SelfCritic(llm_call=fake_llm, enable_cache=True)
-    user_msg = "give me today brent oil price"
+    user_msg = "give me today benchmark_a oil price"
     asst_msg = "I cannot provide real-time data."
     asyncio.run(critic.critique(user_msg, asst_msg, session_id="s1"))
     asyncio.run(critic.critique(user_msg, asst_msg, session_id="s1"))  # cached

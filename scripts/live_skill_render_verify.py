@@ -12,7 +12,7 @@ def build_plan():
         palette_recommendation="",
         deck_type="data_report",
         slides=[
-            SlidePlan(layout="cover", title="C5/C9 裂解产品市场洞察", subtitle="Q3 2026 Outlook"),
+            SlidePlan(layout="cover", title="C5/C9 分解产品市场洞察", subtitle="Q3 2026 Outlook"),
             SlidePlan(layout="insights_bullets", title="关键洞察",
                       bullets=["营收 ¥920.97M", "销量 101.47K 吨", "C5 树脂占比 22.3%"]),
             SlidePlan(layout="chart_full", title="月度趋势",

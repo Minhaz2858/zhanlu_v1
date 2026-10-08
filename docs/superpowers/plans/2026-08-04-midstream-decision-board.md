@@ -89,7 +89,7 @@ def test_narrative_full_data():
 
 def test_narrative_missing_forecast():
     s = build_narrative(
-        name_zh="抽余C5", day=7, current_price=None, forecast_base=None,
+        name_zh="原料A", day=7, current_price=None, forecast_base=None,
         expected_change_pct=None, p_rise=None, action="watch", confidence="low",
         directional_accuracy=None, intel_event_count=0, intel_bias="neutral",
         volatility_regime=None,
@@ -407,7 +407,7 @@ def test_build_decision_board_composes(monkeypatch):
             overlay_by_product={pid: _overlay(pid) for pid in product_ids},
             sku_forecasts_by_product={
                 "feedstock_a": [SkuForecastMeta(
-                    material_code="C5R-001", name="抽余C5 SKU", report_order=1,
+                    material_code="C5R-001", name="原料A SKU", report_order=1,
                     is_primary=True, forecast_base=8100.0,
                 )],
             },

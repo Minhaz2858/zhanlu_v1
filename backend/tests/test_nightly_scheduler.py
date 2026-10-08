@@ -103,7 +103,7 @@ class TestSeedAcmeTargets:
     def test_seed_returns_11_targets(self):
         """The default domain config should define 11 canonical targets.
 
-        11 md_market_price products. The 2 ERP products (product_a, raffinate_c5)
+        11 md_market_price products. The 2 ERP products (product_a, feedstock_a)
         are seeded dynamically via discover_and_seed_sku_targets(), not in this
         static list.
         """

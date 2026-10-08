@@ -53,7 +53,7 @@ DELIVERY_ALIAS_ROWS = [
 USER_SHAPE_ROWS = [
     {'contract_id': 121917, 'customer_name': '天津鲁华泓锦新材料科技有限公司', 'product_name': '材料B', 'contract_quantity': 400.0, 'contract_price': 2540000.0, 'shipment_quantity': 386.44, 'revenue': 2453894.0},
     {'contract_id': 121952, 'customer_name': '东莞市同舟化工有限公司', 'product_name': '材料B', 'contract_quantity': 160.0, 'contract_price': 1024000.0, 'shipment_quantity': 159.33, 'revenue': 1019712.0},
-    {'contract_id': 121888, 'customer_name': '广东天元实业集团股份有限公司', 'product_name': '原料A石油树脂', 'contract_quantity': 32.0, 'contract_price': 300800.0, 'shipment_quantity': 32.0, 'revenue': 300800.0},
+    {'contract_id': 121888, 'customer_name': '广东天元实业集团股份有限公司', 'product_name': '原料A复合材料', 'contract_quantity': 32.0, 'contract_price': 300800.0, 'shipment_quantity': 32.0, 'revenue': 300800.0},
     {'contract_id': 121963, 'customer_name': '广东汇泉联骏化学工业有限公司', 'product_name': '材料B', 'contract_quantity': 65.0, 'contract_price': 416000.0, 'shipment_quantity': 64.82, 'revenue': 414848.0},
 ]
 

@@ -25,11 +25,11 @@ _JUNK_EN = [
 ]
 
 _JUNK_ZH = [
-    {"title": "裂解反应_百度百科", "url": "https://baike.baidu.com/...", "description": "广义地说，凡是有机化合物在高温下分子发生分解的反应过程都称为裂解。"},
-    {"title": "什么是石油的裂解？与裂化有何区别？ - 知乎", "url": "https://zhuanlan.zhihu.com/p/...", "description": "裂解和裂化一样都是在高温下，将大分子转化为小分子。"},
-    {"title": "裂解和热解的区别", "url": "https://cp.baidu.com/landing/...", "description": "裂解和热解虽然都是将大分子物质转化为小分子物质的过程。"},
-    {"title": "石油裂解_百度百科", "url": "https://baike.baidu.com/item/...", "description": "燃料油由导管喷入炉内燃烧把反应管加热至900℃左右。"},
-    {"title": "裂化与裂解有何区别？ - 知乎", "url": "https://www.zhihu.com/question/464761643", "description": "裂解就是把大分子变成一部分更小的分子。"},
+    {"title": "分解反应_百度百科", "url": "https://baike.baidu.com/...", "description": "广义地说，凡是有机化合物在高温下分子发生分解的反应过程都称为分解。"},
+    {"title": "什么是石油的分解？与裂化有何区别？ - 知乎", "url": "https://zhuanlan.zhihu.com/p/...", "description": "分解和裂化一样都是在高温下，将大分子转化为小分子。"},
+    {"title": "分解和热解的区别", "url": "https://cp.baidu.com/landing/...", "description": "分解和热解虽然都是将大分子物质转化为小分子物质的过程。"},
+    {"title": "石油分解_百度百科", "url": "https://baike.baidu.com/item/...", "description": "燃料油由导管喷入炉内燃烧把反应管加热至900℃左右。"},
+    {"title": "裂化与分解有何区别？ - 知乎", "url": "https://www.zhihu.com/question/464761643", "description": "分解就是把大分子变成一部分更小的分子。"},
 ]
 
 _GOOD_EN = [
@@ -39,8 +39,8 @@ _GOOD_EN = [
 ]
 
 _GOOD_ZH = [
-    {"title": "碳五石油树脂价格行情_生意社", "url": "https://www.100ppi.com/...", "description": "碳五石油树脂价格最新报价，2026年8月市场行情走势分析。"},
-    {"title": "裂解碳五市场价格 2026 - 百川盈孚", "url": "https://www.baiinfo.com/...", "description": "裂解碳五市场报价、供需分析、装置动态。"},
+    {"title": "原料A复合材料价格行情_生意社", "url": "https://www.100ppi.com/...", "description": "原料A复合材料价格最新报价，2026年8月市场行情走势分析。"},
+    {"title": "原料A市场价格 2026 - 百川盈孚", "url": "https://www.baiinfo.com/...", "description": "原料A市场报价、供需分析、装置动态。"},
 ]
 
 
@@ -53,8 +53,8 @@ def test_significant_tokens_c5_query():
 
 
 def test_significant_tokens_cjk_bigrams():
-    toks = _significant_tokens("裂解碳五 石油树脂 价格 市场 2026年8月")
-    for bigram in ("碳五", "树脂", "价格", "市场"):
+    toks = _significant_tokens("原料A 复合材料 价格 市场 2026年8月")
+    for bigram in ("原料A", "树脂", "价格", "市场"):
         assert bigram in toks
 
 
@@ -64,16 +64,16 @@ def test_filter_drops_actual_bing_junk_en():
 
 
 def test_filter_drops_actual_bing_junk_zh():
-    # The hard junk (1-token overlap: 裂解反应/裂解和热解/裂化与裂解) is
+    # The hard junk (1-token overlap: 分解反应/分解和热解/裂化与分解) is
     # dropped.  Topic-adjacent chemistry explainers that share TWO tokens
-    # (石油+裂解) may survive — acceptable: the agent sees they are not
+    # (石油+分解) may survive — acceptable: the agent sees they are not
     # market data and moves on; the poisonous class (zero/one-token overlap)
     # is gone.
-    kept = _filter_relevant(_JUNK_ZH, "裂解碳五 石油树脂 价格 市场 2026年8月")
+    kept = _filter_relevant(_JUNK_ZH, "原料A 复合材料 价格 市场 2026年8月")
     kept_titles = [r["title"] for r in kept]
-    assert "裂解反应_百度百科" not in kept_titles
-    assert "裂解和热解的区别" not in kept_titles
-    assert "裂化与裂解有何区别？ - 知乎" not in kept_titles
+    assert "分解反应_百度百科" not in kept_titles
+    assert "分解和热解的区别" not in kept_titles
+    assert "裂化与分解有何区别？ - 知乎" not in kept_titles
     assert len(kept) <= 2
 
 
@@ -84,7 +84,7 @@ def test_filter_keeps_relevant_en():
 
 
 def test_filter_keeps_relevant_zh():
-    kept = _filter_relevant(_GOOD_ZH, "裂解碳五 石油树脂 价格 市场 2026年8月")
+    kept = _filter_relevant(_GOOD_ZH, "原料A 复合材料 价格 市场 2026年8月")
     assert len(kept) == 2
     assert "生意社" in kept[0]["title"]
 

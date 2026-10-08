@@ -115,7 +115,7 @@ async def test_full_catalog_flow(db):
     old = settings.SCHEMA_LINKING_ENABLED
     settings.SCHEMA_LINKING_ENABLED = True
     try:
-        result = await link_schema("最近乙烯价格走势如何？", [kb.id], db, top_k=8)
+        result = await link_schema("最近材料丙价格走势如何？", [kb.id], db, top_k=8)
     finally:
         settings.SCHEMA_LINKING_ENABLED = old
 

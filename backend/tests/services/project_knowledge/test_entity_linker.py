@@ -84,4 +84,4 @@ def test_tokenize_ascii():
 def test_tokenize_mixed():
     toks = tokenize_for_match("电子元件 product_d price")
     assert "product_d" in toks
-    assert any("异戊二" in t for t in toks)
+    assert any("电子" in t for t in toks)

@@ -38,7 +38,7 @@ def mock_mds():
 @pytest.fixture
 def mock_labels():
     with patch("app.services.forecasting.analyst.service.PRODUCT_LABELS",
-               {"TN450": {"label_zh": "裂解C5-TN450"}}):
+               {"TN450": {"label_zh": "分解C5-TN450"}}):
         yield
 
 

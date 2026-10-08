@@ -185,9 +185,9 @@ class TestSynthesisFallback(unittest.TestCase):
         from app.services.synexia.report_synthesis import _fallback_payload
 
         rows = [
-            {"material_name": "碳五石油树脂", "total_revenue": 66_400_000.0},
+            {"material_name": "原料A复合材料", "total_revenue": 66_400_000.0},
             {"material_name": "电子元件",     "total_revenue": 22_100_000.0},
-            {"material_name": "间戊二烯",     "total_revenue": 18_000_000.0},
+            {"material_name": "材料C",     "total_revenue": 18_000_000.0},
         ]
         p = _fallback_payload(
             user_message="make sales report",
@@ -208,7 +208,7 @@ class TestSynthesisFallback(unittest.TestCase):
         self.assertEqual(p.chart.x_key, "material_name")
         self.assertEqual(p.chart.data, rows)
         # Top performer should appear in insights
-        self.assertTrue(any("碳五石油树脂" in i.text for i in p.insights),
+        self.assertTrue(any("原料A复合材料" in i.text for i in p.insights),
                         f"Expected top performer in insights: {p.insights}")
 
     def test_fallback_with_empty_rows(self):
@@ -283,7 +283,7 @@ class TestSynthesizeReport(unittest.TestCase):
 
     def test_llm_returns_json_and_prose(self):
         reply = (
-            "Top material is 碳五石油树脂 at 66M (35% of total).\n\n"
+            "Top material is 原料A复合材料 at 66M (35% of total).\n\n"
             "```json\n"
             '{"title": "Sales report", "summary": "Top 3 = 76%", '
             '"kpis": [{"label": "Total", "value": "189M"}], '
@@ -298,7 +298,7 @@ class TestSynthesizeReport(unittest.TestCase):
         self.assertEqual(result.task_kind, "report")
         self.assertIsNotNone(result.report_card_payload)
         self.assertEqual(result.report_card_payload.title, "Sales report")
-        self.assertIn("碳五石油树脂", result.assistant_content)
+        self.assertIn("原料A复合材料", result.assistant_content)
         self.assertEqual(result.user_signal, "default")
 
     def test_llm_returns_no_json(self):

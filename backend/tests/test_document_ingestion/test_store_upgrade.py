@@ -107,15 +107,15 @@ class TestTokenizeLexical:
         assert "increased" in toks
 
     def test_cjk_bigrams(self):
-        toks = tokenize_lexical("乙烯价格")
+        toks = tokenize_lexical("材料价格")
         # Should produce bigrams for CJK chars
-        assert any("乙烯" in t for t in toks)
-        assert any("烯价" in t for t in toks)
+        assert any("材料" in t for t in toks)
+        assert any("价格" in t for t in toks)
 
     def test_mixed_text(self):
-        toks = tokenize_lexical("PRODUCT_B 乙烯价格 2024")
+        toks = tokenize_lexical("PRODUCT_B 材料价格 2024")
         assert "product_b" in toks
-        assert any("乙烯" in t for t in toks)
+        assert any("材料" in t for t in toks)
         assert any("2024" in t for t in toks)
 
     def test_empty_text(self):
@@ -194,7 +194,7 @@ class TestCollectionStore:
         )
         cs.upsert(
             doc_id="doc1",
-            text="乙烯价格持续上涨",
+            text="材料丙价格持续上涨",
             metadata={"file_name": "report.pdf", "page": 1},
         )
         assert cs.count() == 1

@@ -68,13 +68,13 @@ def test_weekly_report_skill_covers_all_products_and_inventory():
     body = skill.body
     # All seven C5/C9 products must be listed (not just one product).
     for product in (
-        "碳五石油树脂",
-        "双环戊二烯",
+        "原料A复合材料",
+        "材料B",
         "电子元件",
         "包装材料",
-        "抽余碳五",
-        "间戊二烯",
-        "工业用裂解碳九",
+        "原料A",
+        "材料C",
+        "工业用分解材料M",
     ):
         assert product in body, f"missing product {product!r} in SKILL.md"
     # Inventory table must be named explicitly.

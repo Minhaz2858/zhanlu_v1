@@ -148,7 +148,7 @@ class TestResearchAnalystFallback:
         )
         async def fake_call(system, msgs, **_):
             return {"content": (
-                "***Snapshot*** Brent $92.1 (+1.8% 7d). "
+                "***Snapshot*** Benchmark A $92.1 (+1.8% 7d). "
                 "***Market*** Spreads tight. "
                 "***AI Decision*** ACCUMULATE below $90."
             ), "role": "assistant"}
@@ -157,7 +157,7 @@ class TestResearchAnalystFallback:
             user_content="weekly C5 outlook",
             tool_calls_for_frontend=[{
                 "name": "ask_data_agent",
-                "results": {"rows": [{"price": 92.1}], "source_name": "brent_prices"},
+                "results": {"rows": [{"price": 92.1}], "source_name": "benchmark_a_prices"},
             }],
             agent_name="data_agent", agent_app=None,
         ))

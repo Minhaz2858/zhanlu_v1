@@ -461,8 +461,8 @@ UPSTREAM_MAP: dict[str, list[str]] = {
 }
 
 _UPSTREAM_NAME_ZH = {
-    "product_e": "原油", "product_c": "石脑油",
-    "cracked_c5": "裂解原料A", "cracked_c9": "裂解材料M",
+    "product_e": "原油", "product_c": "原料油",
+    "cracked_c5": "分解原料A", "cracked_c9": "分解材料M",
 }
 
 
@@ -620,7 +620,7 @@ def test_brief_schema_and_source():
 
 def test_brief_explains_why_price():
     b = render_template_brief(_product_b_pack())
-    assert "裂解原料A" in b["why_price_zh"]        # upstream named
+    assert "分解原料A" in b["why_price_zh"]        # upstream named
     assert "弹性" in b["why_price_zh"]            # elasticity mentioned
     assert "传统需求旺季" in b["why_price_zh"]     # seasonal (product_b month 8 = +1.5)
 
@@ -636,7 +636,7 @@ def test_brief_watch_triggers_actionable():
     b = render_template_brief(_product_b_pack())
     joined = "。".join(b["watch_triggers_zh"])
     assert "55%" in joined                        # accuracy recovery trigger
-    assert "裂解原料A" in joined or "上游" in joined  # upstream stabilization trigger
+    assert "分解原料A" in joined or "上游" in joined  # upstream stabilization trigger
 
 
 def test_brief_zero_intel_risk_note():
@@ -876,7 +876,7 @@ from tests.test_forecast_analyst_template import _product_b_pack
 def _brief(**over):
     b = {
         "summary_zh": "材料B现价 6,940 元/吨,预计未来 7 天跌至 6,660 元/吨(-4.0%)。",
-        "why_price_zh": "上游裂解原料A近30日-2.8%,按 0.66 弹性传导约 -1.9%。",
+        "why_price_zh": "上游分解原料A近30日-2.8%,按 0.66 弹性传导约 -1.9%。",
         "why_action_zh": "建议观望 —— 历史数据不足,方向准确率 51% 未达 55% 门槛。",
         "watch_triggers_zh": ["方向准确率回升至 55% 以上"],
         "risk_zh": "近期无重大市场事件。",
@@ -934,7 +934,7 @@ def test_writer_success_marks_llm_source():
     pack = _product_b_pack()
     good = {
         "summary_zh": "现价 6,940 元/吨,预计 7 日跌至 6,660 元/吨(-4.0%),建议观望。",
-        "why_price_zh": "上游裂解原料A近30日下跌,按 0.66 弹性传导约 -1.9%。",
+        "why_price_zh": "上游分解原料A近30日下跌,按 0.66 弹性传导约 -1.9%。",
         "why_action_zh": "历史数据不足,方向准确率 51% 未达 55% 门槛,观望。",
         "watch_triggers_zh": ["准确率回升至 55% 以上再评估"],
         "risk_zh": "近期无重大市场事件,价格由供需基本面驱动。",
@@ -1189,7 +1189,7 @@ def test_llm_upgrade_when_enabled(monkeypatch):
     db = _FakeDB(SimpleNamespace(id="t1"), run)
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: True)
     good = {"summary_zh": "现价 6,940 元/吨,预计跌至 6,660 元/吨。",
-            "why_price_zh": "上游裂解原料A下跌,弹性 0.66 传导。",
+            "why_price_zh": "上游分解原料A下跌,弹性 0.66 传导。",
             "why_action_zh": "方向准确率 51% 未达 55% 门槛,观望。",
             "watch_triggers_zh": ["准确率 55% 以上再评估"], "risk_zh": "近期无重大市场事件。"}
     monkeypatch.setattr(analyst_service, "chat_completion_json_sync",
@@ -1360,7 +1360,7 @@ Expected: PASS
 def test_board_attaches_analyst_brief(monkeypatch):
     brief = {
         "summary_zh": "材料B现价 6,940 元/吨,预计跌至 6,660 元/吨。",
-        "why_price_zh": "上游裂解原料A下跌。",
+        "why_price_zh": "上游分解原料A下跌。",
         "why_action_zh": "历史数据不足,观望。",
         "watch_triggers_zh": ["准确率 55% 以上再评估"],
         "risk_zh": "近期无重大市场事件。",
@@ -1386,7 +1386,7 @@ def test_board_attaches_analyst_brief(monkeypatch):
     resp = dbs.build_decision_board("midstream", day=7)
     p = next(p for p in resp.products if p.id == "product_b")
     assert p.analyst_brief is not None
-    assert p.analyst_brief.why_price_zh == "上游裂解原料A下跌。"
+    assert p.analyst_brief.why_price_zh == "上游分解原料A下跌。"
     assert p.analyst_brief.watch_triggers_zh == ["准确率 55% 以上再评估"]
     assert p.narrative_zh.startswith("材料B现价 6,940")
 
@@ -1635,7 +1635,7 @@ def test_section_uses_analyst_brief(monkeypatch):
                         lambda pid, db: {"current_price": 6940.0, "change_7d_pct": -1.2})
     monkeypatch.setattr(wrg, "render_chart_stub", lambda *a, **k: None)
     brief = {"summary_zh": "材料B现价 6,940 元/吨,预计下周走弱。",
-             "why_price_zh": "上游裂解原料A下跌,成本端下移。",
+             "why_price_zh": "上游分解原料A下跌,成本端下移。",
              "why_action_zh": "建议观望。", "watch_triggers_zh": [], "risk_zh": "",
              "source": "template", "day": 7}
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
@@ -1831,7 +1831,7 @@ it('renders structured analyst brief sections when present', () => {
     /* ...existing minimal product fields per the file's fixtures... */
     analyst_brief: {
       summary_zh: '材料B现价 6,940 元/吨,预计跌至 6,660 元/吨。',
-      why_price_zh: '上游裂解原料A近30日-2.8%。',
+      why_price_zh: '上游分解原料A近30日-2.8%。',
       why_action_zh: '历史数据不足,建议观望。',
       watch_triggers_zh: ['方向准确率回升至 55% 以上'],
       risk_zh: '近期无重大市场事件。',
@@ -1839,7 +1839,7 @@ it('renders structured analyst brief sections when present', () => {
     },
   };
   // render expanded row, assert:
-  // screen.getByText(/上游裂解原料A/) exists
+  // screen.getByText(/上游分解原料A/) exists
   // screen.getByText('关注触发') exists
   // screen.getByText(/方向准确率回升至 55%/) exists
   // screen.getByText('AI 分析师撰写') exists
@@ -1849,7 +1849,7 @@ it('renders structured analyst brief sections when present', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd /home/ysk2025/zhanlu_7_30/frontend && node_modules/.bin/vitest run src/pages/MarketDashboard/components/__tests__/DecisionBoard.test.jsx`
-Expected: FAIL — unable to find text 上游裂解原料A
+Expected: FAIL — unable to find text 上游分解原料A
 
 - [ ] **Step 3: Implement the JSX change above**
 

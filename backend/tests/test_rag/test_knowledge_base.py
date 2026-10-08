@@ -171,7 +171,7 @@ class TestRAGKnowledgeBaseCRUD:
             ok = kb.upsert(
                 INDUSTRY_REPORTS,
                 doc_id="doc1",
-                text="乙烯价格持续上涨",
+                text="材料丙价格持续上涨",
                 metadata={"source": "test"},
             )
             assert ok is True
@@ -188,10 +188,10 @@ class TestRAGKnowledgeBaseCRUD:
             kb.upsert(
                 INDUSTRY_REPORTS,
                 doc_id="doc1",
-                text="乙烯价格持续上涨趋势明显",
+                text="材料丙价格持续上涨趋势明显",
                 metadata={"source": "test"},
             )
-            hits = kb.query(INDUSTRY_REPORTS, "乙烯价格", top_k=5)
+            hits = kb.query(INDUSTRY_REPORTS, "材料丙价格", top_k=5)
             assert len(hits) >= 1
             doc_ids = [d for d, _ in hits]
             assert "doc1" in doc_ids
@@ -269,14 +269,14 @@ class TestRAGKnowledgeBaseHybrid:
             kb.upsert(
                 INDUSTRY_REPORTS,
                 "a",
-                "乙烯价格持续上涨",
+                "材料丙价格持续上涨",
             )
             kb.upsert(
                 INDUSTRY_REPORTS,
                 "b",
                 "原油市场波动剧烈",
             )
-            hits = kb.hybrid_query(INDUSTRY_REPORTS, "乙烯价格", top_k=5)
+            hits = kb.hybrid_query(INDUSTRY_REPORTS, "材料丙价格", top_k=5)
             assert len(hits) >= 1
             # The doc about ethylene should rank highly
             doc_ids = [d for d, _ in hits]
@@ -311,9 +311,9 @@ class TestLexicalKnowledgeBase:
 
     def test_upsert_and_query_lexical_only(self):
         kb = LexicalRAGKnowledgeBase(org_id="acme")
-        kb.upsert(INDUSTRY_REPORTS, "d1", "乙烯价格持续上涨")
+        kb.upsert(INDUSTRY_REPORTS, "d1", "材料丙价格持续上涨")
         kb.upsert(INDUSTRY_REPORTS, "d2", "原油市场波动")
-        hits = kb.query(INDUSTRY_REPORTS, "乙烯价格", top_k=5)
+        hits = kb.query(INDUSTRY_REPORTS, "材料丙价格", top_k=5)
         assert len(hits) >= 1
         assert "d1" in [d for d, _ in hits]
 

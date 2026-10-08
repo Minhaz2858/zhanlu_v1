@@ -39,7 +39,7 @@ class TestClassifyBasics:
 
 class TestClassifyPrice:
     def test_chinese_price_question(self):
-        assert classify_question("苯乙烯今天多少钱一吨") == INTENT_PRICE_REPORT
+        assert classify_question("材料J今天多少钱一吨") == INTENT_PRICE_REPORT
 
     def test_chinese_price_query(self):
         assert classify_question("查一下最新的价格") == INTENT_PRICE_REPORT
@@ -48,7 +48,7 @@ class TestClassifyPrice:
         assert classify_question("what is the current price of styrene") == INTENT_PRICE_REPORT
 
     def test_price_with_punctuation(self):
-        assert classify_question("苯乙烯报价？") == INTENT_PRICE_REPORT
+        assert classify_question("材料J报价？") == INTENT_PRICE_REPORT
 
 
 class TestClassifyMarketAnalysis:
@@ -89,7 +89,7 @@ class TestClassifyWeeklyReport:
 
 class TestClassifyForecast:
     def test_chinese_forecast(self):
-        assert classify_question("预测下周苯乙烯价格走势") == INTENT_FORECAST
+        assert classify_question("预测下周材料J价格走势") == INTENT_FORECAST
 
     def test_chinese_will_rise(self):
         assert classify_question("下周价格会涨吗") == INTENT_FORECAST
@@ -103,7 +103,7 @@ class TestClassifyForecast:
 
 class TestClassifyComparison:
     def test_chinese_comparison(self):
-        assert classify_question("对比一下苯乙烯和丁二烯的价格") == INTENT_COMPARISON
+        assert classify_question("对比一下材料J和丁二烯的价格") == INTENT_COMPARISON
 
     def test_chinese_which(self):
         assert classify_question("哪个产品更适合做多") == INTENT_COMPARISON
@@ -145,7 +145,7 @@ class TestPriority:
 
     def test_price_with_greeting_prefix(self):
         # "你好，请问价格" — greeting + price -> price wins (domain intent wins)
-        assert classify_question("你好，请问苯乙烯价格是多少") == INTENT_PRICE_REPORT
+        assert classify_question("你好，请问材料J价格是多少") == INTENT_PRICE_REPORT
 
     def test_all_intents_exported(self):
         assert len(INTENTS) == 7

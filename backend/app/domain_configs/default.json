@@ -45,7 +45,7 @@
             "table": "v_demo_data",
             "time_col": "biz_date(业务日期)",
             "measure": "tax_price(含税单价)",
-            "where": "`material_name(产品名称)` = '裂解C5'"
+            "where": "`material_name(产品名称)` = '分解C5'"
           }
         ]
       }
@@ -66,7 +66,7 @@
             "table": "v_材料K_data",
             "time_col": "biz_date(业务日期)",
             "measure": "tax_price(含税单价)",
-            "where": "`material_name(产品名称)` = '裂解C9'"
+            "where": "`material_name(产品名称)` = '分解C9'"
           }
         ]
       }
@@ -213,7 +213,7 @@
     }
   ],
   "erp_sku_targets": {
-    "product_a": "sale_erp_v_原料A石油树脂_data",
+    "product_a": "sale_erp_v_原料A复合材料_data",
     "feedstock_a": "sale_erp_v_原料A_data"
   },
   "forecast_key_prefix": "acme.",

@@ -638,7 +638,7 @@ def _coverage_dimensions_for(
     Walks each facet; an available facet with non-empty rows contributes
     its canonical dimension (resolved via the profile's ``facet_to_dim``
     map with a prefix-match fallback for LLM variant facet IDs like
-    ``core_metrics_brent``).
+    ``core_metrics_benchmark_a``).
 
     Returns:
         Sorted list of dimension names that have available data. Empty

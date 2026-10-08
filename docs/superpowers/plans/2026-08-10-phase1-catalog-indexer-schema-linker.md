@@ -177,7 +177,7 @@ Algorithm:
 **Fallback**: if no catalog exists for a `kb_id` (no Chroma collection, or `kb.catalog_status != "ready"`), return `None` — caller falls back to `SchemaService.describe_all()`.
 
 **Acceptance**:
-- Query "最近乙烯价格走势" against cataloged warehouse → top tables include `md_market_price`, not unrelated tables. RRF scores are monotonic (better matches get higher scores).
+- Query "最近材料丙价格走势" against cataloged warehouse → top tables include `md_market_price`, not unrelated tables. RRF scores are monotonic (better matches get higher scores).
 - Join paths from `md_market_price` include linked dimension tables.
 - `slice_text` ≤ ~800 tokens (verify with tiktoken).
 - No catalog → returns `None` (graceful degradation).
@@ -345,7 +345,7 @@ async def test_full_catalog_flow():
     # 4. Assert kb_column_meta.count() > kb_table_meta.count()
     # 5. Assert kb_table_relation.count() > 0 (FKs exist)
     # 6. Assert kb.catalog_status == "ready"
-    # 7. Query schema linker with "最近乙烯价格走势"
+    # 7. Query schema linker with "最近材料丙价格走势"
     # 8. Assert "md_market_price" in linker_result["tables"][0]["table_name"] (top match)
     # 9. Assert linker_result["slice_text"] is non-empty and contains DDL
 ```
@@ -369,7 +369,7 @@ Skip in CI (no warehouse access). Mark with `pytest.mark.skipif` when `Acme_MYSQ
 
 ```python
 EVAL_QUESTIONS: list[dict] = [
-    {"question": "最近乙烯华东市场价是多少？", "expected_tables": ["md_market_price"]},
+    {"question": "最近材料丙华东市场价是多少？", "expected_tables": ["md_market_price"]},
     {"question": "上个月进口库存变化趋势", "expected_tables": ["erp_t_stk_inventory", "erp_t_stk_instock"]},
     # ... 10-15 total, covering different domains in the warehouse
 ]

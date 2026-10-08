@@ -27,10 +27,10 @@ class TestDeriveFeatureSpecOverride:
         empty_kg = KnowledgeGraph()  # no nodes
         spec = derive_feature_spec(
             "c5_cracked", empty_kg,
-            override_exog_features=["brent", "product_c", "import_price"],
+            override_exog_features=["benchmark_a", "product_c", "import_price"],
         )
         assert isinstance(spec, FeatureSpec)
-        assert spec.feedstock_keys == ["brent", "product_c", "import_price"]
+        assert spec.feedstock_keys == ["benchmark_a", "product_c", "import_price"]
         assert spec.spread_pairs == []  # no KG walk → no spread pairs
         assert spec.use_fx is False
 
@@ -51,20 +51,20 @@ class TestDeriveFeatureSpecOverride:
         empty_kg = KnowledgeGraph()
         spec = derive_feature_spec(
             "unknown_product", empty_kg,
-            override_exog_features=["brent", "inventory"],
+            override_exog_features=["benchmark_a", "inventory"],
         )
-        assert spec.feedstock_keys == ["brent", "inventory"]
+        assert spec.feedstock_keys == ["benchmark_a", "inventory"]
 
     def test_target_model_config_exog_features_integration(self):
         """Simulate engine.py wiring: target.model_config['exog_features'] → override."""
         target = MagicMock()
         target.product_key = "c5_cracked"
-        target.model_config = {"exog_features": ["brent", "operating_rate"]}
+        target.model_config = {"exog_features": ["benchmark_a", "operating_rate"]}
 
         _exog_override = target.model_config.get("exog_features") if isinstance(target.model_config, dict) else None
         empty_kg = KnowledgeGraph()
         spec = derive_feature_spec(target.product_key, empty_kg, override_exog_features=_exog_override)
-        assert spec.feedstock_keys == ["brent", "operating_rate"]
+        assert spec.feedstock_keys == ["benchmark_a", "operating_rate"]
 
     def test_empty_list_override_treated_as_no_override(self):
         """Empty list override → feedstock_keys is empty (no KG walk, no features)."""
