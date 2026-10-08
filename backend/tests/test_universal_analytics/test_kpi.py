@@ -20,7 +20,7 @@ class TestKPIComputation:
         assert "sale_date" in sql
         assert "revenue" in sql
         assert "region" in sql
-        assert "LAG" in sql
+        assert "prior_value" in sql
 
     def test_build_kpi_sql_mom(self):
         """Build KPI SQL for MoM comparison."""

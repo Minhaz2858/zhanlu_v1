@@ -1087,9 +1087,17 @@ class ForecastEngine:
                     X_features = build_features(y_model, exog=direction_exog_df)
                     if X_features is not None and len(X_features) > 10:
                         # Bug 2 fix: fit(X, y_sign) not (y, exog=None)
-                        future_sign = (y_model.shift(-h_int) > y_model).astype(int)
+                        # Label each row by whether the value ROSE h_int steps
+                        # later. Build the mask from the SHIFTED series before
+                        # casting: `.astype(int)` turned the last h_int rows'
+                        # NaN comparison into a false 0 label, and `.notna()`
+                        # on an int series then excluded nothing.
+                        future_sign = (y_model.shift(-h_int) > y_model)
                         valid_mask = future_sign.notna()
-                        clf.fit(X_features[valid_mask], future_sign[valid_mask])
+                        clf.fit(
+                            X_features[valid_mask],
+                            future_sign[valid_mask].astype(int),
+                        )
                         latest_features = X_features.iloc[[-1]]
                         proba = clf.predict_proba(latest_features)
                         if proba is not None:

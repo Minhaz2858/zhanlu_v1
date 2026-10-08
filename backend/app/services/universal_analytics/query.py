@@ -38,13 +38,12 @@ def validate_sql(sql: str, _db_type: str | None = None) -> str | None:
     if _DML_DDL_KEYWORDS.search(stripped):
         return "SQL contains DDL/DML keywords — only SELECT is allowed."
 
-    # Reject multiple statements (semicolons that are not at end)
-    # Simple heuristic: strip trailing semicolons, then check for remaining ones.
-    cleaned = stripped.rstrip(";").rstrip()
-    if ";" in cleaned:
-        # Allow a single trailing semicolon before end
-        test = cleaned.rsplit(";", 1)
-        if len(test) > 1 and test[1].strip():
-            return "Multiple SQL statements are not allowed."
+    # Reject multiple statements. Strip string literals FIRST so a semicolon
+    # inside 'a;b' is not mistaken for a statement separator; then look for a
+    # remaining separator outside a trailing terminator.
+    without_literals = re.sub(r"'([^']|'')*'", "''", stripped)
+    without_literals = without_literals.rstrip(";").rstrip()
+    if _MULTI_STMT_RE.search(without_literals):
+        return "Multiple SQL statements are not allowed."
 
     return None  # valid

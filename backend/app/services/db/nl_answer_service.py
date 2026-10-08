@@ -1317,6 +1317,12 @@ class NLAnswerService:
                     "NLAnswer: zero-row correction failed (non-fatal): %s", e,
                 )
 
+        # The zero-row correction above may have replaced `exec_rows` with good
+        # data; recompute degeneracy so the plan-memory / example-promotion
+        # gates below reflect what is actually served, not the discarded first
+        # attempt (which left `_degenerate` stale).
+        _degenerate = _is_degenerate_result(exec_rows, question=question)
+
         # ── 3c. Answer contract (deterministic, no LLM) ──────────────────
         # Every guard above reacts to a FAILURE: 0 rows, degenerate rows, a
         # driver error. Nothing checked the case that actually erodes trust —
@@ -2533,8 +2539,10 @@ async def _probe_table_coverage(
         except Exception as e:
             logger.debug("NLAnswer: coverage probe failed (non-fatal) %s: %s", name, e)
             continue
-        if not (res or {}).get("success"):
-            continue
+        # QueryService.execute has NO "success" key (see the note on the
+        # sibling supplementary-query path above) — gating on it skipped
+        # every probe. A raised error is already handled by the except
+        # above, so a returned dict means the probe actually ran.
         rows = (res or {}).get("rows") or []
         if rows:
             out[name] = "data in window" if where else "has rows"

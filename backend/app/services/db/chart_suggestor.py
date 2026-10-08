@@ -148,21 +148,22 @@ def suggest_chart(
                     ),
                 }
 
-        # 1 categorical + numeric(s): ranked bar.
-        if len(categoricals) >= 1 and 1 <= len(numerics) <= _MAX_NUMERIC_SERIES:
-            chart_type = "bar"
-            payload = {
+        # 1 categorical + numeric(s): ranked bar — or a table when there are
+        # more measures than a chart can read. (The old `> 6` guard lived
+        # inside a branch already capped at _MAX_NUMERIC_SERIES == 4, so it
+        # was unreachable and 5+ measures fell through to the wrong reason.)
+        if len(categoricals) >= 1 and len(numerics) >= 1:
+            if len(numerics) > _MAX_NUMERIC_SERIES:
+                return {**base, "chart_type": "table",
+                        "reason": "too many measures for a readable chart"}
+            return {
                 **base,
-                "chart_type": chart_type,
+                "chart_type": "bar",
                 "x": categoricals[0],
                 "y": numerics[:_MAX_NUMERIC_SERIES],
                 "max_categories": _MAX_CATEGORIES,
                 "reason": "categories with measures — ranked comparison",
             }
-            if len(numerics) > 6:
-                return {**base, "chart_type": "table",
-                        "reason": "too many measures for a readable chart"}
-            return payload
 
         # Temporal but no numeric: a timeline of labels, not a chart.
         return {**base, "chart_type": "table", "reason": "no numeric measure to plot"}

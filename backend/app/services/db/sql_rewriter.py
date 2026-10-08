@@ -176,7 +176,14 @@ def _apply_pushdown(sql: str, res: RewriteResult) -> str:
     else:
         inner_new = f"{inner_new} WHERE {' AND '.join(pushed)}"
     res.applied.append("predicate_pushdown")
-    return sql[: start + 1] + inner_new + ")" + (f" WHERE {leftover}" if leftover else "")
+    # Re-emit the derived-table alias (the text between the inner ")" and the
+    # WHERE). Dropping it left outer references like ``a.x`` dangling and the
+    # derived table unnamed (a hard error on PostgreSQL).
+    alias_text = tail[: alias_m.end()]
+    return (
+        sql[: start + 1] + inner_new + ")" + alias_text
+        + (f" WHERE {leftover}" if leftover else "")
+    )
 
 
 # ── rule: join elimination ────────────────────────────────────────────────

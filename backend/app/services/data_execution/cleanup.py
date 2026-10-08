@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 PER_SESSION_CAP = 20
 SWEEP_INTERVAL_S = 3600
+#: Upper bound on rows loaded per sweep. The hourly cadence drains any
+#: remainder; this keeps a single sweep from loading the whole table into
+#: memory as it grows.
+_MAX_SWEEP_ROWS = 20000
 
 
 def cleanup_expired_data_executions(db: Session) -> int:
@@ -31,6 +35,7 @@ def cleanup_expired_data_executions(db: Session) -> int:
                 DataExecution.is_deleted == False,  # noqa: E712
                 DataExecution.expires_at < now,
             )
+            .limit(_MAX_SWEEP_ROWS)
             .all()
         )
         count = len(expired)
@@ -53,6 +58,7 @@ def enforce_per_session_cap(db: Session) -> int:
             db.query(DataExecution)
             .filter(DataExecution.is_deleted == False)  # noqa: E712
             .order_by(DataExecution.session_id, DataExecution.created_date.desc())
+            .limit(_MAX_SWEEP_ROWS)
             .all()
         )
         deleted = 0

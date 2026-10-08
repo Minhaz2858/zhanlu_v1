@@ -26,6 +26,16 @@ class SsoStateStore:
         state = secrets.token_urlsafe(24)
         nonce = secrets.token_urlsafe(16)
         with self._lock:
+            # Sweep expired entries here (the TTL was only checked on consume,
+            # so abandoned flows accumulated forever).
+            if self._ttl_seconds:
+                now = time.monotonic()
+                expired = [
+                    s for s, e in self._entries.items()
+                    if now - e["created_at"] > self._ttl_seconds
+                ]
+                for s in expired:
+                    self._entries.pop(s, None)
             self._entries[state] = {
                 "provider_id": provider_id,
                 "nonce": nonce,

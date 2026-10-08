@@ -19,9 +19,10 @@ Rules this module never breaks:
   every upstream guard (coverage reroute, static route) stay intact.
 * **Bounded** — at most ``max_added`` partners per call, so a hub table
   cannot balloon the DDL slice.
-* **Confidence floor** — relations below ``min_confidence`` are ignored;
-  a weak edge is still used when it is the ONLY edge (a probable join beats
-  a guaranteed invention).
+* **Confidence floor** — relations below ``min_confidence`` are ignored
+  outright; ``min_confidence`` is a hard, caller-tunable floor. Lower it to
+  admit weak edges (e.g. NAME_MATCH / VALUE_OVERLAP), raise it to require
+  only declared FKs. There is no implicit fallback to a below-floor edge.
 * **Fail-soft** — any DB error returns the selection unchanged; the guarantee
   must never be the reason a turn fails.
 """

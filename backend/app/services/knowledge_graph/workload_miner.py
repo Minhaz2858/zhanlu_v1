@@ -71,16 +71,6 @@ def _table_names(sql: str) -> list[str]:
     return seen
 
 
-def _filters_for(sql: str, table: str) -> list[str]:
-    out: list[str] = []
-    for alias_m, col, literal in _FILTER_RE.findall(sql or ""):
-        # Attribute the conjunct to a table in the statement by its alias.
-        # The regex only sees alias.col; the alias maps to the first table it
-        # precedes — resolved cheaply below from the statement itself.
-        out.append(f"{col} = {literal[:_MAX_LITERAL_CHARS]}")
-    return out
-
-
 def _alias_map(sql: str) -> dict[str, str]:
     """alias → table for ``FROM/JOIN <table> <alias>`` in one statement."""
     out: dict[str, str] = {}
@@ -160,18 +150,31 @@ def mine_query_workload(db: Session, *, scan_limit: int | None = None) -> dict:
                     lo, hi = sorted((a, b))
                     _add(kb, "table_pair", lo, hi, None, "", seen_at)
             alias_map = _alias_map(sql)
+            # On a single-table statement the SAME conjunct matches both the
+            # qualified regex (t.status = 'open') and the unqualified one
+            # (status = 'open'), producing an identical stat_key. Dedupe per
+            # statement so one filter is counted once, not twice.
+            seen_filters: set[tuple[str, str]] = set()
             for alias_m, col, literal in _FILTER_RE.findall(sql):
                 table = alias_map.get(alias_m.lower())
                 if not table or table not in tables:
                     continue
                 lit = literal[:_MAX_LITERAL_CHARS]
                 detail_str = f"{col} = {lit}"
+                key = (table, detail_str)
+                if key in seen_filters:
+                    continue
+                seen_filters.add(key)
                 _add(kb, "table_filter", table, None, {"filter": detail_str}, detail_str, seen_at)
             if len(tables) == 1:
                 # Unqualified conjuncts are unambiguous on a single-table statement.
                 for col, literal in _FILTER_UNQUALIFIED_RE.findall(sql):
                     lit = literal[:_MAX_LITERAL_CHARS]
                     detail_str = f"{col} = {lit}"
+                    key = (tables[0], detail_str)
+                    if key in seen_filters:
+                        continue
+                    seen_filters.add(key)
                     _add(
                         kb, "table_filter", tables[0], None,
                         {"filter": detail_str}, detail_str, seen_at,

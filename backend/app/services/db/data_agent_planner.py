@@ -131,9 +131,16 @@ def _plan_from_json(obj: dict) -> DataAgentPlan:
     strategy = strategy.strip().lower()
     if strategy not in _STRATEGIES:
         strategy = "sql"
+    # LLM output is untrusted: a bare string would otherwise be iterated as
+    # characters ("total and ranking" -> ['t','o','t','a','l']).
+    _subs_raw = obj.get("sub_questions")
+    if isinstance(_subs_raw, str):
+        _subs_raw = [_subs_raw]
+    elif not isinstance(_subs_raw, list):
+        _subs_raw = []
     subs = [
         str(q).strip()
-        for q in (obj.get("sub_questions") or [])[:_MAX_SUB_QUESTIONS]
+        for q in _subs_raw[:_MAX_SUB_QUESTIONS]
         if str(q or "").strip()
     ]
     if intent == "single_question":

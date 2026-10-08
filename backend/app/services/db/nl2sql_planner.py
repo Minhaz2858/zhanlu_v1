@@ -59,6 +59,18 @@ _MAX_OPTIONS = 4
 #: The <resolved-intent> prompt block budget (shape steering, not an essay).
 _MAX_GUIDANCE_CHARS = 1400
 
+
+def _as_list(value: Any) -> list:
+    """Coerce untrusted LLM output into a list.
+
+    A bare string must NOT be iterated as characters ("region" -> 'r','e',...).
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return []
+
 _PLANNER_SYSTEM_PROMPT = """You are the planning stage of an enterprise NL2SQL \
 system. A user asked a data question against a business database. Before any \
 SQL is written, resolve WHAT is being asked.
@@ -318,10 +330,10 @@ def _build_guidance(plan: dict[str, Any]) -> str:
             f"- time range: {window or tr.get('label') or 'unresolved'}"
             f" ({tr.get('type')}, from {tr.get('label') or 'question'})"
         )
-    slices = [s for s in (plan.get("slices") or []) if s]
+    slices = [s for s in _as_list(plan.get("slices")) if s]
     if slices:
         parts.append(f"- break down by: {', '.join(slices)}")
-    assumptions = [a for a in (plan.get("assumptions") or []) if a]
+    assumptions = [a for a in _as_list(plan.get("assumptions")) if a]
     for a in assumptions[:4]:
         parts.append(f"- assumption: {a}")
     parts.append(
@@ -439,10 +451,10 @@ async def plan_question(
             "time_range": raw.get("time_range")
             if isinstance(raw.get("time_range"), dict)
             else {},
-            "slices": [s for s in (raw.get("slices") or []) if s][:4],
+            "slices": [s for s in _as_list(raw.get("slices")) if s][:4],
             "confidence": round(confidence, 2),
             "ambiguous": ambiguous,
-            "assumptions": [a for a in (raw.get("assumptions") or []) if a][:6],
+            "assumptions": [a for a in _as_list(raw.get("assumptions")) if a][:6],
             "needs_clarification": needs_clarification,
             "clarification": clarification,
             "guidance": _build_guidance(raw),

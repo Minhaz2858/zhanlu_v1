@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -16,6 +17,11 @@ from app.services.datasources import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: A statement that already carries its own row-limiting clause.
+_LIMIT_CLAUSE_RE = re.compile(
+    r"\blimit\s+(\d+|all)\b|\bfetch\s+first\b|\btop\s+\d+\b", re.IGNORECASE
+)
 
 
 class PostgresAdapter:
@@ -58,11 +64,15 @@ class PostgresAdapter:
 
     def _get_conn(self) -> psycopg.Connection:
         if self._conn is None or self._conn.closed:
-            dsn = self._config.pop("dsn", None)
+            # Copy first — popping from self._config destroyed the DSN, so a
+            # reconnect after a dropped connection fell back to the default
+            # host/database.
+            cfg = dict(self._config)
+            dsn = cfg.pop("dsn", None)
             if dsn:
-                self._conn = psycopg.connect(dsn, **self._config)
+                self._conn = psycopg.connect(dsn, **cfg)
             else:
-                self._conn = psycopg.connect(**self._config)
+                self._conn = psycopg.connect(**cfg)
             self._conn.execute("SET statement_timeout = %s", (str(self._timeout_ms),))
         return self._conn
 
@@ -153,8 +163,14 @@ class PostgresAdapter:
         timeout_ms: int = 5000,
     ) -> QueryResult:
         conn = self._get_conn()
-        # Apply row limit at SQL level
-        limited_sql = f"{sql.rstrip(';')} LIMIT {int(row_limit)}"
+        # Apply a row limit at the SQL level — but never double-append when the
+        # statement already carries LIMIT / FETCH FIRST / TOP.
+        base_sql = sql.rstrip(";").rstrip()
+        limited_sql = (
+            base_sql
+            if _LIMIT_CLAUSE_RE.search(base_sql)
+            else f"{base_sql} LIMIT {int(row_limit)}"
+        )
         t0 = time.monotonic()
         cur = conn.execute(limited_sql, params or {})
         rows = cur.fetchall()

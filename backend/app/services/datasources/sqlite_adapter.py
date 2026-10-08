@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import time
 from typing import Any
@@ -15,6 +16,11 @@ from app.services.datasources import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: A statement that already carries its own row-limiting clause.
+_LIMIT_CLAUSE_RE = re.compile(
+    r"\blimit\s+(\d+|all)\b|\bfetch\s+first\b|\btop\s+\d+\b", re.IGNORECASE
+)
 
 
 class SQLiteAdapter:
@@ -116,7 +122,13 @@ class SQLiteAdapter:
 
         conn.set_progress_handler(watchdog, 100)
         try:
-            limited_sql = f"{sql.rstrip(';')} LIMIT {int(row_limit)}"
+            # Never double-append a LIMIT when the statement already has one.
+            base_sql = sql.rstrip(";").rstrip()
+            limited_sql = (
+                base_sql
+                if _LIMIT_CLAUSE_RE.search(base_sql)
+                else f"{base_sql} LIMIT {int(row_limit)}"
+            )
             t0 = time.monotonic()
             cur = conn.execute(limited_sql, params or {})
             rows = cur.fetchall()

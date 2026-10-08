@@ -228,6 +228,7 @@ async def _universal_forecast(
             ).first()
             if not target:
                 return {"success": False, "error": f"Target '{product_key}' not found."}
+            target_id = target.id
         elif table and time_column and measure:
             # Auto-build a target from the user's table/column args
             target = ForecastTarget(
@@ -245,11 +246,33 @@ async def _universal_forecast(
                 status="ad_hoc",
                 source="universal_analytics",
             )
+            # compute_target loads the row by id, so the ad-hoc target must be
+            # persisted (flush assigns the id) before computing.
+            db.add(target)
+            db.flush()
+            target_id = target.id
         else:
             return {"success": False, "error": "Provide product_key or (table, time_column, measure)."}
 
-        run = engine.compute_target(target, horizon=horizon)
+        # compute_target(target_id: str, horizons=[...]) — pass the id and the
+        # requested horizon; passing the ORM object plus a `horizon=` kwarg
+        # raised TypeError on every call.
+        run = engine.compute_target(target_id, horizons=[horizon])
         db.commit()
+        if run is None:
+            return {
+                "success": False,
+                "error": (
+                    f"No forecast could be produced for '{target.product_key}' "
+                    "(target not found or insufficient history)."
+                ),
+            }
+
+        # ForecastRun exposes the per-horizon values in `results`
+        # ({"30d": {"base": .., "bull": .., "bear": ..}}); there is no
+        # `forecasted_value` attribute.
+        _res = (run.results or {}).get(f"{horizon}d") or {}
+        base = _res.get("base")
 
         return {
             "success": True,
@@ -257,8 +280,11 @@ async def _universal_forecast(
                 "horizons": horizon,
                 "confidence": run.confidence,
                 "explanation": run.explanation,
-                "forecasted_value": str(run.forecasted_value) if run.forecasted_value else None,
-                "forecasted_change_pct": str(run.forecasted_change_pct) if run.forecasted_change_pct else None,
+                "forecasted_value": str(base) if base is not None else None,
+                "forecasted_change_pct": None,  # not derivable from the run alone
+                "bull": _res.get("bull"),
+                "bear": _res.get("bear"),
+                "below_naive_baseline": run.below_naive_baseline,
             },
         }
     except Exception as exc:
