@@ -811,6 +811,11 @@ BUILTIN_AGENTS: list[AgentDefinition] = [
             "describe_schema",
             "execute_query",
             "answer_from_database",
+            # Document sources (source_kind == 'file') — the sub-agent prompt
+            # teaches these; the whitelist must cover them so the swarm
+            # dispatcher doesn't block them (IBM agent-selection parity).
+            "search_documents",
+            "answer_from_documents",
             # Institutional-grade research-analyst pipeline (2026-08-25)
             "comprehensive_data",
             "collect_enterprise_data",

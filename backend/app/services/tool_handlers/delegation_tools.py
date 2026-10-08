@@ -185,6 +185,126 @@ def _rows_have_business_data(rows: list | None) -> bool:
 # Handler
 # ---------------------------------------------------------------------------
 
+async def _run_swarm_data_agent(
+    question: str,
+    bound_kb_ids: list[str],
+    preferred_kb: str | None,
+    db,
+    user_id: str | None,
+    context: dict,
+    endpoint=None,
+    max_iterations: int = 6,
+) -> dict | None:
+    """Run the data pipeline as a SwarmRuntime sub-agent (IBM hierarchical mode).
+
+    The builtin ``data_agent`` definition supplies the own system prompt and
+    the tool whitelist; the LLM fn injects the same data-agent tool schemas
+    the legacy loop uses, and the dispatcher enforces the whitelist, injects
+    the default ``data_source_id``, and captures rows into the same state
+    shape. Returns ``None`` when the swarm produced nothing usable so the
+    caller falls back to the legacy sub-loop.
+    """
+    from app.services.swarm.runtime import SwarmRuntime
+
+    state: dict = {
+        "last_rows": None,
+        "last_sql": None,
+        "source_id": preferred_kb,
+        "source_name": None,
+    }
+    sub_context = dict(context)
+    sub_context["bound_kb_ids"] = bound_kb_ids
+    if preferred_kb:
+        sub_context["data_source_id"] = preferred_kb
+    sub_context["schema_validator_enabled"] = True
+    sub_context["did_you_mean_enabled"] = True
+    sub_context["schema_linking_enabled"] = True
+    sub_context["schema_graph_enabled"] = True
+
+    tool_schemas = _build_sub_agent_tool_schemas()
+
+    async def _llm_fn(system_prompt: str, messages: list[dict]) -> dict:
+        msgs = [{"role": "system", "content": system_prompt}] + [
+            m for m in messages if m.get("role") != "system"
+        ]
+        res = await _call_llm_with_retry(msgs, tool_schemas, endpoint=endpoint)
+        return {
+            "response": res.get("response") or res.get("content") or "",
+            "tool_calls": res.get("tool_calls") or [],
+        }
+
+    async def _dispatch(name: str, call_args: dict, _db, _uid, _ctx) -> dict:
+        if name not in _DATA_AGENT_TOOLS:
+            return {"success": False, "error": f"Tool '{name}' not allowed for data-analyst"}
+        call_args = dict(call_args or {})
+        # Fix the classic "internal tool requires data_source_id" failure at
+        # the dispatcher seam: default to the preferred/bound KB.
+        if not call_args.get("data_source_id") and preferred_kb:
+            call_args["data_source_id"] = preferred_kb
+        from app.services.agent_tools import execute_tool  # local: avoid import cycle
+
+        result = await execute_tool(name, call_args, _db, _uid, sub_context)
+        _swarm_capture_state(state, name, result)
+        return result
+
+    runtime = SwarmRuntime()
+    swarm_result = await runtime.run(
+        agent_name="data_agent",
+        task=question,
+        llm_fn=_llm_fn,
+        tool_dispatcher=_dispatch,
+        db=db,
+        user_id=user_id,
+        max_iterations=max_iterations,
+    )
+
+    if not swarm_result.success and not state.get("last_rows"):
+        logger.info(
+            "swarm data agent: no usable result (error=%s) — caller will fall back",
+            swarm_result.error,
+        )
+        return None
+
+    final_text = swarm_result.final_response or ""
+    rows = state.get("last_rows")
+    _derived_columns = list(rows[0].keys()) if rows and isinstance(rows[0], dict) else []
+    return {
+        "success": True,
+        "answer": final_text,
+        "rows": rows,
+        "columns": _derived_columns,
+        "sql": state.get("last_sql"),
+        "source_id": state.get("source_id"),
+        "source_name": state.get("source_name"),
+        "iterations": len(swarm_result.tool_calls),
+        "truncated": bool(swarm_result.error and "max_iterations" in str(swarm_result.error)),
+        "data_quality": {
+            "has_business_data": _rows_have_business_data(rows),
+            "trivial_probe_detected": False,
+            "garbage_rows_detected": False,
+            "row_count": len(rows) if rows else 0,
+        },
+        "swarm": True,
+    }
+
+
+def _swarm_capture_state(state: dict, tool_name: str, result: dict) -> None:
+    """Mirror the legacy loop's state capture for the swarm dispatcher."""
+    if not isinstance(result, dict):
+        return
+    if result.get("error") and not result.get("success", True):
+        return
+    rows = result.get("rows")
+    if tool_name in ("execute_query", "answer_from_database") and isinstance(rows, list):
+        state["last_rows"] = rows
+        state["last_sql"] = result.get("sql") or result.get("query") or state.get("last_sql")
+        src = result.get("source") or {}
+        if src.get("id") or result.get("source_id"):
+            state["source_id"] = src.get("id") or result.get("source_id")
+        if src.get("name") or result.get("source_name"):
+            state["source_name"] = src.get("name") or result.get("source_name")
+
+
 async def _ask_data_agent(
     args: dict,
     db: Session,
@@ -291,6 +411,38 @@ async def _ask_data_agent(
                 "error": str(_cl.get("question") or ""),
                 "planner": _planner_plan.to_state(),
             }
+
+    # ── Swarm sub-agent path (flag-gated, IBM agent-selection) ────────────
+    # Run the data pipeline through SwarmRuntime (builtin data_agent
+    # definition: own system prompt + enforced tool whitelist) instead of
+    # the hand-rolled sub-loop below. Fail-open: any swarm error (or an
+    # empty result) falls through to the legacy loop, exactly like the
+    # FSM fallthrough pattern in the v3 router.
+    if getattr(settings, "DATA_AGENT_SWARM_ENABLED", False):
+        _swarm_t0 = time.monotonic()
+        try:
+            _swarm_result = await _run_swarm_data_agent(
+                question, bound_kb_ids, preferred_kb, db, user_id,
+                context or {}, endpoint,
+                max_iterations=max(1, min(int(args.get("max_iterations") or 6), 10)),
+            )
+        except Exception as _swarm_err:
+            logger.warning(
+                "ask_data_agent swarm path failed (falling back to loop): %s",
+                _swarm_err,
+            )
+            _swarm_result = None
+        if _swarm_result is not None:
+            logger.info(
+                "ask_data_agent delegation summary: conv=%s mode=swarm wall=%.1fs "
+                "rows=%d final_len=%d",
+                (context or {}).get("conversation_id"),
+                time.monotonic() - _swarm_t0,
+                len(_swarm_result.get("rows") or []),
+                len(_swarm_result.get("answer") or ""),
+            )
+            return _swarm_result
+        logger.info("ask_data_agent swarm path returned empty — falling back to loop")
 
     # ── Opt-in progress sub-step emitter (wired by the v3 FSM for chat
     # streaming). When the FSM passes ``context["progress_emitter"]`` (a

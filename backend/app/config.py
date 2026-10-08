@@ -1421,6 +1421,12 @@ class Settings(BaseSettings):
     NL2SQL_QUERY_LOG_RETRIEVAL_ENABLED: bool = True
     NL2SQL_WORKLOAD_MINING_ENABLED: bool = True
     DATA_AGENT_PLANNER_ENABLED: bool = True
+    # DATA_AGENT_SWARM_ENABLED (IBM agent-selection / hierarchical mode):
+    # route the ask_data_agent sub-pipeline through the SwarmRuntime (own
+    # system prompt from the builtin data_agent definition + enforced tool
+    # whitelist) instead of the hand-rolled sub-loop. Fail-open: any swarm
+    # error falls through to the legacy loop. Default OFF (measure first).
+    DATA_AGENT_SWARM_ENABLED: bool = False
 
     # ── OCI NL2SQL parity — planning, feedback loop, visualization ────────
     # All four default OFF (the standing convention); each is an independent
