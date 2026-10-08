@@ -11535,6 +11535,11 @@ async def add_message_stream(
                 })
                 + "\n\n"
             )
+            try:
+                from app.services.context_bus import drop_context_bus
+                drop_context_bus(conversation_id)
+            except Exception:
+                pass
 
         return StreamingResponse(
             _sse_with_heartbeat(_workflow_stream()),
@@ -11622,6 +11627,11 @@ async def add_message_stream(
                     })
                     + "\n\n"
                 )
+                try:
+                    from app.services.context_bus import drop_context_bus
+                    drop_context_bus(conversation_id)
+                except Exception:
+                    pass
             except Exception as _cache_stream_err:  # noqa: BLE001
                 logger.warning(
                     "experience: cache hit stream failed (non-fatal): %s",
@@ -11668,6 +11678,18 @@ async def add_message_stream(
         )
     except Exception as _v3_ctx_err:
         logger.debug("v3 build_conversation_context failed (non-fatal): %s", _v3_ctx_err)
+
+    # Shared ContextBus (IBM context-management convergence): ONE context
+    # object for both agent brains. Created once here, published to by both
+    # the FSM path and the ReAct loop below, dropped at turn end. The
+    # deterministic FSM skeleton is untouched — this is context plumbing.
+    try:
+        from app.services.context_bus import get_context_bus
+        _bus = get_context_bus(conversation_id)
+        _bus.publish("system", f"agent: {conv.agent_name or 'general_assistant'}")
+    except Exception as _bus_err:
+        logger.debug("v3 context bus init failed (non-fatal): %s", _bus_err)
+        _bus = None
 
     # Compute the data-source runtime context EARLY (before the FSM-vs-
     # legacy branch). Both paths need the same `bound_kb_ids` so the
@@ -11979,6 +12001,9 @@ async def add_message_stream(
                     # badge model and the runtime model finally match on
                     # FSM-routed turns.
                     endpoint=effective_llm.endpoint,
+                    # Shared ContextBus: the FSM's CONTEXT stage merges the
+                    # bus sections (one context model for both agent brains).
+                    context_bus=_bus,
                 )
                 _fsm = SynexiaFSM(db)
 
@@ -12243,6 +12268,24 @@ async def add_message_stream(
                 }
                 _push_live("finalize_done", "finalize_done")
                 yield f'data: {json.dumps(done_payload)}\n\n'
+                # Shared ContextBus: turn over — publish the FSM's plan/verify
+                # outcome for the next turn, then drop the per-turn bus.
+                try:
+                    if _bus is not None:
+                        _bus.publish("task_state", json.dumps({
+                            "last_fsm_state": fsm_result.state,
+                            "confidence": fsm_result.confidence,
+                            "plan_summary": fsm_result.plan_summary or [],
+                            "artifact_ids": fsm_result.artifact_ids,
+                        }, default=str)[:2000])
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        from app.services.context_bus import drop_context_bus
+                        drop_context_bus(conversation_id)
+                    except Exception:
+                        pass
 
             return StreamingResponse(
                 _sse_with_heartbeat(_disconnect_safe_stream(_fsm_event_stream)),
@@ -12376,6 +12419,17 @@ async def add_message_stream(
             system_prompt += _v3_followup_block
     except Exception:
         pass  # Follow-up context injection is best-effort
+
+    # Shared ContextBus (IBM context convergence): inject bus sections the
+    # follow-up block does NOT already cover (task_state, tool digests,
+    # compaction notes, memory). Skipped sections would double-inject.
+    try:
+        if _bus is not None:
+            _bus_block = _bus.format_for_react(skip={"transcript", "artifacts", "memory"})
+            if _bus_block:
+                system_prompt += "\n\n" + _bus_block
+    except Exception:
+        pass  # Bus injection is best-effort
 
     # Phase 1: inject extracted attachment text into the system prompt so
     # the legacy tool loop (non-FSM path) can read what the user uploaded.
@@ -16941,6 +16995,18 @@ async def add_message_stream(
                     "content": _result_str,
                 })
                 guard_ctrl.after_call(tool_name, call["args"], _result_str)
+                # Shared ContextBus: publish a rolling digest of this tool
+                # result so the FSM path (and next-turn context) sees what
+                # the ReAct loop executed — one context model, two brains.
+                try:
+                    if _bus is not None:
+                        try:
+                            _digest_payload = json.loads(_result_str)
+                        except (ValueError, TypeError):
+                            _digest_payload = {"summary": _result_str}
+                        _bus.digest_tool_result(tool_name, _digest_payload)
+                except Exception:
+                    pass
                 # FIX 2026-08-24: harvest rich-text answers from market-research
                 # sub-agents (ask_perception/ask_intelligence/ask_diagnosis/
                 # ask_decision/ask_pricing). These return prompt_text instead of
@@ -19063,6 +19129,13 @@ async def add_message_stream(
                 _discard_steer(conversation_id)
             except Exception as _discard_err:
                 logger.warning("v3 stream: steer discard failed (non-fatal): %s", _discard_err)
+            # Shared ContextBus: turn over — drop the per-turn bus (covers
+            # normal completion, error, and client-disconnect paths).
+            try:
+                from app.services.context_bus import drop_context_bus
+                drop_context_bus(conversation_id)
+            except Exception:
+                pass
             # T18: clear the dashboard-intent flag set at event_stream entry.
             try:
                 reset_dashboard_intent(_dash_intent_token)

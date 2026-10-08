@@ -154,6 +154,12 @@ class ExecutionRequest(BaseModel):
     # provider+model instead of the legacy .env defaults.  The chat-loop
     # routers resolve it via ``resolve_effective_llm`` and attach it here.
     endpoint: Optional[Any] = None
+    # Shared ContextBus (app.services.context_bus) — the single context
+    # model shared with the ReAct main loop. When present, _run_context
+    # merges the bus sections into the assembled manifest so the FSM sees
+    # what the loop saw (and vice versa), instead of the two paths running
+    # on separate context models.
+    context_bus: Optional[Any] = None
 
 
 class ExecutionResult(BaseModel):
@@ -438,6 +444,29 @@ class SynexiaFSM:
             # everything the user uploaded.
             attachments=request.attachments,
         )
+        # Shared ContextBus merge: fold bus sections (system snapshot,
+        # task_state, memory, tool digests, compaction notes) into the
+        # manifest so the FSM and the ReAct loop share one context model.
+        bus = getattr(request, "context_bus", None)
+        if bus is not None:
+            try:
+                bus_manifest = bus.to_fsm_manifest()
+                context.setdefault("items", []).extend(bus_manifest.get("items", []))
+                for _key in ("available_tools", "available_skills", "user_attachments"):
+                    _bus_vals = bus_manifest.get(_key) or []
+                    if _bus_vals:
+                        _merged = list(dict.fromkeys([*(context.get(_key) or []), *_bus_vals]))
+                        context[_key] = _merged
+                context["token_estimate"] = int(
+                    (context.get("token_estimate") or 0) + (bus_manifest.get("token_estimate") or 0)
+                )
+                logger.info(
+                    "Context assembled: %d items (+%d from shared context bus)",
+                    len(context.get("items", [])) - len(bus_manifest.get("items", [])),
+                    len(bus_manifest.get("items", [])),
+                )
+            except Exception as _bus_err:  # noqa: BLE001 — context merge is best-effort
+                logger.debug("context_bus manifest merge failed (non-fatal): %s", _bus_err)
         self.execution.context_manifest = context
         self.db.commit()
         logger.info("Context assembled: %d items", len(context.get("items", [])))
