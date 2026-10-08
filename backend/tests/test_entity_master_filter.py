@@ -7,8 +7,10 @@ Layers covered:
   3. Prompt block        (_ENTITY_MASTER_FILTER_BLOCK + get_system_prompt injection)
   4. Schema graph        (TableNode.table_role + _render_node + build())
   5. KG caching          (_agent_kb_ids + _inject_entity_masters)
-  6. Verification gate   (_detect_overscope_filter + evaluate_answer wiring)
-  7. describe_schema     (_annotate_table_roles)
+  6. describe_schema     (_annotate_table_roles)
+
+An earlier "Layer 6 — verification gate" section was removed: it exercised
+``app.services.answer_verification``, which no longer exists.
 
 All expectations are structural — zero hardcoded domain table/column names.
 """
@@ -26,7 +28,6 @@ from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.models.knowledge_base import KnowledgeBase
 from app.models.knowledge_catalog import KBTableMeta, ProjectCatalogOverlay
-from app.services import answer_verification as av
 from app.services.agent_prompts import (
     _ENTITY_MASTER_FILTER_BLOCK,
     _agent_is_db_bound,
@@ -544,63 +545,6 @@ def test_inject_entity_masters_no_rows(monkeypatch):
     monkeypatch.setattr(settings, "ENTITY_MASTER_FILTER_ENABLED", True)
     out = _inject_entity_masters("p", _role_db([]), _App(knowledge_bases=["kb1"]))
     assert out == "p"
-
-
-# ---------------------------------------------------------------------------
-# Layer 6 — verification gate (overscope detector)
-# ---------------------------------------------------------------------------
-
-
-def test_overscope_detector_fires_on_category_dump():
-    assert av._detect_overscope_filter(
-        "Show me the C5/C9 products",
-        [{"row_count": 42_993, "sql": "SELECT * FROM sales_details"}],
-    ) is True
-
-
-def test_overscope_detector_requires_scope_signal():
-    assert av._detect_overscope_filter(
-        "List all rows in sales",
-        [{"row_count": 42_993, "sql": "SELECT * FROM sales_details"}],
-    ) is False
-
-
-def test_overscope_detector_requires_large_dump():
-    assert av._detect_overscope_filter(
-        "premium customers",
-        [{"row_count": 12, "sql": "SELECT * FROM customers"}],
-    ) is False
-
-
-def test_overscope_detector_ignores_filtered_sql():
-    assert av._detect_overscope_filter(
-        "premium customers",
-        [{"row_count": 5_000, "sql": "SELECT * FROM orders WHERE customer_id IN (1,2,3)"}],
-    ) is False
-
-
-def test_overscope_detector_empty_inputs():
-    assert av._detect_overscope_filter("", []) is False
-    assert av._detect_overscope_filter("C5/C9 products", []) is False
-
-
-def test_evaluate_answer_flags_overscope(monkeypatch):
-    monkeypatch.setattr(settings, "SELF_EVAL_REPLAN_ENABLED", True)
-    monkeypatch.setattr(settings, "SELF_EVAL_LLM_GATE_ENABLED", False)
-    res = av.evaluate_answer(
-        "Show me the C5/C9 products sales",
-        [
-            {
-                "row_count": 42_993,
-                "sql": "SELECT * FROM sales_details",
-                "response": "Here are 42993 records",
-            }
-        ],
-        "I found 42993 records",
-    )
-    assert res.status == "INCOMPLETE"
-    assert "overscope" in res.signals
-    assert any("unfiltered" in g for g in res.gaps)
 
 
 # ---------------------------------------------------------------------------

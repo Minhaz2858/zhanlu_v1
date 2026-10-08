@@ -1,6 +1,7 @@
 """Tests for the reflexion LLM-rubric pass."""
 
 import asyncio
+import json
 import os
 
 import pytest

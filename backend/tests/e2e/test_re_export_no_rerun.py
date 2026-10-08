@@ -36,7 +36,7 @@ import pytest
 E2E_RUN = os.environ.get("E2E_RUN") == "1"
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://localhost:5002").rstrip("/")
 ADMIN_EMAIL = os.environ.get("E2E_ADMIN_EMAIL", "admin@zhanlu.dev")
-ADMIN_PASSWORD=os.env...RD", "admin123")
+ADMIN_PASSWORD = os.environ.get("E2E_ADMIN_PASSWORD", "admin123")
 APP_ID = os.environ.get("E2E_APP_ID", "default-app")
 
 AGENT_NAME = "general_assistant"

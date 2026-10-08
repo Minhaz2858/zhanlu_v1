@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from builtins import ExceptionGroup  # py3.11+ builtin; explicit for linters
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 

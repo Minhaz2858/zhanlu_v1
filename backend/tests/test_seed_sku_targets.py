@@ -55,7 +55,7 @@ def test_static_targets_no_longer_include_erp_where_1_1():
         if "1=1" in str(t["datasource"].get("where", ""))
     ]
     assert len(degenerate) == 0, (
-        f"ERP products {erp_keys} should not be in static list — "
+        f"ERP products {degenerate} should not be in static list — "
         "they are discovered dynamically by discover_and_seed_sku_targets()"
     )
 

@@ -8,7 +8,7 @@ these tests pin the renderer's sheets behavior.
 
 from io import BytesIO
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from app.services.artifacts.exporters.xlsx_export import render
 from app.services.synexia.contracts import ReportCardPayload

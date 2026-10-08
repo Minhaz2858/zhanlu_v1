@@ -157,7 +157,7 @@ def test_legacy_project_string_filter_does_not_match_any_column(db):
         f"Expected 3 rows (filter dropped because 'project' is not a "
         f"model column), got {len(rows)}. If this number changes, "
         f"parse_query has changed — update the frontend to not rely "
-        f"on the legacy {project!r} fallback for AgentConversation."
+        "on the legacy 'project' fallback for AgentConversation."
     )
 
     # And a slightly more interesting case: a real filter combined

@@ -11,6 +11,7 @@ This test locks in the fix: the endpoint must emit a clear ``error``
 event within a few hundred ms when no API key is configured, so the
 frontend can surface a readable error.
 """
+from builtins import ExceptionGroup  # py3.11+ builtin; explicit for linters
 from unittest.mock import patch
 
 
