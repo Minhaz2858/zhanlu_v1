@@ -2,6 +2,32 @@
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
+## STATUS (2026-10-08, end of session 1)
+
+| Task | Status | Commit |
+|---|---|---|
+| A1 configurable timeouts | DONE | 8ad55f663 |
+| A2 same-provider transient backoff | DONE | 8ad55f663 |
+| A3 fallback chain (deepseek-flash) + tier pinning + SPOF warning | DONE | c67811dfa |
+| B1 ContextBus service | DONE | 066ce7951 |
+| B2 bus wired into v3 (FSM merge, ReAct block, digests, drops) | DONE | b42b8da7d |
+| B3 compaction visibility via bus | DONE ( FSM CONTEXT merge covers sections; compaction publish pending) | b42b8da7d |
+| D1 selection miss telemetry | DONE | 3042a13f4 |
+| D2 dynamic-mode audit tests | DONE | 3042a13f4 |
+| C1 data_agent definition + doc tools | DONE | a8b1d2695 |
+| C2 swarm-backed ask_data_agent (DATA_AGENT_SWARM_ENABLED) | DONE | a8b1d2695 |
+| C3 delegation A/B metrics | DONE | 17b7e5b27 |
+| E1 route/outcome enrichment + FSM/cache/workflow records | DONE | d5ad299a5 |
+| E2 routing_feedback reader (ROUTING_FEEDBACK_ENABLED) | DONE | 5812aa98c |
+| F1–F5 ReAct loop de-dup | **PENDING — dedicated session** (high risk, flag-gated; see anchors below) | — |
+
+New env flags (all default False/off): `DATA_AGENT_SWARM_ENABLED`, `ROUTING_FEEDBACK_ENABLED`.
+New settings: `LLM_TIMEOUT_S=120.0`, `LLM_SYNC_TIMEOUT_S=30.0`; `LLM_FALLBACK_PROVIDERS` now populated with deepseek-flash (same tier).
+
+F anchors (verified this session): v3 `event_stream` starts `agents.py:12840` (pre-F ~7,830 ln); v2 `add_message` `:6426-8448`; `/resume` `:8451-9370`; guardrail plumbing 3× at `:7344/:8958/:14554`; tool-result append + guard at `:16991-16997`; done-frame + invocation record `:19073-19130`; the shared loop home is `app/services/agent_loop/` (sse_builders, turn_action, fsm_pruner already there).
+
+
+
 **Goal:** Close the six IBM agent-orchestration gaps in the Zhanlu backend: shared context bus, provider fault tolerance, sub-agent pipeline activation, tool-selection efficiency + measurement, telemetry→routing feedback, and ReAct-loop de-duplication.
 
 **Architecture:** New services under `app/services/` (`context_bus.py`, `routing_feedback.py`), surgical edits to `llm_service.py` / `config.py` / `delegation_tools.py` / `agents.py`, and a phased extraction of the ReAct loop into `app/services/agent_loop/react_loop.py` behind a flag. Every task is TDD, run inside `docker exec zhanlu-copy-backend python -m pytest ... -q`.
