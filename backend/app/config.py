@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # ── External MySQL warehouse — optional read-only mirror (empty = off).
     # Empty = dashboard routes return 503 (the rest of zhanlu is unaffected).
-    # Example: mysql+pymysql://user:password@10.10.10.49:3306/aipdp_data_warehouse_prod
+    # Example: mysql+pymysql://user:password@10.10.10.49:3306/demo_warehouse_prod
     MYSQL_URL: str = ""
 
     @property
@@ -1445,6 +1445,11 @@ class Settings(BaseSettings):
     # Set to a long random string to let machine callers delegate tasks
     # without an interactive login.
     A2A_API_KEY: str = ""
+    # RED_TEAM_ENABLED (ADLC P1-4): scheduled adversarial campaigns against
+    # published agents every 6h (probes in services/red_team.py). Costs
+    # ~len(probes) LLM calls per agent per cycle — enable in production
+    # once the eval baseline is stable.
+    RED_TEAM_ENABLED: bool = False
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

@@ -72,3 +72,7 @@ xgboost>=2.0,<3.0
 # drawing tool to work.
 ezdxf>=1.4
 rapidfuzz
+
+# ADLC P1-6: OpenTelemetry tracing (tracing/otel.py degrades to no-op without it)
+opentelemetry-sdk>=1.20
+opentelemetry-exporter-otlp-proto-http>=1.20

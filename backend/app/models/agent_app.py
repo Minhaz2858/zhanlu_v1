@@ -68,6 +68,15 @@ class AgentApp(TimestampedBase):
     # Status
     status: Mapped[str | None] = mapped_column(String(50), nullable=True, default="draft")
 
+    # ── ADLC governed catalog (2026-10-08) ──
+    # version bumps on every publish; full snapshots live in
+    # agent_app_revisions (see AgentAppRevision) — rollback restores a
+    # snapshot and bumps again, so history is immutable.
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # Canary rollout (IBM ADLC "progressive rollout"): percentage of
+    # protocol/delegation callers served this agent. 100 = fully rolled out.
+    rollout_percent: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+
     # Hierarchical LLM config — FK to llm_models catalog (gated by HIERARCHICAL_LLM_ENABLED)
     llm_model_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("llm_models.id"), nullable=True, index=True,

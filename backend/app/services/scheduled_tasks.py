@@ -164,6 +164,41 @@ async def _run_daily_eval_cycle() -> None:
         logger.exception("[daily-eval] Unhandled exception")
 
 
+# ---- Scheduled Red-Team Campaigns (ADLC P1-4) ---------------------------
+
+RED_TEAM_INTERVAL = 6 * 3600  # every 6 hours
+
+
+def _run_red_team_sync() -> dict:
+    """Run one adversarial campaign against published agents (sync)."""
+    from app.database import SessionLocal
+    from app.services.red_team import run_red_team_campaign
+
+    db = SessionLocal()
+    try:
+        import asyncio
+        return asyncio.run(run_red_team_campaign(db))
+    finally:
+        db.close()
+
+
+async def _run_red_team_cycle() -> None:
+    """Scheduled red-team wrapper — no-op unless RED_TEAM_ENABLED."""
+    from app.config import settings
+    if not getattr(settings, "RED_TEAM_ENABLED", False):
+        return
+    try:
+        summary = await asyncio.to_thread(_run_red_team_sync)
+        if summary.get("results"):
+            logger.info(
+                "[red-team] campaign %s: %d agents, %d failures",
+                summary.get("campaign_id"), summary.get("agents_tested"),
+                summary.get("failures"),
+            )
+    except Exception:
+        logger.exception("[red-team] Campaign failed")
+
+
 # ---- Nightly Forecast (2 AM UTC daily, NOT a UI-visible AutomationTask) -------
 
 def _calculate_seconds_until_2am() -> float:
@@ -678,6 +713,10 @@ def start_scheduled_tasks() -> None:
         loop.create_task(
             _periodic_task("daily_eval", DAILY_EVAL_INTERVAL, _run_daily_eval_cycle),
             name="sched-daily-eval",
+        ),
+        loop.create_task(
+            _periodic_task("red_team", RED_TEAM_INTERVAL, _run_red_team_cycle),
+            name="sched-red-team",
         ),
     ]
 

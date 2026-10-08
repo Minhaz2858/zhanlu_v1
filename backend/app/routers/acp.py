@@ -93,6 +93,16 @@ async def _create_run(
     if agent is None or agent.status != "published":
         raise HTTPException(404, f"No published agent {agent_id!r}")
 
+    # ADLC P1-5 canary: deterministic per-caller bucket vs rollout_percent.
+    from app.services.agent_lifecycle import rollout_allows
+
+    if not rollout_allows(agent, auth.get("user_id")):
+        raise HTTPException(
+            429,
+            f"Agent '{agent.name}' is in a canary rollout "
+            f"({agent.rollout_percent}%); this caller is not in the bucket. Retry later.",
+        )
+
     message = body.get("message") or {}
     parts = message.get("parts") if isinstance(message, dict) else body.get("parts")
     if not isinstance(parts, list) or not parts:

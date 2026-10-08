@@ -103,10 +103,19 @@ def _sample_conversations(
         return []
 
     sampled: list[dict] = []
+    # ADLC P0-2: per-agent sampling weight from AgentApp.evaluation_profile
+    # ({"eval_weight": 2.0} = twice the base sample rate). Agents that
+    # declare a profile get proportionally more scrutiny; default 1.0.
+    weights = _agent_eval_weights(db)
     for conv in conversations:
         if len(sampled) >= max_samples():
             break
-        if random.random() > sample_rate():
+        weight = weights.get(conv.get("agent_name"), 1.0)
+        try:
+            effective_rate = min(1.0, sample_rate() * float(weight))
+        except (TypeError, ValueError):
+            effective_rate = sample_rate()
+        if random.random() > effective_rate:
             continue
 
         messages = conv.messages or []
@@ -130,9 +139,32 @@ def _sample_conversations(
                 "conversation_id": conv.id,
                 "user_message": user_msg.get("content", ""),
                 "assistant_text": assistant_msg.get("content", ""),
+                "agent_name": getattr(conv, "agent_name", None),
             })
 
     return sampled
+
+
+def _agent_eval_weights(db) -> dict[str, float]:
+    """{agent_name: eval_weight} for agents whose evaluation_profile sets one."""
+    try:
+        from app.models.agent_app import AgentApp
+
+        rows = (
+            db.query(AgentApp)
+            .filter(AgentApp.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        weights: dict[str, float] = {}
+        for a in rows:
+            profile = a.evaluation_profile or {}
+            weight = profile.get("eval_weight") if isinstance(profile, dict) else None
+            if isinstance(weight, (int, float)) and weight > 0:
+                weights[a.name] = float(weight)
+        return weights
+    except Exception as e:  # noqa: BLE001 — weighting is best-effort
+        logger.debug("eval weights load failed (non-fatal): %s", e)
+        return {}
 
 
 def run_eval_pipeline(db) -> list[EvalRecord]:

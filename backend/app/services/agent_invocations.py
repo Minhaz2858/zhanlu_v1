@@ -30,6 +30,26 @@ logger = logging.getLogger(__name__)
 _DEFAULT_AGENT_NAME = "general_assistant"
 
 
+def _current_trace_id() -> Optional[str]:
+    """Read the active OpenTelemetry span's trace id (ADLC P1-6).
+
+    Best-effort: returns None when the OTel SDK is absent or no span is
+    active — the agent_invocations.trace_id column stays NULL instead of
+    failing the record.
+    """
+    try:
+        from opentelemetry import trace
+
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+        if ctx is None or not getattr(ctx, "is_valid", False):
+            return None
+        tid = format(ctx.trace_id, "032x")
+        return tid if tid != "0" * 32 else None
+    except Exception:  # noqa: BLE001 — tracing must never break recording
+        return None
+
+
 def _resolve_agent_app_id(db: Session, agent_app_id: Optional[str]) -> Optional[str]:
     """Resolve a missing app id by name lookup (no hardcoded UUIDs)."""
     if agent_app_id:
@@ -83,6 +103,8 @@ def record_invocation(
         from app.models.agent_invocation import AgentInvocation
 
         resolved_app_id = _resolve_agent_app_id(db, agent_app_id)
+        if trace_id is None:
+            trace_id = _current_trace_id()
         if not resolved_app_id:
             logger.warning("agent_invocations: no agent app to bind — skipping row")
             return None

@@ -132,6 +132,18 @@ async def _tasks_send(
     if not agent_id or not isinstance(parts, list):
         return _error_response(req_id, -32602, "Invalid params: agent_id and message.parts required")
 
+    # ADLC P1-5 canary: deterministic per-caller bucket vs rollout_percent.
+    from app.models.agent_app import AgentApp
+    from app.services.agent_lifecycle import rollout_allows
+
+    agent_row = db.query(AgentApp).filter(AgentApp.id == agent_id).first()
+    if agent_row is not None and not rollout_allows(agent_row, auth.get("user_id")):
+        return _error_response(
+            req_id, -32001,
+            f"Agent '{agent_row.name}' is in a canary rollout "
+            f"({agent_row.rollout_percent}%); this caller is not in the bucket. Retry later.",
+        )
+
     store = tasks_mod.A2aTaskStore(db)
     task = store.create(
         task_id=params.get("id"),
