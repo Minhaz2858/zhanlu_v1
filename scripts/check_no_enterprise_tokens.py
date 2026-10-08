@@ -74,6 +74,30 @@ def token_matches(token: str, text: str) -> bool:
     return token in text
 
 
+def build_matchers(tokens: list[str]):
+    """One precompiled regex per token class.
+
+    Scanning every line against every token recompiled ~177M patterns on a
+    full-tree run (60s). A combined matcher turns the common no-hit file into
+    two searches, and only hit files fall back to per-token line attribution.
+    """
+    ascii_tokens = [t for t in tokens if _WORD.match(t)]
+    other_tokens = [t for t in tokens if not _WORD.match(t)]
+    apat = (
+        re.compile(
+            "|".join(rf"(?<![A-Za-z0-9_]){re.escape(t)}(?![A-Za-z0-9_])"
+                     for t in ascii_tokens),
+            re.IGNORECASE,
+        )
+        if ascii_tokens else None
+    )
+    cpat = (
+        re.compile("|".join(re.escape(t) for t in other_tokens))
+        if other_tokens else None
+    )
+    return apat, cpat
+
+
 def load_allowlist(path: Path) -> list[tuple[str, str]]:
     if not path.exists():
         return []
@@ -116,10 +140,15 @@ def main(argv=None) -> int:
     allow = load_allowlist(root / "scripts" / "enterprise_token_allowlist.txt")
 
     hits = []
+    apat, cpat = build_matchers(tokens)
     for path in sorted(_iter_files(root)):
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
+            continue
+        # Fast path: most files contain none of the tokens.
+        if not ((apat is not None and apat.search(text))
+                or (cpat is not None and cpat.search(text))):
             continue
         rel = str(path.relative_to(root))
         for i, line in enumerate(text.splitlines(), 1):

@@ -58,7 +58,7 @@ def test_weekly_report_skill_uses_batch_tool():
     assert "ask_perception_intelligence_diagnosis" in skill.body
 
 def test_weekly_report_skill_covers_all_products_and_inventory():
-    """SKILL.md must list ALL C5/C9 products and name the inventory table."""
+    """SKILL.md must list ALL sample products and name the inventory table."""
     from app.services.skills_loader import load_skill_package
 
     skill = load_skill_package(
@@ -66,7 +66,7 @@ def test_weekly_report_skill_covers_all_products_and_inventory():
     )
     assert skill is not None
     body = skill.body
-    # All seven C5/C9 products must be listed (not just one product).
+    # All seven sample products must be listed (not just one product).
     for product in (
         "原料A复合材料",
         "材料B",

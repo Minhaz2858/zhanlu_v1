@@ -323,7 +323,7 @@ When comparing two methods, the difference is shown in parentheses, often color-
 
 This lets the reader scan deltas without doing arithmetic.
 
-### C5. Header Arrows ↑/↓
+### sample product. Header Arrows ↑/↓
 
 Columns indicate optimization direction:
 - ↑ for "higher is better" (success rate, return, accuracy, throughput)
@@ -361,7 +361,7 @@ This pattern is essential for **multi-axis ablation tables** that would otherwis
 - Missing entries (—, dash) when comparison was not performed; caption notes why.
 - Significance markers (*, **, †, ‡) much less common than in ML theory papers; embodied AI tends to rely on visual bolding + error bars.
 
-### C9. Hyperparameter Tables (Appendix-Only)
+### sample product. Hyperparameter Tables (Appendix-Only)
 
 Almost every paper has a hyperparameter table in the appendix:
 
@@ -574,7 +574,7 @@ This file synthesizes patterns from:
 Patterns rated by frequency:
 - **Universal** (90%+ of papers): A1–A8 figure types, B1 title-first, B2 "we" voice, B5 panel notation, B10 statistical disclosure, C1 caption-as-takeaway for main results, C2 "Ours" marking, C3 bold-best, D1 forward references, E1 self-containment, E4 hardware as reproducibility.
 - **Very common** (60–90%): B4 sentence-count distribution, B6 bolded micro-labels, B7 system name typesetting, B11 numbered-steps, B12 sequenced storytelling, B13 symbol definitions, C4 parenthetical deltas, C7 multi-block tables, D7 result-anchor pattern, E2 teaser as promise, E7 failure cases.
-- **Common** (30–60%): B8 sub-caption cross-references, C5 header arrows, C9 hyperparameter tables (universal in appendix), C10 reward tables (specific to RL papers), D5 panel-level references, E6 color as naming device.
+- **Common** (30–60%): B8 sub-caption cross-references, sample product header arrows, sample product hyperparameter tables (universal in appendix), C10 reward tables (specific to RL papers), D5 panel-level references, E6 color as naming device.
 - **Style-dependent** (paper- or author-specific): exact form of system-name typesetting (B7), maximalist vs. minimalist captions (B3), use of significance markers (C8).
 
 ---

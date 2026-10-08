@@ -376,7 +376,7 @@ BUILTIN_THEMES: dict[str, ThemeSpec] = {
             "background": "#0D1117",
             "surface": "#161B22",
             "text": "#39FF14",
-            "body": "#C9D1D9",
+            "body": "#marketD1D9",
             "accent": "#FF2E97",
             "muted": "#30363D",
         },
@@ -446,7 +446,7 @@ BUILTIN_THEMES: dict[str, ThemeSpec] = {
         font_family="'Source Han Serif SC', 'Noto Serif SC', SimSun, 'Songti SC', 'STSong', Georgia, serif",
         design_hints=(
             "Government / party / authoritative report deck. White background with deep China-red accent (#B22222) "
-            "and gold trim (#C9A24A) reserved for awards/honors. Heavy serif headings (宋体/Source Han Serif). "
+            "and gold trim (#marketA24A) reserved for awards/honors. Heavy serif headings (宋体/Source Han Serif). "
             "Top double-rule bar (red 6px + gold 1px) under title. Centered formal layout with symmetric composition. "
             "Soft warm cream card panels (#FBF3F1). Small decorative red ribbon accent in corner. "
             "Solemn, dignified, official tone. Avoid playful shapes."
@@ -840,7 +840,7 @@ BUILTIN_THEMES: dict[str, ThemeSpec] = {
             "text": "#1B2A4A",
             "body": "#44506B",
             "accent": "#2D4A7A",
-            "muted": "#C9D2E3",
+            "muted": "#marketD2E3",
         },
         font_family="'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'Source Han Sans SC', Arial, sans-serif",
         design_hints=(

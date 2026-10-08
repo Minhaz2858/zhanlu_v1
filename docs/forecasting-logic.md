@@ -25,7 +25,7 @@ Think of the system as a factory assembly line. Raw material (price history) goe
 
 ### Step 1 — Find What to Forecast
 
-The system scans the database for products that have a price history and registers them for forecasting. Each product (for example "C5 resin" or "product_d") becomes a tracked target. It only adds new ones — it never duplicates work.
+The system scans the database for products that have a price history and registers them for forecasting. Each product (for example "sample product resin" or "product_d") becomes a tracked target. It only adds new ones — it never duplicates work.
 
 ### Step 2 — Gather the Data
 
@@ -108,7 +108,7 @@ The dashboard always shows when a forecast was downgraded to the naive baseline,
 
 ### Step 8 — Check Coherence With Feedstock
 
-Some products are made *from* others (e.g., C5 resin is made from product_c). If our forecast says the product price will rise while its feedstock price falls — beyond what the historical spread allows — the system clamps the forecast back into a sensible relationship. This prevents economically impossible predictions.
+Some products are made *from* others (e.g., sample product resin is made from product_c). If our forecast says the product price will rise while its feedstock price falls — beyond what the historical spread allows — the system clamps the forecast back into a sensible relationship. This prevents economically impossible predictions.
 
 ### Step 9 — Layer in Market News (Intelligence Overlay)
 
@@ -311,7 +311,7 @@ A line chart for a single product showing:
 
 6. **It learns from mistakes.** Decision logs → ROI scoring → bias correction → threshold tuning. The loop is always running.
 
-7. **Per-product, not one-size-fits-all.** What works for product_d does not work for cracked C9. Thresholds, trust tiers, and corrections are all per-product.
+7. **Per-product, not one-size-fits-all.** What works for product_d does not work for cracked sample product. Thresholds, trust tiers, and corrections are all per-product.
 
 ---
 

@@ -36,14 +36,14 @@ def test_default_skill_map_pptx_points_to_ppt_design():
 
 def test_detect_file_intent_sees_pptx_keyword():
     """Sanity: the format detector actually recognizes the test phrase."""
-    assert detect_file_intent("make a pptx about c5/c9 market") == "pptx"
+    assert detect_file_intent("make a pptx about sample product market") == "pptx"
 
 
 def test_pptx_format_intent_routes_to_ppt_design():
     """End-to-end: generic pptx request (no picked skill) → ppt-design."""
     resolver = SkillResolver()
     decision = resolver.resolve(
-        user_message="make a pptx about c5/c9 market",
+        user_message="make a pptx about sample product market",
         picked_skill=None,
     )
     assert decision.chosen_skill == "ppt-design"
@@ -56,10 +56,10 @@ def test_pptx_format_intent_routes_to_ppt_design():
 @pytest.mark.parametrize(
     "message",
     [
-        "make a pptx about c5/c9 market",
-        "can you build a PowerPoint deck on c5/c9 market share",
-        "create a slide deck for the c9 launch",
-        "请做一个关于 c5/c9 市场的演示文稿",
+        "make a pptx about sample product market",
+        "can you build a PowerPoint deck on sample product market share",
+        "create a slide deck for the market launch",
+        "请做一个关于 sample product 市场的演示文稿",
     ],
 )
 def test_pptx_intent_variants_route_to_ppt_design(message):

@@ -19,7 +19,7 @@ body { background-color: #0d1117; }
     --border: #30363d;
     --green: #39d353;
     --green-muted: rgba(57, 211, 83, 0.4);
-    --text: #c9d1d9;
+    --text: #marketd1d9;
     --text-muted: #8b949e;
     --comment: #484f58;
     --yellow: #e3b341;
@@ -619,7 +619,7 @@ class SlidePresentation {
 }
 
 if (new URLSearchParams(window.location.search).has('presenter')) {
-    document.body.innerHTML = '<div style="padding:2rem;font-family:monospace;color:#39d353;background:#0d1117;height:100vh;"><h2>Presenter Mode</h2><div id="p-notes" style="margin:1rem 0;color:#c9d1d9;"></div><div id="p-timer" style="color:#8b949e;"></div><div id="p-slide" style="color:#58a6ff;margin-top:0.5rem;"></div></div>';
+    document.body.innerHTML = '<div style="padding:2rem;font-family:monospace;color:#39d353;background:#0d1117;height:100vh;"><h2>Presenter Mode</h2><div id="p-notes" style="margin:1rem 0;color:#marketd1d9;"></div><div id="p-timer" style="color:#8b949e;"></div><div id="p-slide" style="color:#58a6ff;margin-top:0.5rem;"></div></div>';
     const ch = new BroadcastChannel('slide-creator-presenter');
     let seconds = 0;
     setInterval(() => { seconds++; const m = Math.floor(seconds / 60); const s = seconds % 60; const el = document.getElementById('p-timer'); if (el) el.textContent = `Timer: ${m}:${s.toString().padStart(2, '0')}`; }, 1000);

@@ -87,16 +87,16 @@ def _make_mock_engine(rows: list[tuple]) -> Engine:
             conn.execute(text(
                 "INSERT INTO md_market_price (FDATE, FTAXPRICE, FMATERIAL_NAME) "
                 "VALUES (:d, :p, :n)"
-            ), {"d": ds, "p": str(y), "n": "分解C5-分解C5均价"})
+            ), {"d": ds, "p": str(y), "n": "分解sample-分解sample均价"})
         conn.commit()
     return eng
 
 
 def test_read_history_returns_dataframe_with_ds_y_columns():
     rows = [
-        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),
-        ("2026-07-02", 5600.0, "分解C5-分解C5均价"),
-        ("2026-07-03", 5700.0, "分解C5-分解C5均价"),
+        ("2026-07-01", 5500.0, "分解sample-分解sample均价"),
+        ("2026-07-02", 5600.0, "分解sample-分解sample均价"),
+        ("2026-07-03", 5700.0, "分解sample-分解sample均价"),
     ]
     eng = _make_mock_engine(rows)
     src = EdiaMysqlDataSource(engine=eng)
@@ -105,7 +105,7 @@ def test_read_history_returns_dataframe_with_ds_y_columns():
         "table": "md_market_price",
         "time_col": "FDATE",
         "measure": "FTAXPRICE",
-        "where": "FMATERIAL_NAME = '分解C5-分解C5均价'",
+        "where": "FMATERIAL_NAME = '分解sample-分解sample均价'",
         "granularity": "day",
     })
     assert list(df.columns) == ["ds", "y"]
@@ -116,11 +116,11 @@ def test_read_history_returns_dataframe_with_ds_y_columns():
 
 def test_read_history_drops_sentinel_values_F7_and_NaN():
     rows = [
-        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),
-        ("2026-07-02", "F7", "分解C5-分解C5均价"),       # sentinel — drop
-        ("2026-07-03", "NaN", "分解C5-分解C5均价"),       # sentinel — drop
-        ("2026-07-04", "", "分解C5-分解C5均价"),          # empty — drop
-        ("2026-07-05", 5700.0, "分解C5-分解C5均价"),
+        ("2026-07-01", 5500.0, "分解sample-分解sample均价"),
+        ("2026-07-02", "F7", "分解sample-分解sample均价"),       # sentinel — drop
+        ("2026-07-03", "NaN", "分解sample-分解sample均价"),       # sentinel — drop
+        ("2026-07-04", "", "分解sample-分解sample均价"),          # empty — drop
+        ("2026-07-05", 5700.0, "分解sample-分解sample均价"),
     ]
     eng = _make_mock_engine(rows)
     src = EdiaMysqlDataSource(engine=eng)
@@ -129,7 +129,7 @@ def test_read_history_drops_sentinel_values_F7_and_NaN():
         "table": "md_market_price",
         "time_col": "FDATE",
         "measure": "FTAXPRICE",
-        "where": "FMATERIAL_NAME = '分解C5-分解C5均价'",
+        "where": "FMATERIAL_NAME = '分解sample-分解sample均价'",
         "granularity": "day",
     })
     assert len(df) == 3  # 5 rows minus 2 sentinels minus 1 empty = ... wait, empty is also dropped = 2 kept
@@ -141,9 +141,9 @@ def test_read_history_drops_sentinel_values_F7_and_NaN():
 
 def test_read_history_sorted_ascending_by_ds():
     rows = [
-        ("2026-07-03", 5700.0, "分解C5-分解C5均价"),
-        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),
-        ("2026-07-02", 5600.0, "分解C5-分解C5均价"),
+        ("2026-07-03", 5700.0, "分解sample-分解sample均价"),
+        ("2026-07-01", 5500.0, "分解sample-分解sample均价"),
+        ("2026-07-02", 5600.0, "分解sample-分解sample均价"),
     ]
     eng = _make_mock_engine(rows)
     src = EdiaMysqlDataSource(engine=eng)
@@ -152,7 +152,7 @@ def test_read_history_sorted_ascending_by_ds():
         "table": "md_market_price",
         "time_col": "FDATE",
         "measure": "FTAXPRICE",
-        "where": "FMATERIAL_NAME = '分解C5-分解C5均价'",
+        "where": "FMATERIAL_NAME = '分解sample-分解sample均价'",
         "granularity": "day",
     })
     assert df.iloc[0]["ds"] < df.iloc[1]["ds"] < df.iloc[2]["ds"]
@@ -244,7 +244,7 @@ class EdiaMysqlDataSource:
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '分解C5-分解C5均价'",
+            "where": "FMATERIAL_NAME = '分解sample-分解sample均价'",
             "granularity": "day"
         }
     """
@@ -385,7 +385,7 @@ def _make_target_with_edia_source():
         "table": "md_market_price",
         "time_col": "FDATE",
         "measure": "FTAXPRICE",
-        "where": "FMATERIAL_NAME = '分解C5-分解C5均价'",
+        "where": "FMATERIAL_NAME = '分解sample-分解sample均价'",
         "granularity": "day",
     }
     target.model_config = {}
@@ -699,7 +699,7 @@ FORECAST_TARGETS: list[dict] = [
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '分解C5-布伦特'",
+            "where": "FMATERIAL_NAME = '分解sample-基准A'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
@@ -713,49 +713,49 @@ FORECAST_TARGETS: list[dict] = [
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '分解C5-日本原料油'",
+            "where": "FMATERIAL_NAME = '分解sample-日本原料油'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
         "report_order": 2,
     },
     {
-        "product_key": "acme.cracked_c5",
-        "name": "Cracked C5 (Average)",
+        "product_key": "acme.cracked_sample",
+        "name": "Cracked sample product (Average)",
         "datasource": {
             "source": "mysql",
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '分解C5-分解C5均价'",
+            "where": "FMATERIAL_NAME = '分解sample-分解sample均价'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
         "report_order": 3,
     },
     {
-        "product_key": "acme.mixed_c5",
+        "product_key": "acme.mixed_sample",
         "name": "Mixed fraction (Yangzi)",
         "datasource": {
             "source": "mysql",
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '分解C5-扬子分解C5'",
+            "where": "FMATERIAL_NAME = '分解sample-示例分解sample'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
         "report_order": 4,
     },
     {
-        "product_key": "acme.cracked_c9",
-        "name": "Cracked C9 (Average)",
+        "product_key": "acme.cracked_market",
+        "name": "Cracked sample product (Average)",
         "datasource": {
             "source": "mysql",
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '分解C9-分解C9均价'",
+            "where": "FMATERIAL_NAME = '分解market-分解market均价'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
@@ -849,7 +849,7 @@ FORECAST_TARGETS: list[dict] = [
     # PLANDATE / FTAXPRICE columns and no supplier dimension.
     {
         "product_key": "acme.product_a",
-        "name": "C5 Resin (ERP Order Book)",
+        "name": "sample product Resin (ERP Order Book)",
         "datasource": {
             "source": "mysql",
             "table": "sale_erp_v_原料A复合材料_data",
@@ -997,18 +997,18 @@ depends_on = None
 # here (rather than imported) so the migration is self-contained and
 # survives refactors of the seeder module.
 _TARGETS = [
-    ("acme.product_e",     "Product E (Benchmark A)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解C5-布伦特'"),
-    ("acme.product_c",       "Product_C (Japan)",              "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解C5-日本原料油'"),
-    ("acme.cracked_c5",    "Cracked C5 (Average)",         "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解C5-分解C5均价'"),
-    ("acme.mixed_c5",      "Mixed fraction (Yangzi)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解C5-扬子分解C5'"),
-    ("acme.cracked_c9",    "Cracked C9 (Average)",         "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解C9-分解C9均价'"),
+    ("acme.product_e",     "Product E (Benchmark A)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解sample-基准A'"),
+    ("acme.product_c",       "Product_C (Japan)",              "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解sample-日本原料油'"),
+    ("acme.cracked_sample",    "Cracked sample product (Average)",         "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解sample-分解sample均价'"),
+    ("acme.mixed_sample",      "Mixed fraction (Yangzi)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解sample-示例分解sample'"),
+    ("acme.cracked_market",    "Cracked sample product (Average)",         "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '分解market-分解market均价'"),
     ("acme.product_d",      "Product_D (East China)",        "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '电子元件-华东市场价'"),
     ("acme.product_f",    "Product F (East China)",      "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '材料C-华东市场价'"),
     ("acme.product_b",          "PRODUCT_B (East China)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '材料B-华东市场价'"),
     ("acme.sis",           "SIS (Baling 1105)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = 'SIS-巴陵1105'"),
     ("acme.styrene",       "Styrene (Sinopec East China)", "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '材料J-中石化华东'"),
     ("acme.blowing_agent", "Blowing Agent (East China)",   "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '包装材料-华东市场价'"),
-    ("acme.product_a",      "C5 Resin (ERP Order Book)",    "sale_erp_v_原料A复合材料_data", "PLANDATE", "FTAXPRICE", "1=1"),
+    ("acme.product_a",      "sample product Resin (ERP Order Book)",    "sale_erp_v_原料A复合材料_data", "PLANDATE", "FTAXPRICE", "1=1"),
     ("acme.feedstock_a",  "Feedstock A (ERP Order Book)","sale_erp_v_原料A_data", "PLANDATE", "FTAXPRICE", "1=1"),
 ]
 
@@ -1323,9 +1323,9 @@ Then use `replace_in_file` to add the new function after the existing `get_forec
 PRODUCT_FORECAST_TARGET_KEY: dict[str, str] = {
     "product_e":      "acme.product_e",
     "product_c":        "acme.product_c",
-    "cracked_c5":     "acme.cracked_c5",
-    "mixed_c5":       "acme.mixed_c5",
-    "cracked_c9":     "acme.cracked_c9",
+    "cracked_sample":     "acme.cracked_sample",
+    "mixed_sample":       "acme.mixed_sample",
+    "cracked_market":     "acme.cracked_market",
     "product_d":       "acme.product_d",
     "product_f":     "acme.product_f",
     "product_b":           "acme.product_b",
@@ -1854,11 +1854,11 @@ Expected: 12 (or close to 12 — some may fail if Acme MySQL is unreachable) run
 - [ ] **Step 7: Verify the dashboard endpoint returns fresh forecasts**
 
 ```bash
-curl -s "http://localhost:8000/api/market-dashboard/forecast-base-batch?product_ids=product_e,product_c,cracked_c5,product_d,sis,styrene&day=7" \
+curl -s "http://localhost:8000/api/market-dashboard/forecast-base-batch?product_ids=product_e,product_c,cracked_sample,product_d,sis,styrene&day=7" \
   -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 ```
 
-Expected: `{"day":7,"base_by_product":{"product_e":84.5,"product_c":826.0,"cracked_c5":5685.0,"product_d":11596.0,"sis":15000.0,"styrene":8600.0}}` (values will differ — these are examples).
+Expected: `{"day":7,"base_by_product":{"product_e":84.5,"product_c":826.0,"cracked_sample":5685.0,"product_d":11596.0,"sis":15000.0,"styrene":8600.0}}` (values will differ — these are examples).
 
 - [ ] **Step 8: Verify the dashboard UI**
 

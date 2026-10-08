@@ -46,7 +46,7 @@ class PanelXGBoost(ForecastModel):
 
         panel = PanelXGBoost()
         panel.fit_pooled(train_data)
-        pred = panel.forecast(7, product_key="c5_cracked")
+        pred = panel.forecast(7, product_key="sample_cracked")
     """
 
     name: str = "panel_xgboost"

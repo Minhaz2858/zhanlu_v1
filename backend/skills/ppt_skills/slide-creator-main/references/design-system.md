@@ -22,7 +22,7 @@ This table describes design direction. Render capability is controlled by
 | **Strategy Consulting** | `#F8F8F5` | `#1A1A1A` | `#1F4E79` | Board materials, due diligence | Reference-only |
 | **Electric Studio** | `#F5F5F5` | `#111111` | `#0052FF` | Agency, corporate | Reference-only |
 | **Creative Voltage** | `#1A1A2E` | `#EAEAEA` | `#FFE600` | Retro-modern, creative | Reference-only |
-| **Dark Botanical** | `#0F1C15` | `#E8E0D0` | `#C5A059` | Luxury, premium brands | Reference-only |
+| **Dark Botanical** | `#0F1C15` | `#E8E0D0` | `#sampleA059` | Luxury, premium brands | Reference-only |
 | **Modern Newspaper** | `#F7F1E8` | `#111111` | `#D72638` | Reports, thought leadership | Reference-only |
 | **Neo-Brutalism** | `#F5F5F5` | `#111111` | `#FF5C00` | Indie dev, manifesto | Reference-only |
 | **Neo-Retro Dev Deck** | `#101018` | `#F8F5E8` | `#FFB000` | Dev tool launches, hackathon | Reference-only |

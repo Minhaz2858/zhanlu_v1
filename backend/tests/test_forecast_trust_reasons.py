@@ -15,7 +15,7 @@ def test_directional_below_naive_code():
 
 
 def test_directional_weekly_product_has_both_codes():
-    out = compute_forecast_trust_tier("cracked_c9", below_naive=True, cadence_class="weekly")
+    out = compute_forecast_trust_tier("cracked_market", below_naive=True, cadence_class="weekly")
     assert "below_naive_baseline" in out["reason_codes"]
     assert "weekly_cadence" in out["reason_codes"]
 

@@ -20,8 +20,8 @@ def test_high_skill_products_includes_known_set():
 
 def test_weekly_cadence_products_includes_known_set():
     """Products that trade weekly — daily forecast is misleading."""
-    assert "cracked_c9" in _WEEKLY_CADENCE_PRODUCTS
-    assert "mixed_c9" in _WEEKLY_CADENCE_PRODUCTS
+    assert "cracked_market" in _WEEKLY_CADENCE_PRODUCTS
+    assert "mixed_market" in _WEEKLY_CADENCE_PRODUCTS
     assert "trimethylbenzene" in _WEEKLY_CADENCE_PRODUCTS
     assert "feedstock_a" in _WEEKLY_CADENCE_PRODUCTS
 
@@ -56,7 +56,7 @@ def test_directional_tier_when_model_worse_than_naive():
 def test_directional_tier_for_weekly_cadence_product():
     """Weekly-cadence product with below_naive → directional + weekly reason."""
     result = compute_forecast_trust_tier(
-        product_id="cracked_c9",
+        product_id="cracked_market",
         below_naive=True,
         cadence_class="weekly",
         mape=30.0,
@@ -68,7 +68,7 @@ def test_directional_tier_for_weekly_cadence_product():
 def test_medium_tier_for_weekly_product_with_skill():
     """Weekly product NOT in high-skill set and NOT below_naive → medium."""
     result = compute_forecast_trust_tier(
-        product_id="cracked_c9",
+        product_id="cracked_market",
         below_naive=False,
         cadence_class="weekly",
         mape=15.0,
@@ -127,7 +127,7 @@ def test_tier_values_are_constrained():
     """tier must be one of the 4 valid values."""
     for pid, bn, cad in [
         ("product_d", False, "daily"),
-        ("cracked_c9", True, "weekly"),
+        ("cracked_market", True, "weekly"),
         ("unknown", False, "sparse"),
         ("random", False, "daily"),
     ]:

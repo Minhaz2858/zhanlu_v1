@@ -13,7 +13,7 @@ Authoritative, data-driven, trustworthy — McKinsey dark deck meets Bloomberg T
     --bg-header:    #21262d;
     --border:       #30363d;
     --text-primary: #e6edf3;
-    --text-body:    #c9d1d9;
+    --text-body:    #marketd1d9;
     --text-muted:   #8b949e;
     --accent-blue:  #388bfd;
     --accent-green: #3fb950;   /* positive / up */

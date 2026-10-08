@@ -5,7 +5,7 @@ Each test encodes one of the audit's binary checks:
   C2 every buildable step maps to a real tool (or is an explicit local step)
   C3 every not-buildable verdict names the missing primitive + closest tool
   C4 orchestration is classified; script-orchestrated needs a non-MCP data path
-  C5 the human-holdout block exists (its content is never validator-graded)
+  sample product the human-holdout block exists (its content is never validator-graded)
 """
 
 import copy
@@ -179,7 +179,7 @@ class C4OrchestrationTest(unittest.TestCase):
         self.assertTrue(any("data_access" in m for m in _errors(report)))
 
 
-class C5HoldoutTest(unittest.TestCase):
+class sampleHoldoutTest(unittest.TestCase):
     def test_missing_holdout_block_is_error(self) -> None:
         report = _valid_report()
         del report["holdout"]

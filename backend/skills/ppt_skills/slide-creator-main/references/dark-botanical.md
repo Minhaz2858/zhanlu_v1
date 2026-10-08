@@ -13,7 +13,7 @@ Elegant, sophisticated, artistic, premium. Abstract soft shapes on dark canvas.
     --text-secondary: #9a9590;
     --accent-warm: #d4a574;
     --accent-pink: #e8b4b8;
-    --accent-gold: #c9b896;
+    --accent-gold: #marketb896;
 }
 ```
 
@@ -162,16 +162,16 @@ Large italic number in `.botanical-accent` (warm gold `#d4a574`), `clamp(3rem, 8
 - `.orb-pink`: 粉色光球 — `background: radial-gradient(circle, rgba(232,180,184,0.18), transparent 70%)`
 - `.orb-gold`: 金色光球 — `background: radial-gradient(circle, rgba(201,184,150,0.15), transparent 70%)`
 - `.orb-terra`: 赤土色光球 — `background: radial-gradient(circle, rgba(212,165,116,0.12), transparent 70%)`
-- `.accent-line`: 垂直渐变线条 — `position: absolute; left: clamp(32px, 6vw, 72px); top: 20%; height: 60%; width: 1px; background: linear-gradient(to bottom, transparent, #c9b896 30%, #e8b4b8 70%, transparent)`
-- `.slide-label`: 章节斜体标签 — `font-family: 'Cormorant', serif; font-style: italic; font-size: clamp(11px, 1.2vw, 14px); letter-spacing: 0.25em; text-transform: uppercase; color: #c9b896`
-- `.divider`: 短分隔线 — `width: 48px; height: 1px; background: linear-gradient(90deg, #c9b896, #e8b4b8); margin: auto`
+- `.accent-line`: 垂直渐变线条 — `position: absolute; left: clamp(32px, 6vw, 72px); top: 20%; height: 60%; width: 1px; background: linear-gradient(to bottom, transparent, #marketb896 30%, #e8b4b8 70%, transparent)`
+- `.slide-label`: 章节斜体标签 — `font-family: 'Cormorant', serif; font-style: italic; font-size: clamp(11px, 1.2vw, 14px); letter-spacing: 0.25em; text-transform: uppercase; color: #marketb896`
+- `.divider`: 短分隔线 — `width: 48px; height: 1px; background: linear-gradient(90deg, #marketb896, #e8b4b8); margin: auto`
 - `.badge` + `.badge strong`: 统计徽章 — `padding: 8px 20px; border: 1px solid #2a2520; border-radius: 2px;` 数值用 Cormorant 600 金色
 - `.pain-list`: 要点列表 — `list-style: none; li::before { content: '—'; color: #e8b4b8; font-family: 'Cormorant', serif }`
-- `.steps` + `.step-num`: 步骤列表 — 斜体序号 `font-family: 'Cormorant'; font-style: italic; color: #c9b896`
-- `.feature` + `.feature-grid`: 功能卡片 — `border: 1px solid #1e1e1e; border-left: 1px solid #c9b896; background: rgba(255,255,255,0.015)`
-- `.code-block`: 代码块 — `background: #0a0a0a; border: 1px solid #1e1e1e; border-left: 2px solid #c9b896; font-family: 'IBM Plex Mono'`
+- `.steps` + `.step-num`: 步骤列表 — 斜体序号 `font-family: 'Cormorant'; font-style: italic; color: #marketb896`
+- `.feature` + `.feature-grid`: 功能卡片 — `border: 1px solid #1e1e1e; border-left: 1px solid #marketb896; background: rgba(255,255,255,0.015)`
+- `.code-block`: 代码块 — `background: #0a0a0a; border: 1px solid #1e1e1e; border-left: 2px solid #marketb896; font-family: 'IBM Plex Mono'`
 - `.preset.tag`: 预设标签 — `border: 1px solid #2a2520;` hover 变金色，`.current` 变实色
-- `.dot` / `.dot.active`: 导航圆点 — 默认 `#3a3530 + 1px solid #5a5550`；激活 `#c9b896 + box-shadow: 0 0 8px rgba(201,184,150,0.5)`
+- `.dot` / `.dot.active`: 导航圆点 — 默认 `#3a3530 + 1px solid #5a5550`；激活 `#marketb896 + box-shadow: 0 0 8px rgba(201,184,150,0.5)`
 
 ### Allowed Components
 - Audit coverage: .botanical-accent .botanical-body .botanical-card .botanical-label .botanical-orb .botanical-title .botanical-vline .orb-terracotta

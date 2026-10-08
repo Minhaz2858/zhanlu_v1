@@ -77,7 +77,7 @@
 --grey-1:#f0f0ee;
 --grey-2:#d4d4d2;
 --grey-3:#737373;
---accent:#C5E803;
+--accent:#sampleE803;
 --accent-rgb:197,232,3;
 --accent-on:#0a0a0a;
 ```

@@ -90,7 +90,7 @@
 - **Document Generation** — PPT, DOCX, HTML artifacts with layout engines and chart rendering
 - **Enterprise RBAC** — Multi-tenant isolation (org_id + app_id), resource sharing, access policies
 
-The platform is designed for the Acme BI domain (C5/C9 industrials) but is generalized for any structured-data business intelligence use case.
+The platform is designed for the Acme BI domain (industrials) but is generalized for any structured-data business intelligence use case.
 
 ---
 
@@ -513,13 +513,13 @@ memory:1, ask_data_agent:2, interrupt:2, clarify:3
 ### User Query to Answer (Data Question)
 
 ```
-1. User types "Show me C5 sales by region for Q3"
+1. User types "Show me sample product sales by region for Q3"
 2. Frontend → POST /v3/.../messages/stream (SSE)
 3. Backend: add_message_stream()
    ├─ detect data intent → force ask_data_agent via tool_choice
    ├─ prepare_data_source_runtime() → bind KBs
    └─ Enter ReAct loop
-4. LLM calls ask_data_agent(question="Show me C5 sales...", data_source_id=...)
+4. LLM calls ask_data_agent(question="Show me sample product sales...", data_source_id=...)
 5. _ask_data_agent sub-loop (max 4 iterations):
    ├─ Sub-LLM picks internal tool: list_data_sources → describe_schema → execute_query
    ├─ SQL generated (NL2SQL or LLM) against bound MySQL/PG data source
@@ -2117,7 +2117,7 @@ User-created agents (via Agent Builder) use a **constitutional prompt** assemble
 
 | Layer | Field | Purpose | Example |
 |-------|-------|---------|---------|
-| 1 — Identity | `prompt_identity` | Who the agent is, personality, domain | "You are a C5/C9 industrial market analyst..." |
+| 1 — Identity | `prompt_identity` | Who the agent is, personality, domain | "You are a industrial market analyst..." |
 | 2 — Boundary | `prompt_boundary` | What the agent will NOT do | "Never make up data. Do not answer questions about HR." |
 | 3 — Reasoning | `prompt_reasoning` | How the agent should think | "Always verify SQL results against the original question..." |
 | 4 — Tools | `prompt_tools` | How the agent should use tools | "Prefer execute_query over web_search for data questions..." |
@@ -2140,7 +2140,7 @@ Built-in agents (agent_builder, skill_agent, research_analyst, etc.) use hardcod
 Key system prompts:
 - `AGENT_BUILDER_SYSTEM_PROMPT` — instructs the LLM how to create/edit other agents
 - `SKILL_AGENT_SYSTEM_PROMPT` — skill execution with methodology injection
-- Research analyst prompt — includes C5/C9 domain knowledge block
+- Research analyst prompt — includes sample product domain knowledge block
 
 ### 23.3 Dynamic Prompt Builder — 8 Injection Layers
 
@@ -3681,7 +3681,7 @@ def load_memory_snapshot(db, agent_app_id, user_id, project_id=None) -> dict[str
 ### 34.5 Entity Masters & Proven Recipes
 
 **Entity Masters** (`dynamic_prompt_builder.py` — `_inject_entity_masters`):
-- Domain entity dictionary (e.g., C5/C9 products, ERP table-column mappings)
+- Domain entity dictionary (e.g., sample products, ERP table-column mappings)
 - Injected as structured context for NL2SQL accuracy
 
 **Proven Recipes** (`dynamic_prompt_builder.py` — `_inject_recipes`):

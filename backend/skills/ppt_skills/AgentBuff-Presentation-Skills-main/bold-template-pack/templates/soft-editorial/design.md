@@ -12,7 +12,7 @@ colors:
   lemon: "#D6DD63"
   blush: "#E8C9B6"
   sage: "#B7C7A8"
-  lilac: "#C9BEDC"
+  lilac: "#marketBEDC"
   card-fill: "rgba(255,255,255,0.55)"
   rule-soft: "rgba(42,36,27,0.18)"
   rule-medium: "rgba(42,36,27,0.35)"
@@ -312,7 +312,7 @@ Depth comes from **soft rounded cards** with large border-radius values (24–36
 - **Lemon** (`{colors.lemon}` — #D6DD63): Chartreuse yellow-green. The brightest accent — used on hero numeral cards, action bars, "yes" pills.
 - **Blush** (`{colors.blush}` — #E8C9B6): Soft peach. The most neutral of the pastels — used on step cards, "partial" pills, and any slot needing warm neutrality.
 - **Sage** (`{colors.sage}` — #B7C7A8): Muted green. The "extra" accent that joins for variety — process diagrams, design-system grids, secondary step cards.
-- **Lilac** (`{colors.lilac}` — #C9BEDC): Soft violet-grey. The cool counterpart to sage — appears mostly in five-step process flows where all five pastels rotate.
+- **Lilac** (`{colors.lilac}` — #marketBEDC): Soft violet-grey. The cool counterpart to sage — appears mostly in five-step process flows where all five pastels rotate.
 - **Card Fill** (`{colors.card-fill}` — rgba(255,255,255,0.55)): Translucent white. The default card background — sits on the cream field as a "lifted" surface without committing to a saturated color.
 - **Rule Soft** (`{colors.rule-soft}` — rgba(42,36,27,0.18)): Low-opacity warm ink for dashed internal hairlines.
 - **Rule Medium** (`{colors.rule-medium}` — rgba(42,36,27,0.35)): Slightly heavier hairline for major dividers inside cards.

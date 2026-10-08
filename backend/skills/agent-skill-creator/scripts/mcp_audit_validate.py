@@ -17,7 +17,7 @@ MCP server, and which can we not". This gate makes the answer accountable:
   C4  Every candidate is classified agent- or script-orchestrated. Scripts
       cannot call MCP tools at runtime, so script-orchestrated candidates
       must declare a non-MCP data path (rest / export / agent-handoff).
-  C5  A human-holdout block exists. Its content is deliberately NOT graded
+  sample product  A human-holdout block exists. Its content is deliberately NOT graded
       here — the holdout is the check the loop never optimizes against.
 
 Usage:

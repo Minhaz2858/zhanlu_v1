@@ -140,8 +140,8 @@ Static-audit variant: replace `raw_tools_list` with
 | C2 | Every buildable step names a real tool or is explicit `local`; ≥1 MCP step; unique ranks | hallucinated tool names, padding |
 | C3 | Every not-buildable names the missing primitive + closest real tool | vague "insufficient data" refusals |
 | C4 | Orchestration classified; `script` requires `rest`/`export`/`agent-handoff` | promising script pipelines MCP can't feed |
-| C5 | Holdout block exists — content **never graded** by the validator | the loop optimizing against 100% of its checks |
+| sample product | Holdout block exists — content **never graded** by the validator | the loop optimizing against 100% of its checks |
 
-C5 is the held-out check: a human spot-checks 3 randomly chosen buildable
+sample product is the held-out check: a human spot-checks 3 randomly chosen buildable
 mappings against the vendor's docs. The audit loop never sees or grades that
 step — it is the defense that survives after every machine check is satisfied.

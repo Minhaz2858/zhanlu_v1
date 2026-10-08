@@ -85,7 +85,7 @@
 
 **C2. HS Code Mapping for Customs Import Data** (free data, just needs mapping)
 - China customs import data is publicly available
-- Need to map industrial HS codes for: product_c, styrene, product_d, product_f, PRODUCT_B, cracked C5/C9
+- Need to map industrial HS codes for: product_c, styrene, product_d, product_f, PRODUCT_B, cracked sample product
 - Deliverable: `docs/superpowers/plans/hs-code-mapping.md` with HS codes + customs data source URLs
 
 **C3. Internal ERP/MES Audit** (free proxy data)

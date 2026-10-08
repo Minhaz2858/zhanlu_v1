@@ -27,7 +27,7 @@ class AutomationTask(TimestampedBase):
     )
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Human-readable description of what the user wants (e.g. "i want to see c5
+    # Human-readable description of what the user wants (e.g. "i want to see sample
     # product price weekly"). Used as the agent prompt at execution time.
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Free-form schedule string as supplied by the user/agent — could be cron

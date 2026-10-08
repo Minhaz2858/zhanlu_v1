@@ -83,7 +83,7 @@ def test_chart_js_is_valid_json_not_python_repr():
         ["NA", "EU"],
         [[4.2, 2.1], [3.1, 1.8]],
         "bar",
-        ["C5", "C9"],
+        ["sample product", "sample product"],
     )
     # no Python booleans leaked
     assert "False" not in js and "True" not in js
@@ -91,7 +91,7 @@ def test_chart_js_is_valid_json_not_python_repr():
     # deferred to load so the screenshot waits for the draw
     assert "window.addEventListener('load'" in js
     # multi-series legend + real column labels
-    assert "C5" in js and "C9" in js
+    assert "sample product" in js and "sample product" in js
     assert "legend" in js and "tooltip" in js and "scales" in js
 
 
@@ -100,15 +100,15 @@ def test_chart_data_multi_series_detection():
         layout="chart_full",
         title="Revenue",
         chart_rows=[
-            {"label": "NA", "C5 resins": 4.2, "C9 resins": 2.1},
-            {"label": "EU", "C5 resins": 3.1, "C9 resins": 1.8},
+            {"label": "NA", "sample product resins": 4.2, "sample product resins": 2.1},
+            {"label": "EU", "sample product resins": 3.1, "sample product resins": 1.8},
         ],
     )
     ct, labels, values, series = _chart_data_from_plan(plan)
     assert ct == "bar"
     assert labels == ["NA", "EU"]
     assert values == [[4.2, 2.1], [3.1, 1.8]]
-    assert series == ["C5 resins", "C9 resins"]
+    assert series == ["sample product resins", "sample product resins"]
 
 
 def test_chart_data_single_series_still_works():
@@ -150,7 +150,7 @@ def test_splitter_keeps_multiple_trailing_scripts():
     sp = SlidePlan(
         layout="chart_full",
         title="Revenue",
-        chart_rows=[{"label": "NA", "C5": 4.2, "C9": 2.1}],
+        chart_rows=[{"label": "NA", "sample product": 4.2, "sample product": 2.1}],
     )
     html = render_slide("chart_full", sp, theme)
     stage = build_stage([html], deck_title="Test")

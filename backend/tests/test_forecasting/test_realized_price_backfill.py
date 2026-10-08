@@ -14,7 +14,7 @@ def test_backfill_fills_actual_price_t():
 
     log1 = MagicMock()
     log1.id = "log-1"
-    log1.product_id = "分解C5-分解C5均价"
+    log1.product_id = "分解sample-分解sample均价"
     log1.as_of_date = MagicMock()
     log1.as_of_date.isoformat.return_value = "2026-08-01T00:00:00"
 
@@ -59,7 +59,7 @@ def test_backfill_fills_actual_price_th_and_roi():
     import datetime as _dt
     log2 = MagicMock()
     log2.id = "log-2"
-    log2.product_id = "分解C5-分解C5均价"
+    log2.product_id = "分解sample-分解sample均价"
     log2.as_of_date = _dt.datetime(2026, 7, 1, tzinfo=_dt.timezone.utc)
     log2.horizon_day = 30
     log2.actual_price_t = 8000.0

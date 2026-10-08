@@ -29,7 +29,7 @@ def _explicit_plan_payload():
     table, findings, recommendations, methodology."""
     blocks = [
         DocumentBlock(type="cover", title="Q3 Margin Review",
-                      subtitle="Source: ERP C5/C9"),
+                      subtitle="Source: ERP sample product"),
         DocumentBlock(type="paragraph", title="Executive Summary",
                       text="Margins compressed 4.2pp QoQ.", style={"lead": True}),
         DocumentBlock(type="kpi_grid", items=[
@@ -56,7 +56,7 @@ def _explicit_plan_payload():
     ]
     plan = DocumentPlan.from_blocks(blocks, meta={"title": "Q3 Margin Review"})
     return ReportCardPayload(
-        title=plan.title, source="ERP C5/C9", generated_at="2026-08-27",
+        title=plan.title, source="ERP sample product", generated_at="2026-08-27",
         blocks=[b.model_dump() for b in plan.blocks],
     )
 

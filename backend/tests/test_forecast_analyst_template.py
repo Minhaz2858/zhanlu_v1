@@ -8,7 +8,7 @@ def _product_b_pack():
     return build_pack(
         product_id="product_b", name_zh="材料B", day=7,
         history_rows=_history(start=7000.0, step=-0.8),
-        upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)},
+        upstream_histories={"cracked_sample": _history(start=5800.0, step=-0.5)},
         run_results={"7": {"base": [6660.0, 6650.0], "bull": [6900.0, 6950.0], "bear": [6400.0, 6350.0]}},
         model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.09, "naive_mape": 0.11},
         explanation=_explanation(), as_of_month=8,
@@ -74,7 +74,7 @@ def test_brief_buy_case():
     pack = build_pack(
         product_id="product_d", name_zh="电子元件", day=7,
         history_rows=_history(start=12000.0, step=2.0),
-        upstream_histories={"cracked_c5": _history(start=5800.0, step=1.0)},
+        upstream_histories={"cracked_sample": _history(start=5800.0, step=1.0)},
         run_results={"7": {"base": [12500.0, 12600.0], "bull": [12900.0, 13100.0], "bear": [12100.0, 12000.0]}},
         model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.07, "naive_mape": 0.1},
         explanation=exp, as_of_month=8,
@@ -128,9 +128,9 @@ def test_brief_downstream_keeps_erp_supply_demand():
     # downstream (product_a) still uses the seasonal ERP-demand section, not the
     # upstream macro section. (product_a has a month-8 seasonal rule → 旺季.)
     b = render_template_brief(build_pack(
-        product_id="product_a", name_zh="C5复合材料", day=7,
+        product_id="product_a", name_zh="sample复合材料", day=7,
         history_rows=_history(start=12000.0, step=2.0),
-        upstream_histories={"cracked_c5": _history(start=5800.0, step=1.0)},
+        upstream_histories={"cracked_sample": _history(start=5800.0, step=1.0)},
         run_results={"7": {"base": [12500.0, 12600.0], "bull": [12900.0, 13100.0], "bear": [12100.0, 12000.0]}},
         model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.07, "naive_mape": 0.1},
         explanation=_explanation(), as_of_month=8,

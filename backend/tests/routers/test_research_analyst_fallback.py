@@ -154,7 +154,7 @@ class TestResearchAnalystFallback:
             ), "role": "assistant"}
         monkeypatch.setattr("app.routers.agents._call_synthesis_llm", fake_call)
         out = asyncio.run(_research_analyst_fallback(
-            user_content="weekly C5 outlook",
+            user_content="weekly sample product outlook",
             tool_calls_for_frontend=[{
                 "name": "ask_data_agent",
                 "results": {"rows": [{"price": 92.1}], "source_name": "benchmark_a_prices"},
@@ -253,7 +253,7 @@ class TestResearchAnalystFallback:
         async def fake_call(system, msgs, **_):
             return {"content": (
                 "***Snapshot*** Product_C spot $5550/t (+2.1% WoW). "
-                "***Market Analysis*** Strong demand from C5/C9 crackers. "
+                "***Market Analysis*** Strong demand from sample product crackers. "
                 "***AI Decision*** HOLD with trigger at $5800."
             ), "role": "assistant"}
         monkeypatch.setattr("app.routers.agents._call_synthesis_llm", fake_call)

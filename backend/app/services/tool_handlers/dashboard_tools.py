@@ -759,7 +759,7 @@ class CreateFullstackDashboardArgs(BaseModel):
     panels: list[dict] = Field(default_factory=list)
     # Page header extras (executive dashboard): {"greeting": str,
     #   "snapshot": [{label, value, delta, delta_tone}], "period": str}.
-    # Snapshot chips render like "布伦特 $79.4 ↓$1.2 · 原料油 $642 ↓$9".
+    # Snapshot chips render like "基准A $79.4 ↓$1.2 · 原料油 $642 ↓$9".
     header: Optional[dict] = None
     # Page footer (data provenance): {"sources": str} — e.g. "数据来源：ERP + 市场数据".
     footer: Optional[dict] = None
@@ -1466,7 +1466,7 @@ CREATE_FULLSTACK_DASHBOARD_SCHEMA = {
                 },
                 "header": {
                     "type": "object",
-                    "description": "Executive page header extras: {\"greeting\": \"早上好，刘总 — 今日有 3 项决策等待批准\", \"snapshot\": [{\"label\": \"布伦特\", \"value\": \"$79.4\", \"delta\": \"↓$1.2\", \"delta_tone\": \"down\"}], \"period\": \"W-2025-23\"}.",
+                    "description": "Executive page header extras: {\"greeting\": \"早上好，刘总 — 今日有 3 项决策等待批准\", \"snapshot\": [{\"label\": \"基准A\", \"value\": \"$79.4\", \"delta\": \"↓$1.2\", \"delta_tone\": \"down\"}], \"period\": \"W-2025-23\"}.",
                 },
                 "footer": {
                     "type": "object",

@@ -407,7 +407,7 @@ def test_build_decision_board_composes(monkeypatch):
             overlay_by_product={pid: _overlay(pid) for pid in product_ids},
             sku_forecasts_by_product={
                 "feedstock_a": [SkuForecastMeta(
-                    material_code="C5R-001", name="原料A SKU", report_order=1,
+                    material_code="sampleR-001", name="原料A SKU", report_order=1,
                     is_primary=True, forecast_base=8100.0,
                 )],
             },
@@ -428,7 +428,7 @@ def test_build_decision_board_composes(monkeypatch):
     assert iso.directional_accuracy == 0.72
     assert "12,100" in iso.narrative_zh
     raf = next(p for p in resp.products if p.id == "feedstock_a")
-    assert raf.skus[0].material_code == "C5R-001"
+    assert raf.skus[0].material_code == "sampleR-001"
     assert "电子元件" in resp.briefing_zh
 
 

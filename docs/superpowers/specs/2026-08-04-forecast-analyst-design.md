@@ -11,7 +11,7 @@ The Decision Board's AI简评/AI建议 is 100% deterministic template strings (`
 1. **No causal explanation** — cannot say *why* price moves (upstream transmission, seasonality, model drivers).
 2. **Silent at low trust** — `decision_engine.py` gates on trust tier; when low, narrative collapses to "watch" + dashes, never explaining *why trust is low* or *what would change the call*.
 3. **Rich evidence computed but unused** — XGBoost top-5 drivers (`explain.py`), price-chain percentiles (`get_price_chain()`), scenarios, SKU forecasts, seasonal stats all exist but none reach the narrative.
-4. **Dormant domain brain** — `domain_signals.py` (product_c→C5→downstream elasticities, monthly seasonality, ported from Acme) is gated off (`FORECAST_DOMAIN_SIGNALS_ENABLED`, default False).
+4. **Dormant domain brain** — `domain_signals.py` (product_c→sample product→downstream elasticities, monthly seasonality, ported from Acme) is gated off (`FORECAST_DOMAIN_SIGNALS_ENABLED`, default False).
 5. **forecast_agent chat is disconnected** — the board never uses the LLM agent; chat answers don't share the board's evidence.
 
 ## Design Decisions (user-confirmed)
@@ -62,7 +62,7 @@ Decision engine thresholds (`p_rise ≥ 0.70` etc.) unchanged — we enrich evid
 
 Example output for the PRODUCT_B case (same decision, now reasoned):
 
-> 材料B现价 6,940 元/吨,处于近三年约 42% 分位。上游分解 C5 近 30 日下跌 2.8%,按 0.66 弹性传导约 -1.9%,与模型预测 -4.0% 方向一致但幅度更深,8 模型间分歧偏大(区间 6,580–6,790)。当前为 8 月传统需求淡季,方向预测历史准确率未达 55% 显著门槛,故可信度低、建议观望。若上游 C5 止跌或方向准确率回升至 55% 以上,将重新评估为可操作信号。
+> 材料B现价 6,940 元/吨,处于近三年约 42% 分位。上游分解 sample product 近 30 日下跌 2.8%,按 0.66 弹性传导约 -1.9%,与模型预测 -4.0% 方向一致但幅度更深,8 模型间分歧偏大(区间 6,580–6,790)。当前为 8 月传统需求淡季,方向预测历史准确率未达 55% 显著门槛,故可信度低、建议观望。若上游 sample product 止跌或方向准确率回升至 55% 以上,将重新评估为可操作信号。
 
 ## Section 3 — Surfaces
 

@@ -164,14 +164,21 @@ def auth_headers(tokens: dict[str, Any] | None) -> dict[str, str]:
 
 
 def tokens_to_json(tokens: dict[str, Any]) -> str:
-    return json.dumps(tokens, ensure_ascii=False, default=str)
+    # IBM framework-audit #3: OAuth tokens encrypted at rest (Fernet,
+    # key from CREDENTIAL_ENCRYPTION_KEY or derived from JWT_SECRET).
+    from app.services.crypto import encrypt_value
+
+    return encrypt_value(json.dumps(tokens, ensure_ascii=False, default=str)) or ""
 
 
 def tokens_from_json(raw: str | None) -> dict[str, Any] | None:
     if not raw:
         return None
+    from app.services.crypto import decrypt_value
+
+    payload = decrypt_value(raw) or raw  # legacy plaintext passes through
     try:
-        data = json.loads(raw)
+        data = json.loads(payload)
         return data if isinstance(data, dict) else None
     except (TypeError, ValueError):
         return None

@@ -27,7 +27,7 @@ Pin & Paper is a field-notebook editorial system built on a single material prem
 
 ## Preview Ingredients
 
-- Palette: paper #EFE56A; paper-2 #F5ECA0; paper-3 #E8D85A; paper-extra #FBE6A4; cream #F8F1D6; kraft #C9A66B; ink #1F3A8A; ink-soft #2D4FB8
+- Palette: paper #EFE56A; paper-2 #F5ECA0; paper-3 #E8D85A; paper-extra #FBE6A4; cream #F8F1D6; kraft #marketA66B; ink #1F3A8A; ink-soft #2D4FB8
 - Typography: Space Grotesk; Caveat; DM Mono
 - Signature move: Yellow paper background ({components.paper-surface}) with two layered radial gradients and a non-optional fractal-noise grain overlay ({components.paper-grain-overlay}) on every slide.
 - Signature move: Deep cobalt-blue ink ({colors.ink}) as the universal text, border, divider, and pin-illustration color.

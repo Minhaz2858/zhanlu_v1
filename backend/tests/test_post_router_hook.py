@@ -210,7 +210,7 @@ class TestPostRouterPick(unittest.TestCase):
     def test_trigger_only_strong_match_does_not_force(self):
         """2026-09-03 regression: 'tell me about last month sales report'
         scored 0.70 against weekly-report-generation via trigger keywords
-        ('sales', 'report') and forced the Acme C5/C9 pipeline onto the
+        ('sales', 'report') and forced the Acme sample product pipeline onto the
         generic Data Analyst — which then ground for minutes against a demo
         datasource that has none of the skill's tables. A trigger-only match
         (fewer than two skill-NAME tokens) must never force; the model makes
@@ -222,7 +222,7 @@ class TestPostRouterPick(unittest.TestCase):
             candidates=[
                 {
                     "name": "weekly-report-generation",
-                    "description": "Acme C5/C9 industrial weekly market report",
+                    "description": "Acme industrial weekly market report",
                     "trigger": "report sales weekly market",
                     "source": "db",
                 },
@@ -241,7 +241,7 @@ class TestPostRouterPick(unittest.TestCase):
             candidates=[
                 {
                     "name": "weekly-report-generation",
-                    "description": "Acme C5/C9 industrial weekly market report",
+                    "description": "Acme industrial weekly market report",
                     "trigger": "report sales weekly market",
                     "source": "db",
                 },

@@ -46,7 +46,7 @@ class TestKeywordClassify:
         assert "diagnosis" in result
 
     def test_perception_keyword(self):
-        result = _keyword_classify("what is the current status of C5")
+        result = _keyword_classify("what is the current status of sample product")
         assert result is not None
         assert "perception" in result
 
@@ -99,10 +99,10 @@ class TestIntentResult:
             stages=["resolve_product"],
             primary_stage="resolve_product",
             needs_disambiguation=True,
-            disambiguation_question="Which C5 model?",
+            disambiguation_question="Which sample product model?",
         )
         d = ir.to_dict()
-        assert d["disambiguation_question"] == "Which C5 model?"
+        assert d["disambiguation_question"] == "Which sample product model?"
 
 
 class TestClassifyIntent:

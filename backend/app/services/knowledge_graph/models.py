@@ -13,10 +13,10 @@ from enum import Enum
 class ProductType(str, Enum):
     CRUDE = "Product E"
     FEEDSTOCK = "Feedstock"        # Product_C
-    OLEFIN = "Olefin"              # Ethylene, Propylene
-    C5_MIX = "Mixed fraction"
-    C5_DERIVATIVE = "C5 Derivative"
-    C9_DERIVATIVE = "C9 Derivative"
+    OLEFIN = "Monomer"             # generic upstream monomers
+    PRODUCT_MIX = "Mixed fraction"
+    PRODUCT_A_DERIVATIVE = "Product A Derivative"
+    PRODUCT_B_DERIVATIVE = "Product B Derivative"
     DOWNSTREAM = "Downstream Application"
 
 
@@ -43,7 +43,7 @@ class Relationship:
     source_id: str
     target_id: str
     relation: RelationshipType
-    yield_rate: float | None = None   # 1 ton Product_C → 0.15 ton C5
+    yield_rate: float | None = None   # 1 ton Product_C → 0.15 ton byproduct
     description: str | None = None
 
 

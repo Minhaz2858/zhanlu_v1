@@ -442,7 +442,7 @@ Scheduled task → automation_dispatcher (croniter) → AutomationExecution
 
 ### 11.2 BI / Acme
 
-Acme (NOT NovaChem) is the primary BI tenant: Acme data warehouse (`demo_warehouse_prod`, MySQL `10.10.10.49`), tier-1/tier-3 data sourcing, upstream/downstream value-chain dashboards, project knowledge cache, CEO morning digest, weekly digest, midstream decision board, SKU-level forecasting, market decks (C5/C9 hydrocarbons market analysis PPTs in repo root).
+Acme (NOT NovaChem) is the primary BI tenant: Acme data warehouse (`demo_warehouse_prod`, MySQL `10.10.10.49`), tier-1/tier-3 data sourcing, upstream/downstream value-chain dashboards, project knowledge cache, CEO morning digest, weekly digest, midstream decision board, SKU-level forecasting, market decks (sample product hydrocarbons market analysis PPTs in repo root).
 
 ### 11.3 ERP & Intelligence (note)
 

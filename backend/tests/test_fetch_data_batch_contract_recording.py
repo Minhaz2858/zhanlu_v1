@@ -69,14 +69,14 @@ def test_answer_datasets_records_per_sub_query():
     """
     contract = GoalContract()
     contract.record_dataset(
-        rows=[{"product": "C5", "qty": 1000}],
+        rows=[{"product": "sample product", "qty": 1000}],
         sql="SELECT product, qty FROM today_sales",
         source_name="today_sales",
         purpose="answer",
         tool_call_id="t1",
     )
     contract.record_dataset(
-        rows=[{"product": "C9", "qty": 800}],
+        rows=[{"product": "sample product", "qty": 800}],
         sql="SELECT product, qty FROM today_orders",
         source_name="today_orders",
         purpose="answer",
@@ -84,8 +84,8 @@ def test_answer_datasets_records_per_sub_query():
     )
     answers = contract.answer_datasets()
     assert len(answers) == 2
-    assert answers[0]["rows"][0]["product"] == "C5"
-    assert answers[1]["rows"][0]["product"] == "C9"
+    assert answers[0]["rows"][0]["product"] == "sample product"
+    assert answers[1]["rows"][0]["product"] == "sample product"
 
 
 # ── _fetch_data_batch + GoalContract integration ───────────────────────
@@ -145,8 +145,8 @@ async def test_each_fetch_data_batch_sub_query_is_recordable():
                     "label": "sales_today",
                     "success": True,
                     "rows": [
-                        {"product": "C5", "qty": 1000, "revenue": 5500000},
-                        {"product": "C9", "qty": 800, "revenue": 3200000},
+                        {"product": "sample product", "qty": 1000, "revenue": 5500000},
+                        {"product": "sample product", "qty": 800, "revenue": 3200000},
                     ],
                     "sql": "SELECT product, qty, revenue FROM today_sales",
                     "source_id": "kb_test_1",
@@ -155,7 +155,7 @@ async def test_each_fetch_data_batch_sub_query_is_recordable():
                     "label": "sales_yesterday",
                     "success": True,
                     "rows": [
-                        {"product": "C5", "qty": 950, "revenue": 5100000},
+                        {"product": "sample product", "qty": 950, "revenue": 5100000},
                     ],
                     "sql": "SELECT product, qty, revenue FROM yesterday_sales",
                     "source_id": "kb_test_1",
@@ -183,7 +183,7 @@ async def test_each_fetch_data_batch_sub_query_is_recordable():
         # First sub-query: today's sales, 2 rows.
         assert answers[0]["source_name"] == "sales_today"
         assert len(answers[0]["rows"]) == 2
-        assert answers[0]["rows"][0]["product"] == "C5"
+        assert answers[0]["rows"][0]["product"] == "sample product"
         assert answers[0]["sql"] == (
             "SELECT product, qty, revenue FROM today_sales"
         )
@@ -191,7 +191,7 @@ async def test_each_fetch_data_batch_sub_query_is_recordable():
         # Second sub-query: yesterday's sales, 1 row.
         assert answers[1]["source_name"] == "sales_yesterday"
         assert len(answers[1]["rows"]) == 1
-        assert answers[1]["rows"][0]["product"] == "C5"
+        assert answers[1]["rows"][0]["product"] == "sample product"
 
     finally:
         db.close()

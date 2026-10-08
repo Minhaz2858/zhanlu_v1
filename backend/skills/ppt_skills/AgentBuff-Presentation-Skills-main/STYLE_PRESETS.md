@@ -112,7 +112,7 @@ Curated visual styles for AgentBuff Presentation. Each preset is inspired by rea
     --text-secondary: #9a9590;
     --accent-warm: #d4a574;
     --accent-pink: #e8b4b8;
-    --accent-gold: #c9b896;
+    --accent-gold: #marketb896;
 }
 ```
 

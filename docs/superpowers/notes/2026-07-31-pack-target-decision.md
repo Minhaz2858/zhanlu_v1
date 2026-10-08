@@ -6,7 +6,7 @@
 
 ## What was diagnosed
 
-The MySQL warehouse at `10.10.10.49:3306` (KB id `650a2505-...` for `demo_warehouse_prod`) is **reachable** from the docker network. It contains 139 tables/views with rich data, including time-series prices for many C5/C9 products.
+The MySQL warehouse at `10.10.10.49:3306` (KB id `650a2505-...` for `demo_warehouse_prod`) is **reachable** from the docker network. It contains 139 tables/views with rich data, including time-series prices for many sample products.
 
 ### Key table findings
 
@@ -14,7 +14,7 @@ The MySQL warehouse at `10.10.10.49:3306` (KB id `650a2505-...` for `demo_wareho
 |---|---|---|---|---|
 | `monthly_prices` | — | — | — | **Confirmed: does not exist (1146).** |
 | `actual_price` | 2,340 | `date` | 2025-05-01 → 2025-07-31 | Normal English column names. 9 distinct `material_id` (A001, A002, A004-A006, A008-A010, A012). No `product` column. |
-| `v_lz_data` | 10,872 | `biz_date(业务日期)` | 2025-03-07 → 2026-03-20 | **Column names have parens** (`material_name(产品名称)`, `tax_price(含税单价)`). Contains LZ001 Lanzhou prices. Sample row: `分解C5 / 2025-06-13 / 4300`. |
+| `v_lz_data` | 10,872 | `biz_date(业务日期)` | 2025-03-07 → 2026-03-20 | **Column names have parens** (`material_name(产品名称)`, `tax_price(含税单价)`). Contains LZ001 Lanzhou prices. Sample row: `分解sample / 2025-06-13 / 4300`. |
 | `v_market_data` | 10,476 | `biz_date` | 2025-03-07 → 2026-03-20 | Similar structure to v_lz_data. |
 | `v_forecast_price` | 672 | `forecast_date` | 2025-05-26 → 2025-06-06 | Acme forecast results (read-only history). |
 | `v_partner_forecast_price` | 610 | `date` | 2025-05-01 → 2025-05-30 | Partner forecasts. |
@@ -22,8 +22,8 @@ The MySQL warehouse at `10.10.10.49:3306` (KB id `650a2505-...` for `demo_wareho
 | `v_sis_data` | 85 | `biz_date(业务日期)` | 2025-06-15 → 2026-07-29 | One product view (SIS). |
 | `v_电子元件_data` | 1,443 | `biz_date(业务日期)` | 2025-03-07 → 2026-07-29 | Product_D. |
 | `v_材料J_data` | 1,007 | `biz_date(业务日期)` | 2025-03-07 → 2026-07-29 | Styrene. |
-| `v_demo_data` | 1,862 | `biz_date(业务日期)` | 2025-06-13 → 2026-03-20 | Cracked C5. |
-| `v_材料K_data` | 999 | `biz_date(业务日期)` | 2025-06-15 → 2026-03-20 | Cracked C9. |
+| `v_demo_data` | 1,862 | `biz_date(业务日期)` | 2025-06-13 → 2026-03-20 | Cracked sample product. |
+| `v_材料K_data` | 999 | `biz_date(业务日期)` | 2025-06-15 → 2026-03-20 | Cracked sample product. |
 | (and other `v_材料B_data`, `v_包装材料_data`, `v_材料H_data`, etc.) | | | | |
 
 ## Why the simple "repoint" plan doesn't work
@@ -47,7 +47,7 @@ The pack (`acme_sample_v1.json`) defines products with a **different schema**:
   "time_col": "date",        // wrong key — engine uses "time_column"
   "measure": "price",
   "dims": {                   // wrong key — engine uses "dimensions" (list)
-    "product": "cracked_c5"   // not a list
+    "product": "cracked_sample"   // not a list
   },
   "granularity": "monthly",
   "region": "east_china"
@@ -64,15 +64,15 @@ Pack uses `time_col` and `dims` (dict). Engine uses `time_column` and `dimension
 
 ### Blocker 2 — `actual_price` has no product column
 
-`actual_price` has `material_id` (`A001`, `A002`, etc.) and `partner_name` — no `product` column. The pack's `dims.product = "cracked_c5"` doesn't match any value in the table.
+`actual_price` has `material_id` (`A001`, `A002`, etc.) and `partner_name` — no `product` column. The pack's `dims.product = "cracked_sample"` doesn't match any value in the table.
 
-**Required:** A `material_id` lookup (e.g. `cracked_c5 → A001`), which doesn't exist.
+**Required:** A `material_id` lookup (e.g. `cracked_sample → A001`), which doesn't exist.
 
 ### Blocker 3 — `v_lz_data` has Chinese material names
 
-`v_lz_data.material_name(产品名称)` contains values like `'分解C5'`, `'电子元件'`, `'材料J'`. The pack's `dims.product = "cracked_c5"` doesn't match these Chinese names.
+`v_lz_data.material_name(产品名称)` contains values like `'分解sample'`, `'电子元件'`, `'材料J'`. The pack's `dims.product = "cracked_sample"` doesn't match these Chinese names.
 
-**Required:** A `product_key → Chinese name` mapping. ~9 of 16 products have a direct LZ view (`v_demo_data` ↔ `cracked_c5`, etc.), but 7 products (product_c, feedstock_a, product_a, hydrogenated_c9, product_e, butadiene, sbs) have no corresponding LZ view.
+**Required:** A `product_key → Chinese name` mapping. ~9 of 16 products have a direct LZ view (`v_demo_data` ↔ `cracked_sample`, etc.), but 7 products (product_c, feedstock_a, product_a, hydrogenated_market, product_e, butadiene, sbs) have no corresponding LZ view.
 
 ## Possible paths forward
 
@@ -81,9 +81,9 @@ These are options the user should choose from. None of them is a simple "fix the
 ### Option 1: Per-product table repoint + name mapping (medium effort, partial coverage)
 
 - Rewrite the pack to use the engine's schema (rename `time_col → time_column`, restructure `dims` dict → `dimensions` list).
-- Add a `name_mapping` field per product (e.g. `cracked_c5 → 分解C5`).
+- Add a `name_mapping` field per product (e.g. `cracked_sample → 分解sample`).
 - Repoint each product to its corresponding `v_*_data` view (or `v_lz_data` with the right name filter).
-- 9/16 products get data; 7/16 (`product_c`, `feedstock_a`, `product_a`, `hydrogenated_c9`, `product_e`, `butadiene`, `sbs`) return `insufficient_data`.
+- 9/16 products get data; 7/16 (`product_c`, `feedstock_a`, `product_a`, `hydrogenated_market`, `product_e`, `butadiene`, `sbs`) return `insufficient_data`.
 
 **Effort:** ~2-3 days. **Result:** partial product coverage, the truth_gate shows `insufficient_data` for missing products.
 

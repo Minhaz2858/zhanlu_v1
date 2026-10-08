@@ -1,8 +1,8 @@
 """Relevance filter for web_search results (2026-08-31).
 
-Regression test for the poisoned-SERP failure: the C5/C9 market deck's
-web_search returned 200 OK with irrelevant rows (C5驾驶证 / CSGO item
-markets / military transport plane) for a C5/C9 petroleum resin query.
+Regression test for the poisoned-SERP failure: the sample product market deck's
+web_search returned 200 OK with irrelevant rows (无关结果 / CSGO item
+markets / military transport plane) for a sample product petroleum resin query.
 The agent trusted them, wasted a turn, and fell back to internal data —
 the "not informative vs Kimi/Claude" gap. ``_filter_relevant`` must drop
 junk so a provider that returns garbage is treated as empty instead of
@@ -14,14 +14,14 @@ from app.services.tool_handlers.web_search_tool import (
     _significant_tokens,
 )
 
-# The ACTUAL results the C5/C9 deck turn received (Bing, 2026-08-31).
+# The ACTUAL results the sample deck turn received (Bing, 2026-08-31).
 _JUNK_EN = [
-    {"title": "C5驾驶证_百度百科", "url": "https://baike.baidu.com/...", "description": "C5驾驶证，中华人民共和国机动车驾驶证的一种类型。"},
-    {"title": "C5 Game 评测：手续费、支付、KYC 及安全性 | CS2.IO", "url": "https://cs2.io/zh-CN/markets/c5", "description": "C5 Game 靠谱吗？C5 Game 是真实运营的平台。"},
-    {"title": "c5平台现在靠谱吗【csgo吧】_百度贴吧", "url": "https://tieba.baidu.com/p/8977701030", "description": "c5平台现在靠谱吗..本人新手，刚在c5买了把刀。"},
-    {"title": "C5GAME_百度百科", "url": "https://baike.baidu.com/item/C5GAME/61308749", "description": "C5开始执行交易收费，成为国内第一家针对道具交易的收费平台。"},
-    {"title": "C5运输机有多大？与C17放一起比才明白，为何称超大型", "url": "https://news.qq.com/rain/a/20241030A03XCX00", "description": "C5“银河”重型战略运输机与安124对比。"},
-    {"title": "90秒认识C5GAME，从此交易不迷路！_哔哩哔哩", "url": "https://www.bilibili.com/video/...", "description": "CSGO饰品交易就来c5game.com。"},
+    {"title": "无关结果_百度百科", "url": "https://baike.baidu.com/...", "description": "无关结果，中华人民共和国机动车驾驶证的一种类型。"},
+    {"title": "sample product Game 评测：手续费、支付、KYC 及安全性 | CS2.IO", "url": "https://cs2.io/zh-CN/markets/sample", "description": "sample product Game 靠谱吗？sample product Game 是真实运营的平台。"},
+    {"title": "sample平台现在靠谱吗【csgo吧】_百度贴吧", "url": "https://tieba.baidu.com/p/8977701030", "description": "sample平台现在靠谱吗..本人新手，刚在sample买了把刀。"},
+    {"title": "sampleGAME_百度百科", "url": "https://baike.baidu.com/item/sampleGAME/61308749", "description": "sample开始执行交易收费，成为国内第一家针对道具交易的收费平台。"},
+    {"title": "sample运输机有多大？与C17放一起比才明白，为何称超大型", "url": "https://news.qq.com/rain/a/20241030A03XCX00", "description": "sample product“银河”重型战略运输机与安124对比。"},
+    {"title": "90秒认识sampleGAME，从此交易不迷路！_哔哩哔哩", "url": "https://www.bilibili.com/video/...", "description": "CSGO饰品交易就来samplegame.com。"},
 ]
 
 _JUNK_ZH = [
@@ -33,21 +33,21 @@ _JUNK_ZH = [
 ]
 
 _GOOD_EN = [
-    {"title": "C5 C9 Petroleum Resin Market Size Report 2030 | Grand View Research", "url": "https://www.grandviewresearch.com/...", "description": "The global C5/C9 petroleum resin market size was estimated at USD 3.2 billion in 2025 and is projected to grow at a CAGR of 5.8%."},
-    {"title": "C9 Hydrocarbon Resin Market - Global Forecast 2026 | MarketsandMarkets", "url": "https://www.marketsandmarkets.com/...", "description": "C9 hydrocarbon resin demand is driven by adhesive and rubber industries in China."},
-    {"title": "C5 Resin Market Analysis, Size & Forecast | ChemAnalyst", "url": "https://www.chemanalyst.com/...", "description": "C5 petroleum resin price trends and capacity outlook for 2026."},
+    {"title": "sample product Petroleum Resin Market Size Report 2030 | Grand View Research", "url": "https://www.grandviewresearch.com/...", "description": "The global sample product petroleum resin market size was estimated at USD 3.2 billion in 2025 and is projected to grow at a CAGR of 5.8%."},
+    {"title": "sample product Hydrocarbon Resin Market - Global Forecast 2026 | MarketsandMarkets", "url": "https://www.marketsandmarkets.com/...", "description": "sample product hydrocarbon resin demand is driven by adhesive and rubber industries in China."},
+    {"title": "sample product Resin Market Analysis, Size & Forecast | ChemAnalyst", "url": "https://www.chemanalyst.com/...", "description": "sample product petroleum resin price trends and capacity outlook for 2026."},
 ]
 
 _GOOD_ZH = [
-    {"title": "原料A复合材料价格行情_生意社", "url": "https://www.100ppi.com/...", "description": "原料A复合材料价格最新报价，2026年8月市场行情走势分析。"},
-    {"title": "原料A市场价格 2026 - 百川盈孚", "url": "https://www.baiinfo.com/...", "description": "原料A市场报价、供需分析、装置动态。"},
+    {"title": "原料A复合材料价格行情_price tracker", "url": "https://www.100ppi.com/...", "description": "原料A复合材料价格最新报价，2026年8月市场行情走势分析。"},
+    {"title": "原料A市场价格 2026 - price tracker", "url": "https://www.baiinfo.com/...", "description": "原料A市场报价、供需分析、装置动态。"},
 ]
 
 
-def test_significant_tokens_c5_query():
-    toks = _significant_tokens("C5 C9 petroleum resin market price 2026 trends China")
-    # Stopwords (market/price/trends/china/2026) dropped; C5/C9 kept.
-    assert "c5" in toks and "c9" in toks
+def test_significant_tokens_sample_query():
+    toks = _significant_tokens("the target product resin market price 2026 trends China")
+    # Stopwords (market/price/trends/china/2026) dropped; sample product kept.
+    assert "sample" in toks and "market" in toks
     assert "petroleum" in toks and "resin" in toks
     assert "market" not in toks and "2026" not in toks
 
@@ -59,7 +59,7 @@ def test_significant_tokens_cjk_bigrams():
 
 
 def test_filter_drops_actual_bing_junk_en():
-    kept = _filter_relevant(_JUNK_EN, "C5 C9 petroleum resin market price 2026 trends China")
+    kept = _filter_relevant(_JUNK_EN, "the target product resin market price 2026 trends China")
     assert kept == [], f"expected all junk dropped, got {[r['title'] for r in kept]}"
 
 
@@ -78,20 +78,20 @@ def test_filter_drops_actual_bing_junk_zh():
 
 
 def test_filter_keeps_relevant_en():
-    kept = _filter_relevant(_GOOD_EN, "C5 C9 petroleum resin market price 2026 trends China")
+    kept = _filter_relevant(_GOOD_EN, "the target product resin market price 2026 trends China")
     assert len(kept) == 3
-    assert kept[0]["title"].startswith("C5 C9 Petroleum Resin")
+    assert kept[0]["title"].startswith("sample product Petroleum Resin")
 
 
 def test_filter_keeps_relevant_zh():
     kept = _filter_relevant(_GOOD_ZH, "原料A 复合材料 价格 市场 2026年8月")
     assert len(kept) == 2
-    assert "生意社" in kept[0]["title"]
+    assert "price tracker" in kept[0]["title"]
 
 
 def test_filter_mixed_keeps_relevant_drops_junk():
     mixed = _JUNK_EN[:2] + _GOOD_EN[:1]
-    kept = _filter_relevant(mixed, "C5 C9 petroleum resin market price 2026 trends China")
+    kept = _filter_relevant(mixed, "the target product resin market price 2026 trends China")
     assert len(kept) == 1
     assert "Grand View" in kept[0]["title"]
 

@@ -273,7 +273,7 @@ def test_forecast_target_crud():
 def test_forecast_run_crud_with_scenario_json():
     db = SessionLocal()
     try:
-        target = ForecastTarget(product_key="product_a", name="C5 Resin")
+        target = ForecastTarget(product_key="product_a", name="sample product Resin")
         db.add(target)
         db.commit()
         db.refresh(target)
@@ -334,7 +334,7 @@ def test_forecast_run_below_naive_baseline_true():
 def test_forecast_accuracy_log_crud():
     db = SessionLocal()
     try:
-        target = ForecastTarget(product_key="cracked_c9", name="Cracked C9")
+        target = ForecastTarget(product_key="cracked_market", name="Cracked sample product")
         db.add(target)
         db.commit()
         db.refresh(target)
@@ -374,7 +374,7 @@ def test_forecast_accuracy_log_crud():
 def test_forecast_business_rule_proposed_to_active_workflow():
     db = SessionLocal()
     try:
-        target = ForecastTarget(product_key="product_a", name="C5 Resin")
+        target = ForecastTarget(product_key="product_a", name="sample product Resin")
         db.add(target)
         db.commit()
         db.refresh(target)

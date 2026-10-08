@@ -22,7 +22,7 @@ class AutomationFile(TimestampedBase):
     automation_task_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("automation_tasks.id"), nullable=False, index=True
     )
-    # Display name (e.g. "C5 Product Weekly Price Report").
+    # Display name (e.g. "Product A Weekly Price Report").
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     # File extension (pptx, docx, pdf, html, json, csv, png, …).
     file_type: Mapped[str | None] = mapped_column(String(50), nullable=True)

@@ -46,7 +46,7 @@ class AutomationExecution(TimestampedBase):
     # given execution). Not a hard lease; the janitor uses timeout_at.
     lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Live-run observability (Manus parity): the agent streams numbered
-    # activity steps ("Understanding your request", "Retrieving C5 prices
+    # activity steps ("Understanding your request", "Retrieving product prices
     # (1/3)", …) and phase headlines ("Fathoming", "Fabricating", …) as it
     # works. The executor mirrors these here so the Scheduled panel can
     # render a live plan checklist by polling /executions/{id}/details

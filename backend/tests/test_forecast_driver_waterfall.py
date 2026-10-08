@@ -45,7 +45,7 @@ class TestComputeWaterfall:
     def test_no_model_returns_empty(self):
         """With no model, returns empty items."""
         result = compute_waterfall(
-            product_key="c5_cracked",
+            product_key="sample_cracked",
             forecast_values=[100.0, 101.0, 102.0],
             xgboost_model=None,
             feature_names=["product_c", "benchmark_a"],
@@ -59,7 +59,7 @@ class TestComputeWaterfall:
         # 3 features, importances: product_c=0.5, benchmark_a=0.3, inventory=0.2
         mock_model = MockXGBForecast([0.5, 0.3, 0.2])
         result = compute_waterfall(
-            product_key="c5_cracked",
+            product_key="sample_cracked",
             forecast_values=[100.0, 105.0],  # +5 change
             xgboost_model=mock_model,
             feature_names=["product_c", "benchmark_a", "inventory"],
@@ -74,7 +74,7 @@ class TestComputeWaterfall:
         """When forecast < base, contributions should be negative."""
         mock_model = MockXGBForecast([0.6, 0.4])
         result = compute_waterfall(
-            product_key="c5_cracked",
+            product_key="sample_cracked",
             forecast_values=[100.0, 95.0],  # -5 change
             xgboost_model=mock_model,
             feature_names=["product_c", "benchmark_a"],
@@ -87,7 +87,7 @@ class TestComputeWaterfall:
         """Custom base_value should be respected."""
         mock_model = MockXGBForecast([1.0])
         result = compute_waterfall(
-            product_key="c5_cracked",
+            product_key="sample_cracked",
             forecast_values=[100.0, 110.0],
             xgboost_model=mock_model,
             feature_names=["product_c"],
@@ -102,7 +102,7 @@ class TestComputeWaterfall:
         """Sum of contributions should equal forecast - base."""
         mock_model = MockXGBForecast([0.5, 0.3, 0.2])
         result = compute_waterfall(
-            product_key="c5_cracked",
+            product_key="sample_cracked",
             forecast_values=[100.0, 108.0],  # +8 change
             xgboost_model=mock_model,
             feature_names=["product_c", "benchmark_a", "inventory"],
@@ -114,7 +114,7 @@ class TestComputeWaterfall:
         """Higher importance → higher weight."""
         mock_model = MockXGBForecast([0.7, 0.2, 0.1])
         result = compute_waterfall(
-            product_key="c5_cracked",
+            product_key="sample_cracked",
             forecast_values=[100.0, 110.0],
             xgboost_model=mock_model,
             feature_names=["product_c", "benchmark_a", "inventory"],
@@ -128,7 +128,7 @@ class TestComputeWaterfall:
         """to_dict() should produce JSON-serializable output."""
         mock_model = MockXGBForecast([0.5, 0.5])
         result = compute_waterfall(
-            product_key="c5_cracked",
+            product_key="sample_cracked",
             forecast_values=[100.0, 105.0],
             xgboost_model=mock_model,
             feature_names=["product_c", "benchmark_a"],

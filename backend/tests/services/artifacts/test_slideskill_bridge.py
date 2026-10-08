@@ -25,10 +25,10 @@ from app.config import settings
 
 def _plan(theme: str = "swiss_modern") -> DeckPlan:
     return DeckPlan(
-        title="C5/C9 Market View",
+        title="Sample Market View",
         theme_recommendation=theme,
         slides=[
-            SlidePlan(layout="cover", title="C5/C9 Market View", subtitle="Q3 Outlook"),
+            SlidePlan(layout="cover", title="Sample Market View", subtitle="Q3 Outlook"),
             SlidePlan(
                 layout="kpi_grid",
                 title="Key Metrics",
@@ -63,7 +63,7 @@ def test_plan_to_markdown_cover_and_sections() -> None:
     md = plan_to_markdown(_plan(), [])
     lines = [l for l in md.splitlines() if l.strip()]
     # Cover becomes the first heading.
-    assert lines[0].startswith("# C5/C9 Market View")
+    assert lines[0].startswith("# Sample Market View")
     # Content slides get headings + bullets.
     assert any(l.startswith("# Key Metrics") for l in lines)
     assert any("- Revenue ¥1.2B (+8.4%)" in l for l in lines)
@@ -222,7 +222,7 @@ def test_table_bullets_render_rows() -> None:
     slide = SlidePlan(
         layout="data_table", title="Mix",
         table_cols=["Material", "Qty"],
-        table_rows=[{"Material": "C5", "Qty": 19688}, {"Material": "C9", "Qty": 19688}],
+        table_rows=[{"Material": "sample product", "Qty": 19688}, {"Material": "sample product", "Qty": 19688}],
     )
     bullets = _table_bullets(slide)
-    assert any("Material: C5" in b and "Qty: 19688" in b for b in bullets)
+    assert any("Material: sample product" in b and "Qty: 19688" in b for b in bullets)

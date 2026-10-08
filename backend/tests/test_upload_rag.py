@@ -80,7 +80,7 @@ def rag_env(monkeypatch, tmp_path):
 
 LONG_TEXT = (
     "The quarterly contract review covers pricing for PRODUCT_B resin across "
-    "the C5/C9 segments. " * 40
+    "the sample product segments. " * 40
 )
 
 
@@ -91,7 +91,7 @@ class TestIndexAndRetrieve:
         )
         assert n > 0
         chunks = upload_rag.retrieve_upload_chunks(
-            "sess-1", "org-1", "PRODUCT_B resin pricing C5 C9"
+            "sess-1", "org-1", "PRODUCT_B resin pricing sample product"
         )
         assert chunks, "expected at least one retrieved chunk"
         assert any("PRODUCT_B" in c["text"] for c in chunks)

@@ -13,7 +13,7 @@ Collections:
   5. causal_graph_embeddings — Causal-chain embeddings (Phase 1 link)
   6. news_events           — News events (Phase 1 link)
   7. decision_outcomes     — Post-hoc decision outcomes (P&L, accuracy)
-  8. product_catalog       — Product semantic aliases (C5/C9 derivatives)
+  8. product_catalog       — Product semantic aliases (product derivatives)
   9. user_memory           — Per-user persistent memory snapshots
 
 Naming convention:

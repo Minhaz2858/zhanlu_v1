@@ -16,8 +16,8 @@ def sample_target():
     t.id = "t-1"
     t.org_id = "o-1"
     t.app_id = "a-1"
-    t.product_key = "c5_cracked"
-    t.name = "C5 Cracked"
+    t.product_key = "sample_cracked"
+    t.name = "sample product Cracked"
     t.model_config = {"max_horizon_mape": 10.0}
     return t
 

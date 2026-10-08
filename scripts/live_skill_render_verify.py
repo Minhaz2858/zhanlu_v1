@@ -7,14 +7,14 @@ from app.services.artifacts.slideskill_bridge import render_editable_deck
 
 def build_plan():
     return DeckPlan(
-        title="C5/C9 Market View",
+        title="sample product Market View",
         theme_recommendation="",
         palette_recommendation="",
         deck_type="data_report",
         slides=[
-            SlidePlan(layout="cover", title="C5/C9 分解产品市场洞察", subtitle="Q3 2026 Outlook"),
+            SlidePlan(layout="cover", title="sample product 分解产品市场洞察", subtitle="Q3 2026 Outlook"),
             SlidePlan(layout="insights_bullets", title="关键洞察",
-                      bullets=["营收 ¥920.97M", "销量 101.47K 吨", "C5 树脂占比 22.3%"]),
+                      bullets=["营收 ¥920.97M", "销量 101.47K 吨", "sample product 树脂占比 22.3%"]),
             SlidePlan(layout="chart_full", title="月度趋势",
                       chart_spec=ChartSpecInSlide(chart_type="grouped_bar", x_key="month",
                                                   y_keys=["amount"], title="Trend"),
@@ -29,7 +29,7 @@ out = {}
 for skill in ("kai-slide-creator", "guizang-ppt-skill"):
     plan = build_plan()
     apply_skill_profile(plan, skill)
-    data = render_editable_deck(plan, None, [], "make a c5 c9 market view ppt")
+    data = render_editable_deck(plan, None, [], "make a sample market market view ppt")
     out[skill] = data
     with open("/tmp/deck_%s.pptx" % skill.replace("-", "_"), "wb") as f:
         f.write(data)

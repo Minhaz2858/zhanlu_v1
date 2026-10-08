@@ -199,7 +199,7 @@ Replace the Market Dashboard **What-If Analysis sidebar panel** (sliders + Run S
 
 - [ ] **Step 1: Restart backend** — `docker restart zhanlu-backend`.
 - [ ] **Step 2: Market Dashboard (`/market-dashboard/upstream`)** — right sidebar GONE, chart spans full width, no console errors.
-- [ ] **Step 3: Acme BI chat (`acme_bi_assistant`)** — ask `"如果布伦特涨10%, product_a 会怎样?"` → agent calls `forecast_what_if`; verify a tool step shows `product_id`/base/adjusted/total_impact; final answer = short paragraph + 7-day markdown table (spec §11).
+- [ ] **Step 3: Acme BI chat (`acme_bi_assistant`)** — ask `"如果基准A涨10%, product_a 会怎样?"` → agent calls `forecast_what_if`; verify a tool step shows `product_id`/base/adjusted/total_impact; final answer = short paragraph + 7-day markdown table (spec §11).
 - [ ] **Step 4: General chat** — same question on a default project → `general_assistant` calls the tool directly; confirm no tool-not-found error.
 - [ ] **Step 5: Negative cases** — `"what if product_c -5%?"` with no product → agent asks for clarification or returns the spec §8 error (never 500s); both-deltas-zero returns the error string.
 - [ ] **Step 6: Backend logs** — `docker logs zhanlu-backend --tail 50` shows tool dispatch, no tracebacks.

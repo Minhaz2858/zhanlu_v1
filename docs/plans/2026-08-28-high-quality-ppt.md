@@ -209,8 +209,8 @@ git commit -m "feat(ppt): blocking audit gate — FAIL decks are not delivered (
 def test_market_intent_selects_business_preset():
     from app.services.artifacts.themes import select_theme
     from app.services.synexia.contracts import DeckPlan
-    plan = DeckPlan(title="C5/C9 Market View", slides=[])
-    theme = select_theme(plan, "make a c5 c9 market view ppt using market data")
+    plan = DeckPlan(title="sample product Market View", slides=[])
+    theme = select_theme(plan, "make a sample market market view ppt using market data")
     assert theme.name in ("business", "industry")  # adjust to actual preset names
 ```
 
@@ -262,7 +262,7 @@ git commit -m "feat(kb): bind Market Research KB to SAMPLE project (scoped copy)
 def test_market_intent_prefers_market_kb():
     from app.services.synexia.capability_router import _select_grounding_kb  # or the real fn
     market = "market-kb-id"; erp = "erp-kb-id"
-    chosen = _select_grounding_kb([erp, market], "c5 c9 market view market data")
+    chosen = _select_grounding_kb([erp, market], "sample market market view market data")
     assert chosen == market
 ```
 
@@ -310,7 +310,7 @@ def test_market_intent_prefers_market_kb():
 
 **Objective:** Prove the pipeline produces a professional deck with real market data.
 
-**Step 1:** Run a real agent turn (or the API driver from agent_qa) with "make a c5 c9 market view ppt don't use my data use market data". **Step 2:** Verify: PPTX has images/charts (bytes >> 60KB, slides have image fills), audit PASS, source footers present, market KB rows used (no "Product A/B"). **Step 3:** Visual QA via pptx skill thumbnail → inspect for overlap/overflow. **Step 4:** Fix any defects → re-render. **Step 5:** Commit any fixes.
+**Step 1:** Run a real agent turn (or the API driver from agent_qa) with "make a sample market market view ppt don't use my data use market data". **Step 2:** Verify: PPTX has images/charts (bytes >> 60KB, slides have image fills), audit PASS, source footers present, market KB rows used (no "Product A/B"). **Step 3:** Visual QA via pptx skill thumbnail → inspect for overlap/overflow. **Step 4:** Fix any defects → re-render. **Step 5:** Commit any fixes.
 
 ---
 

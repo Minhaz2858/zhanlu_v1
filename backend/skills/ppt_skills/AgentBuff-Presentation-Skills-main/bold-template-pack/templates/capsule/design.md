@@ -10,7 +10,7 @@ colors:
   white: "#FFFFFF"
   coral: "#E85D4E"
   lime: "#C4D94E"
-  lavender: "#C5B5E0"
+  lavender: "#sampleB5E0"
   sky: "#8BB4F7"
   violet: "#A06CE8"
   yellow: "#F2D160"
@@ -280,7 +280,7 @@ Depth comes from **soft hard-offset shadows** at 4px, 6px, 8px, and 12px in a lo
 ### Candy Accents
 - **Coral** (`{colors.coral}` — #E85D4E): Warm orange-red. The most "voice-y" of the accents; used as a default accent-line color, default pill-card icon fill on the first card in a sequence, and the most frequent stat-number color.
 - **Lime** (`{colors.lime}` — #C4D94E): Vivid chartreuse-green. Pairs well with coral; default fill for orbit-center anchors and frequent stat-number color.
-- **Lavender** (`{colors.lavender}` — #C5B5E0): Soft lilac-purple. Used as a calming pill fill in headers and as a frequent quote-highlight color.
+- **Lavender** (`{colors.lavender}` — #sampleB5E0): Soft lilac-purple. Used as a calming pill fill in headers and as a frequent quote-highlight color.
 - **Sky** (`{colors.sky}` — #8BB4F7): Mid-saturation cornflower blue. The default "third accent" — sits comfortably next to coral and lime in a 3-card grid.
 - **Violet** (`{colors.violet}` — #A06CE8): Deeper purple. Used when a slide already has lavender as one accent and needs a second purple-family pop.
 - **Yellow** (`{colors.yellow}` — #F2D160): Warm marigold. The default fill for title pills, closing pills, and any pill that should read as "important / featured."

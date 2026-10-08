@@ -19,7 +19,7 @@ class TestDeriveFeatureSpec:
     def test_downstream_product_has_feedstock_chain(self):
         graph = build_sample_graph()
         spec = derive_feature_spec("product_d", graph)
-        assert "cracked_c5" in spec.feedstock_keys
+        assert "cracked_sample" in spec.feedstock_keys
         assert "product_c" in spec.feedstock_keys
         assert "product_e" in spec.feedstock_keys
 
@@ -60,11 +60,11 @@ class TestDeriveFeatureSpec:
 class TestTopologicalOrder:
     def test_feedstocks_before_derivatives(self):
         graph = build_sample_graph()
-        products = ["product_d", "product_e", "product_c", "cracked_c5"]
+        products = ["product_d", "product_e", "product_c", "cracked_sample"]
         ordered = topological_order(products, graph)
         assert ordered.index("product_e") < ordered.index("product_c")
-        assert ordered.index("product_c") < ordered.index("cracked_c5")
-        assert ordered.index("cracked_c5") < ordered.index("product_d")
+        assert ordered.index("product_c") < ordered.index("cracked_sample")
+        assert ordered.index("cracked_sample") < ordered.index("product_d")
 
     def test_all_products_returned(self):
         graph = build_sample_graph()

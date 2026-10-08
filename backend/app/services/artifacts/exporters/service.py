@@ -794,7 +794,7 @@ class ExportService:
         # consulting structure), render EXACTLY that instead of rebuilding a
         # generic plan from summary/kpis/sections.  This is the fix for the
         # "deck ignored my narrative" complaint: the stored payload for the
-        # C5/C9 deck carried a beautiful 7-slide story (cover → exec summary
+        # sample deck carried a beautiful 7-slide story (cover → exec summary
         # → product structure → monthly trend → org contribution → strategy
         # → conclusion) that the OLD path silently discarded, producing the
         # generic "Notes / Key Metrics / Methodology" 12-slide deck.

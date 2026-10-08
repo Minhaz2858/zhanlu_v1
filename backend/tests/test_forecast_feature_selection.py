@@ -26,7 +26,7 @@ class TestDeriveFeatureSpecOverride:
         """When override_exog_features is provided, KG walk is skipped."""
         empty_kg = KnowledgeGraph()  # no nodes
         spec = derive_feature_spec(
-            "c5_cracked", empty_kg,
+            "sample_cracked", empty_kg,
             override_exog_features=["benchmark_a", "product_c", "import_price"],
         )
         assert isinstance(spec, FeatureSpec)
@@ -37,13 +37,13 @@ class TestDeriveFeatureSpecOverride:
     def test_no_override_with_empty_kg(self):
         """When no override and product not in KG, returns empty feedstock_keys."""
         empty_kg = KnowledgeGraph()
-        spec = derive_feature_spec("c5_cracked", empty_kg)
+        spec = derive_feature_spec("sample_cracked", empty_kg)
         assert spec.feedstock_keys == []  # product not in KG → empty
 
     def test_none_override_falls_back_to_kg(self):
         """None override falls back to KG walk (default behavior)."""
         empty_kg = KnowledgeGraph()
-        spec = derive_feature_spec("c5_cracked", empty_kg, override_exog_features=None)
+        spec = derive_feature_spec("sample_cracked", empty_kg, override_exog_features=None)
         assert spec.feedstock_keys == []  # product not in KG → empty
 
     def test_override_for_unknown_product(self):
@@ -58,7 +58,7 @@ class TestDeriveFeatureSpecOverride:
     def test_target_model_config_exog_features_integration(self):
         """Simulate engine.py wiring: target.model_config['exog_features'] → override."""
         target = MagicMock()
-        target.product_key = "c5_cracked"
+        target.product_key = "sample_cracked"
         target.model_config = {"exog_features": ["benchmark_a", "operating_rate"]}
 
         _exog_override = target.model_config.get("exog_features") if isinstance(target.model_config, dict) else None
@@ -69,6 +69,6 @@ class TestDeriveFeatureSpecOverride:
     def test_empty_list_override_treated_as_no_override(self):
         """Empty list override → feedstock_keys is empty (no KG walk, no features)."""
         empty_kg = KnowledgeGraph()
-        spec = derive_feature_spec("c5_cracked", empty_kg, override_exog_features=[])
+        spec = derive_feature_spec("sample_cracked", empty_kg, override_exog_features=[])
         # Empty list IS truthy but len=0, so it's a valid override of "no features"
         assert spec.feedstock_keys == []

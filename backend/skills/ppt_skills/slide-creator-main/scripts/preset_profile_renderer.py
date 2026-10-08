@@ -2102,7 +2102,7 @@ def _component_signature_css(profile_spec: PresetProfileSpec) -> str:
         rules.extend(
             [
                 '.profile-signature-component.orb, .profile-signature-component.orb-gold, .profile-signature-component.orb-pink, .profile-signature-component.orb-terra { border-radius: 999px 999px 44px 999px; background: rgba(201,184,150,0.16); }',
-                '.profile-signature-component.feature-grid, .profile-signature-component.preset-grid { background: rgba(15,15,15,0.86); border-color: #c9b896; }',
+                '.profile-signature-component.feature-grid, .profile-signature-component.preset-grid { background: rgba(15,15,15,0.86); border-color: #marketb896; }',
             ]
         )
     elif preset == "Neon Cyber":
@@ -2669,7 +2669,7 @@ body[data-profile-spec="dark-botanical"] {{
     --profile-ink: #e8e4df;
     --profile-muted: rgba(232, 228, 223, 0.66);
     --profile-panel: rgba(15, 15, 15, 0.76);
-    --profile-rule: #c9b896;
+    --profile-rule: #marketb896;
 }}
 
 body[data-profile-spec="neo-brutalism"] {{

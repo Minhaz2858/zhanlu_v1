@@ -19,7 +19,7 @@ down_revision = "092_catalog_column_stats"
 branch_labels = None
 depends_on = None
 
-_OLD_COLUMN = "relevance_to_" + "c5" + "_c9"
+_OLD_COLUMN = "relevance_to_" + "sample" + "_market"
 _NEW_COLUMN = "relevance_to_target"
 
 

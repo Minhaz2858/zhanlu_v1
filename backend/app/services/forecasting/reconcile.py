@@ -62,7 +62,7 @@ class TopDownAllocationResult:
 @dataclass
 class MiddleOutConstraintResult:
     """Result of middle-out coherence constraint between siblings."""
-    sibling_group: str  # e.g. "c5_derivatives"
+    sibling_group: str  # e.g. "sample_derivatives"
     original_forecasts: dict[str, list[float]]
     adjusted_forecasts: dict[str, list[float]]
     violations: list[dict] = field(default_factory=list)
@@ -300,7 +300,7 @@ def constrain_middle_out(
     Parameters
     ----------
     sibling_group : str
-        Group name (e.g. "c5_derivatives").
+        Group name (e.g. "sample_derivatives").
     sibling_forecasts : dict[str, list[float]]
         Forecasts for each sibling product.
     parent_forecast : list[float] | None

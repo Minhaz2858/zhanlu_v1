@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Generate a CEO-level weekly market report for C5/C9 industrial products
+Generate a CEO-level weekly market report for industrial products
 (product_f, product_d, product_b, product_a, SIS, etc.) using the Acme BI data
 pipeline. The report must be data-grounded, structured markdown with tables
 and explicit risk flags — ready to read in chat, no file generation overhead.
@@ -28,7 +28,7 @@ conversation), do NOT run this pipeline:
 - The user asks for a "weekly report", "market report", "weekly summary",
   "weekly review", or "周报 / 本周报告" AND wants it generated (not just
   listed from an existing file).
-- The project is Acme BI (C5/C9 products).
+- The project is Acme BI (sample products).
 
 ## Critical rules
 
@@ -76,21 +76,21 @@ three.
 
 ### Step 2 — Data deep-dive (TWO `ask_data_agent` calls — sales + inventory)
 
-Query ALL C5/C9 products in ONE query using the unified LIVE views. Do NOT
+Query ALL sample products in ONE query using the unified LIVE views. Do NOT
 query product-specific views one at a time (`sale_erp_v_原料A_data`,
 `sale_erp_v_材料B_data`, …) — each holds a single product and silently
-produces a one-product report. The C5/C9 portfolio covers: 原料A复合材料,
+produces a one-product report. The sample product portfolio covers: 原料A复合材料,
 材料B, 电子元件, 包装材料, 原料A, 材料C, 工业用分解材料M.
 
 **Call A — Sales (ALL products):**
 `ask_data_agent("weekly sales volume, shipment quantity and revenue for ALL
-C5/C9 products in ONE query from v_sale_order (or erp_t_sal_outstock)
+sample products in ONE query from v_sale_order (or erp_t_sal_outstock)
 grouped by product name; include latest date via MAX(date_column); products:
 原料A复合材料, 材料B, 电子元件, 包装材料, 原料A, 材料C,
 工业用分解材料M — do not restrict to a single product")`
 
 **Call B — Inventory (ALL products):**
-`ask_data_agent("current inventory for ALL C5/C9 products from
+`ask_data_agent("current inventory for ALL sample products from
 erp_v_stk_inventory (or erp_t_stk_inventory) — inventory quantity/position by
 product name; same product list as the sales query")`
 
@@ -98,7 +98,7 @@ Rules:
 - ALWAYS use the unified tables (`v_sale_order` / `erp_t_sal_outstock`
   for sales; `erp_v_stk_inventory` / `erp_t_stk_inventory` for inventory).
   Never a single product-specific view — that yields a one-product report.
-- If the user says "C5/C9 products" (or the weekly report covers the C5/C9
+- If the user says "sample products" (or the weekly report covers the sample product
   portfolio), the report MUST cover all seven products listed above.
 - Prefer the LIVE tables over the STALE `erp_product_sales_details` (note the
   product name column is FNAME there).

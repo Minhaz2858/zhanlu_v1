@@ -118,7 +118,7 @@ class TestBuildSkillCatalogContext(unittest.TestCase):
         )
 
         block = build_skill_catalog_context(
-            "make a c5 c9 market view ppt",
+            "make a sample market market view ppt",
             db=None,
             context_window_tokens=128_000,
         )

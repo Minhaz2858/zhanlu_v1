@@ -17,9 +17,9 @@ def test_payload_slides_are_preserved_through_model_validation():
     from app.services.synexia.contracts import ReportCardPayload
 
     raw = {
-        "title": "C5/C9 Market Insight",
+        "title": "sample product Market Insight",
         "slides": [
-            {"title": "C5/C9 分解产品市场洞察报告", "subtitle": "数据驱动", "bullets": ["a"]},
+            {"title": "sample product 分解产品市场洞察报告", "subtitle": "数据驱动", "bullets": ["a"]},
             {"title": "执行摘要", "bullets": ["x", "y"], "layout": "executive_brief"},
             {"title": "战略建议", "bullets": ["z"], "layout": "recommendations"},
         ],
@@ -34,7 +34,7 @@ def test_slides_plan_renders_agent_structure_not_generic_filler():
     from app.services.synexia.contracts import ReportCardPayload
 
     raw = {
-        "title": "C5/C9 Market Insight",
+        "title": "sample product Market Insight",
         "summary": "8月销售额 ¥1.52亿",
         "chart": {
             "type": "combo",
@@ -46,7 +46,7 @@ def test_slides_plan_renders_agent_structure_not_generic_filler():
             },
         },
         "slides": [
-            {"title": "C5/C9 分解产品市场洞察报告", "subtitle": "数据驱动的产品线分析", "bullets": ["覆盖主体：示例工厂"]},
+            {"title": "sample product 分解产品市场洞察报告", "subtitle": "数据驱动的产品线分析", "bullets": ["覆盖主体：示例工厂"]},
             {"title": "执行摘要", "bullets": ["2026年8月合同销售额 ¥1.52亿，环比下降 9.7%"], "layout": "executive_brief"},
             {"title": "产品线结构分析", "bullets": ["原料A复合材料 ¥20.25亿"], "layout": "data_table"},
             {"title": "月度趋势与波动", "bullets": ["3月–4月需求旺盛"], "layout": "chart_full"},
@@ -55,13 +55,13 @@ def test_slides_plan_renders_agent_structure_not_generic_filler():
         ],
     }
     payload = ReportCardPayload.model_validate(raw)
-    plan = ExportService._slides_to_deck_plan(payload, "make a c5 c9 market view ppt")
+    plan = ExportService._slides_to_deck_plan(payload, "make a sample market market view ppt")
 
     assert plan is not None
     titles = [s.title for s in plan.slides]
     # The agent's authored titles — NOT "Notes" / "Key Metrics" filler.
     assert titles == [
-        "C5/C9 分解产品市场洞察报告",
+        "sample product 分解产品市场洞察报告",
         "执行摘要",
         "产品线结构分析",
         "月度趋势与波动",
@@ -120,7 +120,7 @@ def test_chart_columnar_wide_shape_coerces_to_rows():
 
     spec = ChartSpec.model_validate({
         "type": "combo",
-        "title": "C5/C9 月度合同销售额与量",
+        "title": "sample product 月度合同销售额与量",
         "data": {
             "months": ["2026-03", "2026-04", "2026-05"],
             "amount": [16566, 21629, 14672],
@@ -191,17 +191,17 @@ def test_legit_methodology_survives():
     assert "v_sale_order" in payload.methodology
 
 
-# ── Full round-trip: the exact C5/C9 payload now yields the authored deck ─
+# ── Full round-trip: the exact sample product payload now yields the authored deck ─
 
 def test_sample_payload_roundtrip_keeps_consulting_structure():
     from app.services.artifacts.exporters.service import ExportService
     from app.services.synexia.contracts import ReportCardPayload
 
     raw = {
-        "title": "C5/C9 分解产品市场洞察报告",
+        "title": "sample product 分解产品市场洞察报告",
         "summary": "2026年8月实现合同销售额 ¥1.52亿",
         "chart": {
-            "title": "C5/C9 月度合同销售额与量 (2026.03–08)",
+            "title": "sample product 月度合同销售额与量 (2026.03–08)",
             "type": "combo",
             "data": {
                 "months": ["2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08"],
@@ -210,23 +210,23 @@ def test_sample_payload_roundtrip_keeps_consulting_structure():
             },
         },
         "slides": [
-            {"title": "C5/C9 分解产品市场洞察报告", "subtitle": "数据驱动的产品线分析与战略建议",
+            {"title": "sample product 分解产品市场洞察报告", "subtitle": "数据驱动的产品线分析与战略建议",
              "bullets": ["数据来源：ERP 销售订单", "覆盖主体：示例工厂"]},
-            {"title": "执行摘要", "bullets": ["2026年8月 C5/C9 产品线实现合同销售额 ¥1.52亿"], "layout": "executive_brief"},
+            {"title": "执行摘要", "bullets": ["2026年8月 sample product 产品线实现合同销售额 ¥1.52亿"], "layout": "executive_brief"},
             {"title": "产品线结构分析", "bullets": ["原料A复合材料 ¥20.25亿 第一大类"], "layout": "data_table"},
             {"title": "月度趋势与波动", "bullets": ["3月–4月为上半年高点"], "layout": "chart_full"},
             {"title": "组织贡献分析", "bullets": ["示例工厂 89.9%"], "layout": "kpi_grid"},
             {"title": "战略建议", "bullets": ["优先级1 — 深挖原料A复合材料"], "layout": "recommendations"},
-            {"title": "结论", "bullets": ["C5/C9 产品线整体健康"], "layout": "closing"},
+            {"title": "结论", "bullets": ["sample product 产品线整体健康"], "layout": "closing"},
         ],
     }
     payload = ReportCardPayload.model_validate(raw)
-    plan = ExportService._rich_payload_to_deck_plan(payload, "make a c5 c9 market view ppt")
+    plan = ExportService._rich_payload_to_deck_plan(payload, "make a sample market market view ppt")
 
     assert plan is not None
     assert len(plan.slides) == 7
     assert [s.title for s in plan.slides] == [
-        "C5/C9 分解产品市场洞察报告",
+        "sample product 分解产品市场洞察报告",
         "执行摘要",
         "产品线结构分析",
         "月度趋势与波动",

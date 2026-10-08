@@ -152,7 +152,7 @@ Templates:
 
 Pair C4+C3 as the standard refrain: "Prior work X is limited because Y. Unlike these works, we Z."
 
-### C5. "Recent work has shown" (citing as evidence, not as baseline)
+### sample product. "Recent work has shown" (citing as evidence, not as baseline)
 Templates:
 - `Recent work has shown that [CLAIM] [CITES].`
 - `[CITES] [demonstrate / show] that [CLAIM].`
@@ -512,7 +512,7 @@ Overuse of hedges reads as evasive; absence reads as overclaiming. Aim for hedge
 | "Where does my pivot sentence go?" | A4 |
 | "Help me list my contributions" | B1 |
 | "How do I introduce my system?" | B2, B3 |
-| "How do I describe prior work?" | C1–C5 |
+| "How do I describe prior work?" | C1–sample product |
 | "How do I position my method?" | C3 |
 | "How do I set up my method section?" | D1–D5 |
 | "How do I describe an equation / variable?" | D4 |

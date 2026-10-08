@@ -27,7 +27,7 @@ def _make_contract(question: str = "Give me shipment data for last 30 days"):
 
 def _record_answer(c, *, rows=None, tool_call_id="tc-answer", purpose="answer"):
     c.record_dataset(
-        rows=rows if rows is not None else [{"product": "C5", "revenue": 1000}],
+        rows=rows if rows is not None else [{"product": "sample product", "revenue": 1000}],
         sql="SELECT FNAME, revenue FROM erp_product_sales_details",
         source_name="erp_product_sales_details",
         source_id="erp_product_sales_details",

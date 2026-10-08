@@ -5,12 +5,12 @@ from app.services.artifacts.skill_deck_profiles import apply_skill_profile
 from app.services.artifacts.themes import select_theme
 
 base = DeckPlan(
-    title="C5/C9 Market View",
+    title="sample product Market View",
     theme_recommendation="",
     palette_recommendation="",
     deck_type="data_report",
     slides=[
-        SlidePlan(layout="cover", title="C5/C9 Market View"),
+        SlidePlan(layout="cover", title="sample product Market View"),
         SlidePlan(layout="insights_bullets", title="Key Insights", bullets=["A", "B"]),
         SlidePlan(layout="closing", title="Thank You"),
     ],

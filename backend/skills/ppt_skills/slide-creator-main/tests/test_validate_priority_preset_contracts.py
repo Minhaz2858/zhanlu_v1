@@ -27,7 +27,7 @@ def test_enterprise_dark_contract_accepts_canonical_ent_classes():
         <style>
           :root {
             --bg-primary:#0d1117; --bg-secondary:#161b22; --bg-header:#21262d; --border:#30363d;
-            --text-primary:#e6edf3; --text-body:#c9d1d9; --text-muted:#8b949e;
+            --text-primary:#e6edf3; --text-body:#marketd1d9; --text-muted:#8b949e;
             --accent-blue:#388bfd; --accent-green:#3fb950; --accent-red:#f85149; --accent-amber:#d29922;
           }
           #brand-mark { display: none; }
@@ -57,7 +57,7 @@ def test_enterprise_dark_contract_rejects_generic_aliases():
         <style>
           :root {
             --bg-primary:#0d1117; --bg-secondary:#161b22; --bg-header:#21262d; --border:#30363d;
-            --text-primary:#e6edf3; --text-body:#c9d1d9; --text-muted:#8b949e;
+            --text-primary:#e6edf3; --text-body:#marketd1d9; --text-muted:#8b949e;
             --accent-blue:#388bfd; --accent-green:#3fb950; --accent-red:#f85149; --accent-amber:#d29922;
           }
         </style>
@@ -84,7 +84,7 @@ def test_enterprise_dark_contract_requires_hidden_brand_mark():
         <style>
           :root {
             --bg-primary:#0d1117; --bg-secondary:#161b22; --bg-header:#21262d; --border:#30363d;
-            --text-primary:#e6edf3; --text-body:#c9d1d9; --text-muted:#8b949e;
+            --text-primary:#e6edf3; --text-body:#marketd1d9; --text-muted:#8b949e;
             --accent-blue:#388bfd; --accent-green:#3fb950; --accent-red:#f85149; --accent-amber:#d29922;
           }
           #brand-mark { position: fixed; top: 1rem; left: 1rem; color: var(--text-muted); }

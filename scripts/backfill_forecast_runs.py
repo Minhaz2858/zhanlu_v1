@@ -48,9 +48,9 @@ logger = logging.getLogger("backfill_forecast")
 PRODUCT_TARGET_KEYS = [
     "acme.product_e",
     "acme.product_c",
-    "acme.cracked_c5",
-    "acme.mixed_c5",
-    "acme.cracked_c9",
+    "acme.cracked_sample",
+    "acme.mixed_sample",
+    "acme.cracked_market",
     "acme.product_d",
     "acme.product_f",
     "acme.product_b",

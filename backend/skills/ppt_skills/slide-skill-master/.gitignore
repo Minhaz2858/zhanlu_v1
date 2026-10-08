@@ -15,7 +15,7 @@ node_modules
 /.idea
 .project
 .classpath
-.c9/
+.market/
 *.launch
 .settings/
 *.sublime-workspace

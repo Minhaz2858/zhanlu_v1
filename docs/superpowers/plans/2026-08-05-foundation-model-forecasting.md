@@ -14,16 +14,16 @@
 
 | Product | Rows | Span (days) |
 |---|---|---|
-| 分解C5-分解C5均价 | 203 | 412 |
-| 分解C5-日本原料油 | 113 | 411 |
-| 分解C5-扬子分解C5 | 99 | 411 |
+| 分解sample-分解sample均价 | 203 | 412 |
+| 分解sample-日本原料油 | 113 | 411 |
+| 分解sample-示例分解sample | 99 | 411 |
 | 电子元件-华东市场价 | 88 | 409 |
 | SIS-巴陵1105 | 85 | 409 |
 | 材料C-华东市场价 | 85 | 409 |
 | 材料J-中石化华东 | 78 | 409 |
 | 材料B-华东市场价 | 76 | 409 |
-| 分解C9-分解C9均价 | 75 | 409 |
-| 分解C5-布伦特 | 44 | 117 |
+| 分解market-分解market均价 | 75 | 409 |
+| 分解sample-基准A | 44 | 117 |
 | 包装材料-华东市场价 | 35 | 93 |
 
 ### `v_*` views — rich, multiple entries per day (13 views, only 2 used)
@@ -92,8 +92,8 @@ Record the `material_name` value for each view (used in the `where` clause).
 from app.services.forecasting.seed_acme_targets import FORECAST_TARGETS
 
 _LZ_V_MAPPING = {
-    "acme.cracked_c5": "v_demo_data",
-    "acme.cracked_c9": "v_材料K_data",
+    "acme.cracked_sample": "v_demo_data",
+    "acme.cracked_market": "v_材料K_data",
     "acme.product_f": "v_材料C_data",
     "acme.product_b": "v_材料B_data",
     "acme.sis": "v_sis_data",
@@ -126,15 +126,15 @@ Expected: FAIL — 6 products missing `extra_sources`.
 
 - [ ] **Step 3: Add `extra_sources` to 6 products in `seed_acme_targets.py`**
 
-For each of `cracked_c5`, `cracked_c9`, `product_f`, `product_b`, `sis`, `blowing_agent`, add an `extra_sources` list (same format as product_d/styrene, lines 113-120). Use the `material_name` discovered in the prerequisite step.
+For each of `cracked_sample`, `cracked_market`, `product_f`, `product_b`, `sis`, `blowing_agent`, add an `extra_sources` list (same format as product_d/styrene, lines 113-120). Use the `material_name` discovered in the prerequisite step.
 
-Example for `cracked_c5`:
+Example for `cracked_sample`:
 ```python
 "extra_sources": [
     {"table": "v_demo_data",
      "time_col": "biz_date(业务日期)",
      "measure": "tax_price(含税单价)",
-     "where": "`material_name(产品名称)` = '分解C5'"},  # adjust per discovery
+     "where": "`material_name(产品名称)` = '分解sample'"},  # adjust per discovery
 ],
 ```
 
@@ -156,7 +156,7 @@ Expected: PASS
 git add backend/app/services/forecasting/seed_acme_targets.py backend/tests/test_forecasting/test_seed_extra_sources.py
 git commit -m "feat(forecast): wire up 6 remaining v_* views as extra_sources
 
-Extends history for cracked_c5, cracked_c9, product_f, product_b, sis,
+Extends history for cracked_sample, cracked_market, product_f, product_b, sis,
 blowing_agent from ~80 sparse rows to ~509 daily aggregated points."
 ```
 
@@ -1426,7 +1426,7 @@ Simplified training loop — full embedding hook deferred to GPU phase."
 
 > **These tasks are deferred until GPU is available and Phase A backtest benchmarks confirm foundation models add value.** Expand into a separate plan at that point. Key design decisions:
 >
-> - **LoRA adapters** on Chronos-Bolt or Moirai-Base, trained jointly across all C5/C9 products (cross-transfer).
+> - **LoRA adapters** on Chronos-Bolt or Moirai-Base, trained jointly across all sample products (cross-transfer).
 > - **Adapter files** versioned under `backend/models/adapters/{model_name}/{version}/`. Loaded at runtime via `peft` library.
 > - **A/B testing** via existing `ForecastDecisionLog` — route 50% of nightly forecasts to adapter-enhanced model, 50% to zero-shot. Compare decision-ROI after 30 decisions.
 > - **Strict temporal holdout** (last 60 days, never seen in any fine-tuning phase) as the final acceptance gate. Report MASE/CRPS/directional-accuracy against this holdout before promoting any adapter to production.

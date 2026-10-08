@@ -105,8 +105,8 @@ class TestDataRowsFallback:
                 "results": {
                     "source_name": "erp",
                     "rows": [
-                        {"material": "C5", "qty": 100, "revenue": 5000},
-                        {"material": "C9", "qty": 200, "revenue": 8000},
+                        {"material": "sample product", "qty": 100, "revenue": 5000},
+                        {"material": "sample product", "qty": 200, "revenue": 8000},
                     ],
                 },
             }
@@ -114,7 +114,7 @@ class TestDataRowsFallback:
         result = agents._data_rows_fallback(tool_calls)
         assert "| material | qty | revenue |" in result
         assert "Sample values" not in result
-        assert "| C5 | 100 | 5000 |" in result
+        assert "| sample product | 100 | 5000 |" in result
 
     def test_hides_system_columns(self):
         from app.routers import agents
@@ -125,7 +125,7 @@ class TestDataRowsFallback:
                 "results": {
                     "source_name": "erp",
                     "rows": [
-                        {"FENTRYID": 100, "material": "C5", "FCUSTMATID": "", "qty": 100},
+                        {"FENTRYID": 100, "material": "sample product", "FCUSTMATID": "", "qty": 100},
                     ],
                 },
             }
@@ -145,8 +145,8 @@ class TestDataRowsFallback:
                 "results": {
                     "source_name": "erp",
                     "rows": [
-                        {"material": "C5", "empty_col": "", "qty": 100},
-                        {"material": "C9", "empty_col": None, "qty": 200},
+                        {"material": "sample product", "empty_col": "", "qty": 100},
+                        {"material": "sample product", "empty_col": None, "qty": 200},
                     ],
                 },
             }

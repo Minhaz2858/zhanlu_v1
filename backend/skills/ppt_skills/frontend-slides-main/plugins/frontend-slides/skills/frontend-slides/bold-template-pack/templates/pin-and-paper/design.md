@@ -9,7 +9,7 @@ colors:
   paper-3: "#E8D85A"
   paper-extra: "#FBE6A4"
   cream: "#F8F1D6"
-  kraft: "#C9A66B"
+  kraft: "#marketA66B"
   ink: "#1F3A8A"
   ink-soft: "#2D4FB8"
   ink-line: "#3457C4"
@@ -337,7 +337,7 @@ Depth is created through a single signature mechanism: **the hard offset shadow*
 - **Paper Deep** (`{colors.paper-3}` — #E8D85A): Deeper, more saturated yellow. Used on the `.deep` slide variant for higher-contrast moments.
 - **Paper Extra** (`{colors.paper-extra}` — #FBE6A4): Warm yellow with a hint of cream, used as the most differentiated card variant — often paired with a slight rotation.
 - **Cream** (`{colors.cream}` — #F8F1D6): The card background. A soft off-white ivory that lets cards recede from the loud yellow page. Used on every standard card surface.
-- **Kraft** (`{colors.kraft}` — #C9A66B): A warm tan/kraft tone. Defined in the token system but not actively used in the source.
+- **Kraft** (`{colors.kraft}` — #marketA66B): A warm tan/kraft tone. Defined in the token system but not actively used in the source.
 - **Ink Blue** (`{colors.ink}` — #1F3A8A): Deep cobalt navy. The universal text, border, divider, pin illustration, and shadow color. The system's structural identity.
 - **Ink Soft** (`{colors.ink-soft}` — #2D4FB8): A slightly lighter cobalt variant; available but rarely used.
 - **Ink Line** (`{colors.ink-line}` — #3457C4): A slightly brighter cobalt for line decorations; rarely used.

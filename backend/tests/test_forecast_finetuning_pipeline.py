@@ -36,7 +36,7 @@ class TestBuildPooledDataset:
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
         series_map = {
             "product_c": pd.Series(np.random.uniform(80, 120, 100), index=dates),
-            "c5_cracked": pd.Series(np.random.uniform(100, 140, 100), index=dates),
+            "sample_cracked": pd.Series(np.random.uniform(100, 140, 100), index=dates),
         }
         samples = build_pooled_dataset(series_map, context_len=30, horizon=7, step=7)
         assert len(samples) > 0

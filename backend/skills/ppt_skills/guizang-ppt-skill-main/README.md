@@ -350,7 +350,7 @@ guizang-ppt-skill/
 |------|------|------------------|
 | <img src="https://github.com/user-attachments/assets/c02d02f7-ce6f-4e16-b8a6-778c96851f94" width="260" alt="克莱因蓝瑞士主题预览"> | 🔵 **克莱因蓝 IKB** | `#002FA7`。通用默认、商业发布、AI 产品、方法论。 |
 | <img src="https://github.com/user-attachments/assets/c310a8c4-5d28-450e-b49a-6ac5b6ba4785" width="260" alt="柠檬黄瑞士主题预览"> | 🟡 **柠檬黄** | `#FFD500`。年轻、运动、零售、消费品、Y2K 复古。 |
-| <img src="https://github.com/user-attachments/assets/65f7b3f9-3358-419e-b513-f7f2cc24ec76" width="260" alt="柠檬绿瑞士主题预览"> | 🟢 **柠檬绿** | `#C5E803`。生态、可持续、健康、Z 世代品牌。 |
+| <img src="https://github.com/user-attachments/assets/65f7b3f9-3358-419e-b513-f7f2cc24ec76" width="260" alt="柠檬绿瑞士主题预览"> | 🟢 **柠檬绿** | `#sampleE803`。生态、可持续、健康、Z 世代品牌。 |
 | <img src="https://github.com/user-attachments/assets/9c3319c9-a134-4657-9a56-211c23411f7f" width="260" alt="安全橙瑞士主题预览"> | 🟠 **安全橙** | `#FF6B35`。警示、新闻、工业、运动、活力主题。 |
 
 如果用户说"瑞士风 PPT"但没有指定颜色,默认推荐克莱因蓝 IKB。

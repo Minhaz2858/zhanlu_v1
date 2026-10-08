@@ -90,14 +90,14 @@ def test_extract_top_level_rows_shape() -> None:
         "name": "ask_data_agent",
         "results": {
             "success": True,
-            "rows": [{"product": "C5", "price": 5500}],
+            "rows": [{"product": "sample product", "price": 5500}],
             "source_name": "demo_warehouse_prod",
         },
     }
     extracted = _extract_data_rows_from_tool_call(tc)
     assert extracted is not None
     rows, src = extracted
-    assert rows == [{"product": "C5", "price": 5500}]
+    assert rows == [{"product": "sample product", "price": 5500}]
     assert src == "demo_warehouse_prod"
 
 
@@ -133,14 +133,14 @@ def test_extract_fetch_data_batch_nested_shape() -> None:
                     "label": "Q1 sales",
                     "success": True,
                     "rows": [
-                        {"product": "C5", "qty": 1000, "revenue": 5500000},
-                        {"product": "C9", "qty": 800, "revenue": 3200000},
+                        {"product": "sample product", "qty": 1000, "revenue": 5500000},
+                        {"product": "sample product", "qty": 800, "revenue": 3200000},
                     ],
                 },
                 {
                     "label": "Q2 previous",
                     "success": True,
-                    "rows": [{"product": "C5", "qty": 950, "revenue": 5100000}],
+                    "rows": [{"product": "sample product", "qty": 950, "revenue": 5100000}],
                 },
             ],
         },
@@ -148,8 +148,8 @@ def test_extract_fetch_data_batch_nested_shape() -> None:
     extracted = _extract_data_rows_from_tool_call(tc)
     assert extracted is not None
     rows, src = extracted
-    assert rows[0]["product"] == "C5"
-    assert rows[1]["product"] == "C9"
+    assert rows[0]["product"] == "sample product"
+    assert rows[1]["product"] == "sample product"
     assert src == "Q1 sales"
 
 
@@ -232,8 +232,8 @@ def test_data_rows_fallback_renders_fetch_data_batch_rows() -> None:
                     "label": "today_sales",
                     "success": True,
                     "rows": [
-                        {"product": "C5", "qty": 1000, "revenue": 5500000},
-                        {"product": "C9", "qty": 800, "revenue": 3200000},
+                        {"product": "sample product", "qty": 1000, "revenue": 5500000},
+                        {"product": "sample product", "qty": 800, "revenue": 3200000},
                     ],
                 },
             ],
@@ -268,7 +268,7 @@ def test_data_rows_fallback_builds_table_internal_lines() -> None:
                     "label": "today_sales",
                     "success": True,
                     "rows": [
-                        {"product": "C5", "qty": 1000, "revenue": 5500000},
+                        {"product": "sample product", "qty": 1000, "revenue": 5500000},
                     ],
                 },
             ],
@@ -277,7 +277,7 @@ def test_data_rows_fallback_builds_table_internal_lines() -> None:
     extracted = _extract_data_rows_from_tool_call(tc)
     assert extracted is not None
     rows, src = extracted
-    assert rows == [{"product": "C5", "qty": 1000, "revenue": 5500000}]
+    assert rows == [{"product": "sample product", "qty": 1000, "revenue": 5500000}]
     assert src == "today_sales"
 
 
@@ -338,7 +338,7 @@ def test_data_rows_fallback_handles_mixed_tool_calls() -> None:
                     {
                         "label": "today_sales",
                         "success": True,
-                        "rows": [{"product": "C5", "qty": 1000}],
+                        "rows": [{"product": "sample product", "qty": 1000}],
                     },
                 ],
             },

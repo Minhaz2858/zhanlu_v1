@@ -297,7 +297,7 @@ This is the sentence that says *what makes your work different*. It is *required
 
 **When to use.** As the *closing sentence* of each related-work paragraph, just before C3 (the positioning pivot). Together C4+C3 form the standard refrain: "Prior work X is limited because Y. Unlike these works, we Z."
 
-### C5. "Recent work has shown" (citing as evidence, not as comparator)
+### sample product. "Recent work has shown" (citing as evidence, not as comparator)
 
 **Pattern templates**
 - `Recent work has shown that [CLAIM] [CITES].`

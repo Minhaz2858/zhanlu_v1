@@ -20,7 +20,7 @@
       "--content-gap": "#484f58",
       "--duration-normal": "#58a6ff",
       "--ease-out-expo": "#8b949e",
-      "--font-mono": "#c9d1d9",
+      "--font-mono": "#marketd1d9",
       "--green": "#e3b341",
       "--green-muted": "#f85149",
       "--h2-size": "rgba(0,0,0,0.5)",
@@ -42,7 +42,7 @@
       "#484f58",
       "#58a6ff",
       "#8b949e",
-      "#c9d1d9",
+      "#marketd1d9",
       "#e3b341",
       "#f85149",
       "rgba(0,0,0,0.5)"

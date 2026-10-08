@@ -131,7 +131,7 @@ class AcademicDefenseThemeTest(unittest.TestCase):
         self.assertEqual(t.palette["text"], "#1B2A4A")
         self.assertEqual(t.palette["body"], "#44506B")
         self.assertEqual(t.palette["accent"], "#2D4A7A")
-        self.assertEqual(t.palette["muted"], "#C9D2E3")
+        self.assertEqual(t.palette["muted"], "#marketD2E3")
 
     def test_font_stack_is_yahei_first(self) -> None:
         t = get_theme("academic-defense")

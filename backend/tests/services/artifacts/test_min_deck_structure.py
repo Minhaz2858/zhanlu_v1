@@ -52,15 +52,15 @@ def test_skeleton_plan_is_padded_to_three_content_slides() -> None:
 def test_summary_payload_becomes_exec_summary_slide() -> None:
     """A summary-only payload gets a real 'Executive Summary' slide."""
     plan = DeckPlan(
-        title="C5/C9 Market View",
+        title="sample product Market View",
         slides=[
-            SlidePlan(layout="cover", title="C5/C9 Market View"),
+            SlidePlan(layout="cover", title="sample product Market View"),
             SlidePlan(layout="closing", title="Thank you"),
         ],
     )
     payload = ReportCardPayload(
-        title="C5/C9 Market View",
-        summary="C5/C9 prices firmed in Q3 on tight supply. "
+        title="sample product Market View",
+        summary="sample product prices firmed in Q3 on tight supply. "
                 "Demand from downstream polyolefin converters stayed resilient. "
                 "Margins compressed as feedstock costs rose.",
     )

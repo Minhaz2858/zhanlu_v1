@@ -26,7 +26,7 @@ class MockLoader:
 
 def _make_series(n=30):
     dates = pd.date_range("2024-01-01", periods=n, freq="D")
-    return pd.Series(np.random.uniform(100, 150, n), index=dates, name="c5_cracked")
+    return pd.Series(np.random.uniform(100, 150, n), index=dates, name="sample_cracked")
 
 
 class TestCrossProductLagFeatures:
@@ -35,11 +35,11 @@ class TestCrossProductLagFeatures:
     def test_disabled_returns_no_upstream_cols(self):
         """When disabled, no upstream_* columns should appear."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
+        spec = FeatureSpec(product_key="sample_cracked", feedstock_keys=["product_c"])
         upstream = {"product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
 
         result = build_features(
-            "c5_cracked", y, spec,
+            "sample_cracked", y, spec,
             MockLoader(), MockLoader(), MockLoader(),
             horizon=7,
             upstream_series_map=upstream,
@@ -51,11 +51,11 @@ class TestCrossProductLagFeatures:
     def test_enabled_adds_upstream_lag_cols(self):
         """When enabled, upstream_{key}_lag1/2/3 columns should appear."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
+        spec = FeatureSpec(product_key="sample_cracked", feedstock_keys=["product_c"])
         upstream = {"product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
 
         result = build_features(
-            "c5_cracked", y, spec,
+            "sample_cracked", y, spec,
             MockLoader(), MockLoader(), MockLoader(),
             horizon=7,
             upstream_series_map=upstream,
@@ -69,14 +69,14 @@ class TestCrossProductLagFeatures:
     def test_multiple_upstream_products(self):
         """Multiple upstream products should each get lag columns."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
+        spec = FeatureSpec(product_key="sample_cracked", feedstock_keys=["product_c"])
         upstream = {
             "product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index),
             "benchmark_a": pd.Series(np.random.uniform(60, 90, 30), index=y.index),
         }
 
         result = build_features(
-            "c5_cracked", y, spec,
+            "sample_cracked", y, spec,
             MockLoader(), MockLoader(), MockLoader(),
             horizon=7,
             upstream_series_map=upstream,
@@ -88,13 +88,13 @@ class TestCrossProductLagFeatures:
     def test_lag_values_are_shifted(self):
         """Lag values should be from previous days, not current day."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
+        spec = FeatureSpec(product_key="sample_cracked", feedstock_keys=["product_c"])
         # Create upstream series with known values
         upstream_vals = list(range(30))
         upstream = {"product_c": pd.Series(upstream_vals, index=y.index)}
 
         result = build_features(
-            "c5_cracked", y, spec,
+            "sample_cracked", y, spec,
             MockLoader(), MockLoader(), MockLoader(),
             horizon=7,
             upstream_series_map=upstream,
@@ -108,13 +108,13 @@ class TestCrossProductLagFeatures:
     def test_future_rows_have_upstream_cols(self):
         """Future X_future should also have upstream lag columns."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
+        spec = FeatureSpec(product_key="sample_cracked", feedstock_keys=["product_c"])
         upstream = {"product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
         # Need cascade_forecasts for X_future to be built
         cascade = {"product_c": [100.0] * 7}
 
         result = build_features(
-            "c5_cracked", y, spec,
+            "sample_cracked", y, spec,
             MockLoader(), MockLoader(), MockLoader(),
             horizon=7,
             cascade_forecasts=cascade,

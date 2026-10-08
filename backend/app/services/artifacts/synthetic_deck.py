@@ -22,7 +22,7 @@ recommendations / sections / chart).  It is domain-agnostic:
 Trigger: ``build_synthetic_deck_plan(intent, payload)`` returns a plan when
 the caller has NO grounded rows (empty warehouse result) — for ANY intent.
 This is the general replacement for the earlier market-only synth: a user
-who asks about C5/C9, Q3 sales, or AI trends all get the same rich
+who asks about sample product, Q3 sales, or AI trends all get the same rich
 structure, with content coming from the agent's own payload.
 """
 

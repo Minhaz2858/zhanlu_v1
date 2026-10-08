@@ -64,7 +64,7 @@ async def test_batch_tool_dispatches_to_three_sub_agents(sub_agent_results):
 
     with patch.object(edt, "_run_sub_agent", new=_fake_run):
         result = await edt._ask_perception_intelligence_diagnosis(
-            {"question": "weekly market report for C5 resin"},
+            {"question": "weekly market report for sample product resin"},
             db=None,
             user_id="u1",
             context={},
@@ -201,7 +201,7 @@ def forecast_pricing_sub_agent_results():
     return {
         "forecast": {
             "success": True,
-            "answer": "Forecast: C5 resin volumes rising next 4 weeks.",
+            "answer": "Forecast: sample product resin volumes rising next 4 weeks.",
             "agent": "forecast_agent",
             "iterations": 3,
         },
@@ -228,7 +228,7 @@ async def test_forecast_pricing_dispatches_to_two_sub_agents(forecast_pricing_su
 
     with patch.object(edt, "_run_sub_agent", new=_fake_run):
         result = await edt._ask_forecast_pricing(
-            {"question": "forecast and price C5 resin for next week"},
+            {"question": "forecast and price sample product resin for next week"},
             db=None,
             user_id="u1",
             context={},

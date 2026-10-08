@@ -6,7 +6,7 @@ Author: Synexia Agent
 
 ## Problem
 
-User asked: "make a c5 c9 market view ppt don't use my data use market data".
+User asked: "make a sample market market view ppt don't use my data use market data".
 The delivered `real_sample.pptx` (9 slides, 59KB) was **very low quality**:
 text bullets only, 0 images, 0 charts, density overflow (slide 3, 42 words),
 generic "Product A/B" filler instead of real market data.
@@ -27,7 +27,7 @@ Question to solve: what does the agent need so it reliably produces
    machinery exists in code but can't run.
 2. **Router default = plain.** `deck_router.route_deck` returns `"structured"`
    unless the request contains design keywords (investor/marketing/beautiful/
-   pitch/精美 etc). "make a c5 c9 market view ppt" has none → structured path.
+   pitch/精美 etc). "make a sample market market view ppt" has none → structured path.
 3. **Audit is non-blocking.** `render_dispatcher` runs `audit_deck`, repairs
    up to MAX_REPAIR_PASSES, but **delivers the deck even when status stays
    FAIL** — it only logs warnings. The density-FAIL slide 3 shipped.
@@ -101,7 +101,7 @@ C2. **file_turn_guard hardening.** If a turn planned a deck but produced no
 ## Architecture
 
 ```
-user "make c5 c9 market view ppt (market data)"
+user "make sample market market view ppt (market data)"
   → deck_planner (profile=data_report, theme resolved, rows grounded)
   → deck_router  (default sandbox after A2)
   → sandbox: render_html_deck (HTML slides → chromium → PNG → PPTX image-fill)
@@ -134,5 +134,5 @@ data: ask_data_agent → project KBs (ERP + Market KB after B1), market KB
 - NOT editable-text PPTX (image-fill is static; v1.1 editable path is
   reserved, out of scope).
 - NOT rebuilding the market KB content (128 items exist; verifying its
-  C5/C9 relevance is a task, not a build).
+  sample product relevance is a task, not a build).
 - Frontend unchanged (artifact preview already handles PPTX).

@@ -108,9 +108,9 @@ class TestCausalService:
     def test_upsert_chain(self, mock_kb):
         ok = CausalService().upsert_chain(
             chain_id="c1",
-            description="Product_C price ↑ → C5 spread ↓",
-            nodes=["product_c", "c5"],
-            edges=[("product_c", "c5")],
+            description="Product_C price ↑ → sample product spread ↓",
+            nodes=["product_c", "sample"],
+            edges=[("product_c", "sample")],
         )
         assert ok is True
 
@@ -160,7 +160,7 @@ class TestProductService:
             product_id="p1",
             name="PRODUCT_B",
             aliases=["dicyclopentadiene", "材料B"],
-            category="C5",
+            category="sample product",
         )
         assert ok is True
 

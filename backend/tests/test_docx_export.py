@@ -64,7 +64,7 @@ class TestDocxExporterRegistration:
             ],
             insights=[
                 InsightSpec(text="Sales are trending upward."),
-                InsightSpec(text="Top product is C5 Olefin."),
+                InsightSpec(text="Top product is sample product Olefin."),
             ],
         )
         ctx = ExportContext(source="test", conversation_id="conv-1")

@@ -17,7 +17,7 @@ def _history(start=6000.0, n=100, step=1.0):
 
 def _explanation():
     return {
-        "drivers": [{"feature": "cracked_c5", "weight": 0.42},
+        "drivers": [{"feature": "cracked_sample", "weight": 0.42},
                      {"feature": "fx", "weight": 0.2},
                      {"feature": "event", "weight": 0.1},
                      {"feature": "extra", "weight": 0.05}],

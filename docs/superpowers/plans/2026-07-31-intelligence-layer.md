@@ -68,7 +68,7 @@ def test_extracted_event_creation():
     event = ExtractedEvent(
         event_type="plant_outage",
         headline="Major plant shutdown in East China",
-        affected_commodities=["mixed_c5", "product_d"],
+        affected_commodities=["mixed_sample", "product_d"],
         direction="bullish",
         magnitude_estimate="large",
         certainty="confirmed",
@@ -153,7 +153,7 @@ def test_intelligence_event_model_fields():
         event_id="evt_test123",
         event_type="plant_outage",
         headline="Test event",
-        affected_commodities=["mixed_c5"],
+        affected_commodities=["mixed_sample"],
         direction="bullish",
         magnitude_estimate="large",
         certainty="confirmed",

@@ -201,7 +201,7 @@ def _build_default_skills_block() -> str:
 "- `panels` (typed AI-analysis, narrate ONLY from data you actually queried — compute figures via execute_query / profile_data / metric deltas, NEVER invent):\n"
 "  • alerts — severity rail (crit|warn|opp|info); EVERY alert body = data → why it matters → recommended action; add cta + time. \"电子元件报价超市场 3.1% — 正在流失现货询盘\" with body explaining cost baseline shift, competitor prices, and the exact suggested price, cta \"批准调价 →\", time \"2 h前\".\n"
 "  • decisions — approval cards with tag, product+action, reasoning, quantified P&L impact badge (pnl: \"维持现价损失风险：−¥8,000/周\"), buttons [批准, 调整, 延期].\n"
-"  • chain — cost/value cascade (布伦特 → 原料油 → C5成本 → IP成本) with per-node value, delta, delta_tone, and P&L note.\n"
+"  • chain — cost/value cascade (基准A → 原料油 → sample成本 → IP成本) with per-node value, delta, delta_tone, and P&L note.\n"
 "  • narrative — long-form AI 综合研判 block (market context + trend reading + action).\n"
 "  • customers — account-health rows (avatar, name, sub, revenue, status, status_tone).\n"
 "  • inventory — coverage bars (label, weeks, max, tone; <2 red, <3 amber, else green).\n"
@@ -730,15 +730,15 @@ authoring:
   1. QUERIES — run 2-4 targeted ``web_search`` calls covering: market
      size & growth, price levels/trends, key players & market structure,
      recent news / policy / capacity changes. Search in BOTH English and
-     Chinese when the topic is China-relevant (e.g. "C5 C9 petroleum
+     Chinese when the topic is China-relevant (e.g. "the target product
      resin market size 2026" AND "分解原料A 复合材料 市场 价格 2026").
   2. EXTRACT — for the 2-3 most authoritative results (industry reports,
-     exchanges, news agencies, 生意社/百川盈孚-class price trackers),
+     exchanges, news agencies, commodity price trackers-class price trackers),
      call ``web_extract`` to pull CONCRETE figures (market size, growth
      %, price bands, capacity, named players). Snippets alone are not
      enough.
   3. SOURCE LABELING — every external figure must carry a source + date
-     in the deck (e.g. "C5/C9 resin market ~USD 3.2B by 2030 (Grand View
+     in the deck (e.g. "resin market ~USD 3.2B by 2030 (Grand View
      Research, 2025)"). Add a final "Sources / 参考来源" slide listing
      the URLs you actually used.
   4. HONESTY — if ``web_search`` returns success:false or only
@@ -888,7 +888,7 @@ Three-step master-first query pattern:
 
 FORBIDDEN:
 - ❌ NEVER query a fact table without entity filtering when the user asks for a
-  specific category, segment, type, or keyword (e.g. "C5/C9 products",
+  specific category, segment, type, or keyword (e.g. "sample products",
   "premium customers", "raw material inventory").
 - ❌ NEVER return raw full-table dumps ("42,993 records") when the user asked
   for a handful of products/customers/suppliers.

@@ -22,7 +22,7 @@ from app.services.forecasting.seed_acme_targets import seed_acme_forecast_target
 ORG_ID = "default-org"
 APP_ID = "default-app"
 # Upstream-only for the dashboard chart
-UPSTREAM_KEYS = {"acme.product_e", "acme.product_c", "acme.cracked_c5"}
+UPSTREAM_KEYS = {"acme.product_e", "acme.product_c", "acme.cracked_sample"}
 
 
 def main():

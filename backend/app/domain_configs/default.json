@@ -30,8 +30,8 @@
       }
     },
     {
-      "product_key": "acme.cracked_c5",
-      "name": "Cracked C5",
+      "product_key": "acme.cracked_sample",
+      "name": "Cracked sample product",
       "report_order": 3,
       "include_in_weekly_report": true,
       "datasource": {
@@ -45,14 +45,14 @@
             "table": "v_demo_data",
             "time_col": "biz_date(业务日期)",
             "measure": "tax_price(含税单价)",
-            "where": "`material_name(产品名称)` = '分解C5'"
+            "where": "`material_name(产品名称)` = '分解sample'"
           }
         ]
       }
     },
     {
-      "product_key": "acme.cracked_c9",
-      "name": "Cracked C9",
+      "product_key": "acme.cracked_market",
+      "name": "Cracked sample product",
       "report_order": 4,
       "include_in_weekly_report": true,
       "datasource": {
@@ -66,14 +66,14 @@
             "table": "v_材料K_data",
             "time_col": "biz_date(业务日期)",
             "measure": "tax_price(含税单价)",
-            "where": "`material_name(产品名称)` = '分解C9'"
+            "where": "`material_name(产品名称)` = '分解market'"
           }
         ]
       }
     },
     {
-      "product_key": "acme.mixed_c5",
-      "name": "Mixed fraction (Yangzi Cracked C5)",
+      "product_key": "acme.mixed_sample",
+      "name": "Mixed fraction (Yangzi Cracked sample product)",
       "report_order": 5,
       "include_in_weekly_report": true,
       "datasource": {

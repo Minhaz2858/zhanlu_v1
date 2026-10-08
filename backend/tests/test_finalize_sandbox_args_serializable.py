@@ -25,7 +25,7 @@ def _payload_with_insights() -> ReportCardPayload:
         summary="Total revenue for last 30 days.",
         kpis=[KPISpec(label="Revenue", value="12345.0")],
         insights=[
-            InsightSpec(icon="trending-up", text="Top performer is C5."),
+            InsightSpec(icon="trending-up", text="Top performer is sample product."),
             InsightSpec(icon="alert-triangle", text="Concentration risk."),
         ],
     )
@@ -101,4 +101,4 @@ def test_sandbox_export_insight_dict_shape():
         )
 
     insights = captured["args"]["insights"]
-    assert insights[0] == {"icon": "trending-up", "text": "Top performer is C5."}
+    assert insights[0] == {"icon": "trending-up", "text": "Top performer is sample product."}

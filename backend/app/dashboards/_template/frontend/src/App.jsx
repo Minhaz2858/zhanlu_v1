@@ -380,7 +380,7 @@ export default function App() {
 
       {/* Executive header extras (decision-center): greeting + market
           snapshot chips + period label — e.g. "早上好，刘总 — 今日有 3 项决策
-          等待批准 · 布伦特 $79.4 ↓$1.2 · 原料油 $642 ↓$9 · W-2025-23". */}
+          等待批准 · 基准A $79.4 ↓$1.2 · 原料油 $642 ↓$9 · W-2025-23". */}
       {hdr.greeting || hdr.snapshot?.length || hdr.period ? (
         <div className="dc-exec-header mb-4">
           <div className="min-w-0">

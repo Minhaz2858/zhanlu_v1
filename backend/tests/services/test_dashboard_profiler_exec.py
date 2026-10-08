@@ -18,11 +18,11 @@ def db_path(tmp_path):
             region TEXT
         );
         INSERT INTO sales_orders VALUES
-            ('C5 Resin', 120.5, '2026-01-05', 'East'),
-            ('C5 Resin', 99.0, '2026-02-10', 'East'),
+            ('Product A Resin', 120.5, '2026-01-05', 'East'),
+            ('Product A Resin', 99.0, '2026-02-10', 'East'),
             ('Product_D', 250.0, '2026-03-15', 'West'),
-            ('C5 Resin', NULL, '2026-04-20', NULL),
-            ('C9 Resin', 88.0, '2026-05-25', 'East');
+            ('Product A Resin', NULL, '2026-04-20', NULL),
+            ('Product B Resin', 88.0, '2026-05-25', 'East');
         """
     )
     con.commit()
@@ -36,7 +36,7 @@ def test_profile_engine_returns_expected_shape(db_path):
     assert result["row_count"] == 5
     assert result["status"] == "ok"
     cols = {c["name"]: c for c in result["columns"]}
-    # Fixture has 3 distinct products: C5 Resin (3 rows), Product_D, C9 Resin.
+    # Fixture has 3 distinct products: Product A Resin (3 rows), Product_D, Product B Resin.
     # (Plan draft said 4 — corrected to match the actual fixture data.)
     assert cols["product"]["cardinality"] == 3
     assert cols["product"]["null_pct"] == 0.0

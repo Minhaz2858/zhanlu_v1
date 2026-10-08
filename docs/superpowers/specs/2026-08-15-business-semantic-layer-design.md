@@ -9,7 +9,7 @@
 The "Acme BI" project agent fails at CEO-level business questions. Two observed failure traces:
 
 1. **"Give me my supply chain data for last 15 days"** — the agent ran `MIN/MAX/COUNT` over the full-year table (196.3s), returned 1,387 records for the whole year instead of the 15-day window, and produced a defensive `DATA WARNING` artifact. The correct CEO answer was: *"no data after 2025-12-31 — ERP sync may be broken."*
-2. **"Make a weekly market report"** — 780.8s, 14 steps, a good C5/C9 report artifact was produced, but the final chat message was the generic fallback *"I gathered some information but had trouble putting it all together…"*
+2. **"Make a weekly market report"** — 780.8s, 14 steps, a good sample product report artifact was produced, but the final chat message was the generic fallback *"I gathered some information but had trouble putting it all together…"*
 
 Root causes are distinct:
 
@@ -35,7 +35,7 @@ The structural catalog already exists and is **extended, never rebuilt**. This l
 ## 3. Design Principles
 
 - **Extend, never rebuild.** The catalog (recall@10 0.82) is retained; this layer composes on top.
-- **Prompts stay domain-free.** All domain content (C5/C9 patterns, 材料丙/开工率 vocabulary) lives in curable `project_metric` data rows, never hardcoded in prompts.
+- **Prompts stay domain-free.** All domain content (sample product patterns, 材料丙/开工率 vocabulary) lives in curable `project_metric` data rows, never hardcoded in prompts.
 - **Progressive disclosure.** Only matched metric definitions + coverage are injected per question — never the whole playbook (a few hundred tokens).
 - **Deterministic over LLM where possible.** Relative-date parsing is a pure function — testable, zero latency, no hallucination.
 - **Human approval gate.** LLM-bootstrapped metrics land as `status='proposed'`; only `approved` rows are injected. Prevents LLM garbage from steering SQL.

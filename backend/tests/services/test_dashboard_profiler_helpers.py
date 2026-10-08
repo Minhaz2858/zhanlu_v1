@@ -33,7 +33,7 @@ def test_iso_date_strings():
     assert looks_like_iso_date("2026-08-26")
     assert looks_like_iso_date("2026-08-26T18:19:04")
     assert looks_like_iso_date("2026/08/26")
-    assert not looks_like_iso_date("cracked_c5")
+    assert not looks_like_iso_date("cracked_sample")
     assert not looks_like_iso_date("not-a-date")
     assert not looks_like_iso_date(None)
 

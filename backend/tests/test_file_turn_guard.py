@@ -577,7 +577,7 @@ class TestGiveUpReprompt:
         tool_calls = [
             {
                 "name": "ask_data_agent",
-                "arguments_string": '{"query": "c5 c9 market data"}',
+                "arguments_string": '{"query": "sample market market data"}',
                 "results": "...",
             }
             for _ in range(26)
@@ -592,7 +592,7 @@ class TestGiveUpReprompt:
         ]
         with _flag(True):
             result = file_turn_guard(
-                user_content="make a c5 c9 market view ppt don't use my data use market data",
+                user_content="make a sample market market view ppt don't use my data use market data",
                 tool_calls_for_frontend=tool_calls,
                 budget_remaining=5,
                 attempts=0,

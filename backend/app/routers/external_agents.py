@@ -76,12 +76,15 @@ def create_external_agent(
 ):
     if not body.endpoint_url.startswith(("http://", "https://")):
         raise HTTPException(400, "endpoint_url must be an http(s) URL")
+    from app.services.crypto import encrypt_value
+
     row = ExternalAgent(
         name=body.name.strip(),
         description=body.description,
         endpoint_url=body.endpoint_url.strip(),
         card_url=body.card_url,
-        auth_token=body.auth_token,
+        # IBM framework-audit #3: credentials encrypted at rest
+        auth_token=encrypt_value(body.auth_token),
         capabilities=body.capabilities or [],
         timeout_s=body.timeout_s or 60,
         enabled=body.enabled,
@@ -109,7 +112,11 @@ def update_external_agent(
     )
     if row is None:
         raise HTTPException(404, "External agent not found")
+    from app.services.crypto import encrypt_value
+
     for field, value in body.model_dump(exclude_unset=True).items():
+        if field == "auth_token" and value:
+            value = encrypt_value(value)  # credentials encrypted at rest
         setattr(row, field, value)
     db.commit()
     return row.to_dict()

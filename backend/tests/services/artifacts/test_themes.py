@@ -22,26 +22,26 @@ BUSINESS_PRESET = "swiss_modern"
 
 
 def _plan():
-    return DeckPlan(title="C5/C9 Market View", slides=[])
+    return DeckPlan(title="sample product Market View", slides=[])
 
 
 def test_market_intent_resolves_to_business_preset():
     theme = select_theme(
-        _plan(), "make a c5 c9 market view ppt using market data"
+        _plan(), "make a sample market market view ppt using market data"
     )
     assert theme.name == BUSINESS_PRESET
 
 
 def test_industry_intent_resolves_to_business_preset():
-    theme = select_theme(_plan(), "industry overview deck for the c5 c9 vertical")
+    theme = select_theme(_plan(), "industry overview deck for the sample market vertical")
     assert theme.name == BUSINESS_PRESET
 
 
 def test_chinese_market_intent_resolves_to_business_preset():
-    theme = select_theme(_plan(), "c5 c9 市场行情")
+    theme = select_theme(_plan(), "sample market 市场行情")
     assert theme.name == BUSINESS_PRESET
 
 
 def test_chinese_industry_intent_resolves_to_business_preset():
-    theme = select_theme(_plan(), "c5 c9 行业分析")
+    theme = select_theme(_plan(), "sample market 行业分析")
     assert theme.name == BUSINESS_PRESET

@@ -9,7 +9,7 @@
 The user's two queries demonstrate the bug:
 
 **Query 1 (WORKS — 101s):**
-> "Weekly market reports — full CEO-level C5/C9 rundown i need comprehensive answer"
+> "Weekly market reports — full CEO-level sample product rundown i need comprehensive answer"
 
 Produces a comprehensive CEO-level weekly market report with:
 - Executive Summary (¥2.883亿 revenue, 46,584 tons shipped, +108% MoM)
@@ -20,7 +20,7 @@ Produces a comprehensive CEO-level weekly market report with:
 - Recommended Actions (3 specific actions)
 
 **Query 2 (FAILS — 335s):**
-> "Weekly market reports — full CEO-level C5/C9 rundown i need comprehensive answer **i need in ppt formate**"
+> "Weekly market reports — full CEO-level sample product rundown i need comprehensive answer **i need in ppt formate**"
 
 Produces: **"No data available."** — the user waited 335s for nothing.
 

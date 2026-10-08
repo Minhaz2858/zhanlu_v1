@@ -24,7 +24,7 @@ class TestCheckCoherence:
     def test_detects_spread_inversion(self):
         """child < feedstock cost -> spread_inverted=True."""
         report = check_coherence(
-            product_key="cracked_c5",
+            product_key="cracked_sample",
             forecast_values=[500.0, 505.0, 510.0],   # below product_c cost
             feedstock_forecast=[600.0, 605.0, 610.0],
             feedstock_key="product_c",

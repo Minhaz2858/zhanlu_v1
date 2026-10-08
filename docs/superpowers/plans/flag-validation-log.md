@@ -10,8 +10,8 @@
 | Product | Len | MAPE7d | MAPE14d | MAPE30d | Dir7d | Dir30d |
 |---------|-----|--------|---------|---------|------|--------|
 | Product_C | 110 | 7.0% | 11.2% | 19.4% | 0% | 50% |
-| Cracked C5 | 203 | 2.9% | 5.5% | 8.7% | 10% | 40% |
-| Cracked C9 | 73 | 19.8% | 33.8% | 44.5% | 0% | 0% |
+| Cracked sample product | 203 | 2.9% | 5.5% | 8.7% | 10% | 40% |
+| Cracked sample product | 73 | 19.8% | 33.8% | 44.5% | 0% | 0% |
 | Product_D | 88 | 10.9% | 20.0% | 25.1% | 33% | 67% |
 | Product F | 85 | 29.6% | 42.9% | 52.4% | 50% | 50% |
 | PRODUCT_B | 74 | 1.4% | 3.8% | 11.3% | 0% | 0% |
@@ -26,7 +26,7 @@
 **Key observations:**
 - XGBoost models returning `inf%` MAPE — failing (insufficient exog features or data issues)
 - Ensemble worse than naive for Styrene (29.0% vs 13.6%) — ensemble includes inf-MAPE models
-- Cracked C5 best performer (2.9% at 7d)
+- Cracked sample product best performer (2.9% at 7d)
 - Product F worst performer (29.6% at 7d)
 - Directional accuracy generally poor (24-38%) — below 50% random baseline for 7d/14d
 

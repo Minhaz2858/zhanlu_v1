@@ -73,7 +73,7 @@ Sort bars by value descending unless the category has a natural order
 
 - Use CSS custom properties so the chart adapts to light/dark, and default to
   the token palette rather than inventing hex values:
-  `--c1:#4f7cff; --c2:#22c55e; --c3:#f59e0b; --c4:#ef4444; --c5:#8b5cf6`.
+  `--c1:#4f7cff; --c2:#22c55e; --c3:#f59e0b; --c4:#ef4444; --sample:#8b5cf6`.
 - Neutral chrome: gridlines and axes in `rgba(127,127,127,.25)`, labels in
   `currentColor` at ~12px so they inherit the theme.
 - System font stack only — `-apple-system, "Segoe UI", "PingFang SC",

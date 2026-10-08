@@ -20,7 +20,7 @@ Curated visual styles. Each preset defines: vibe, best for, fonts, palette, sign
 - Vibe: sophisticated, organic, premium
 - Best for: brand presentations, luxury products, wellness
 - Fonts: Cormorant Garamond + Montserrat Light
-- Palette: deep forest (#0d1b0e), warm cream (#f5f0e8), gold accent (#c9a84c)
+- Palette: deep forest (#0d1b0e), warm cream (#f5f0e8), gold accent (#marketa84c)
 - Signature: subtle leaf/botanical patterns, serif headlines, warm tones
 
 ## 4. Creative Voltage

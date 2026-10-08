@@ -112,7 +112,7 @@ Curated visual styles for Frontend Slides. Each preset is inspired by real desig
     --text-secondary: #9a9590;
     --accent-warm: #d4a574;
     --accent-pink: #e8b4b8;
-    --accent-gold: #c9b896;
+    --accent-gold: #marketb896;
 }
 ```
 

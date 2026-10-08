@@ -27,7 +27,7 @@ Capsule is a playful editorial system whose defining structural premise is the p
 
 ## Preview Ingredients
 
-- Palette: cream #F5F5F0; ink #1A1A1A; outline #1E1E1E; white #FFFFFF; coral #E85D4E; lime #C4D94E; lavender #C5B5E0; sky #8BB4F7
+- Palette: cream #F5F5F0; ink #1A1A1A; outline #1E1E1E; white #FFFFFF; coral #E85D4E; lime #C4D94E; lavender #sampleB5E0; sky #8BB4F7
 - Typography: Bodoni Moda; Space Grotesk
 - Signature move: Universal pill geometry — border-radius: 9999px for small containers, 2rem for larger cards/frames.
 - Signature move: 2px solid {colors.outline} stroke wraps every pill, icon, and card.

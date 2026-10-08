@@ -36,7 +36,7 @@ class TestExplainForecast:
             forecast_values=[5500.0, 5520.0, 5540.0],
             previous_forecast=[5480.0, 5500.0, 5520.0],
             xgboost_model=None,
-            feature_names=["cracked_c5_lag1", "product_c_lag1"],
+            feature_names=["cracked_sample_lag1", "product_c_lag1"],
             cleaning_report=_make_cleaning_report(),
             coherence_report=_make_coherence_report(),
             drift_status={"is_drifting": False},
@@ -125,18 +125,18 @@ class TestExplainForecast:
         model_mock = MagicMock()
         model_mock._model = MagicMock()
         model_mock._model.feature_importances_ = [0.6, 0.4]
-        model_mock._model.get_booster.return_value.feature_names = ["cracked_c5_lag1", "product_c_lag1"]
+        model_mock._model.get_booster.return_value.feature_names = ["cracked_sample_lag1", "product_c_lag1"]
         explanation = explain_forecast(
             "product_d", [5500.0, 5520.0], None,
             xgboost_model=model_mock,
-            feature_names=["cracked_c5_lag1", "product_c_lag1"],
+            feature_names=["cracked_sample_lag1", "product_c_lag1"],
             cleaning_report=_make_cleaning_report(),
             coherence_report=_make_coherence_report(),
             drift_status={"is_drifting": False},
             honesty_gate_triggered=False,
         )
         assert len(explanation.drivers) >= 1
-        assert explanation.drivers[0].feature in ("cracked_c5_lag1", "product_c_lag1")
+        assert explanation.drivers[0].feature in ("cracked_sample_lag1", "product_c_lag1")
 
     def test_none_model_handled_gracefully(self):
         """None xgboost_model does not crash (pre-existing behavior)."""

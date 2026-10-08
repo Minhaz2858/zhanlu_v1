@@ -34,53 +34,53 @@ class TestTopDownAllocation:
         assert result.parent_key == "product_c"
         assert len(result.child_allocations) > 0
 
-        # C5 cracked margin is 0.20 → implied = parent * 1.20
-        c5_forecast = result.child_allocations.get("c5_cracked")
-        assert c5_forecast is not None
-        assert len(c5_forecast) == 3
-        assert c5_forecast[0] == pytest.approx(120.0, abs=0.1)  # 100 * 1.20
+        # sample product cracked margin is 0.20 → implied = parent * 1.20
+        sample_forecast = result.child_allocations.get("sample_cracked")
+        assert sample_forecast is not None
+        assert len(sample_forecast) == 3
+        assert sample_forecast[0] == pytest.approx(120.0, abs=0.1)  # 100 * 1.20
 
     def test_blend_with_child_forecasts(self):
         """With child forecasts, result is blended between own and implied."""
         parent_forecast = [100.0, 105.0, 110.0]
         child_forecasts = {
-            "c5_cracked": [130.0, 135.0, 140.0],  # higher than implied
+            "sample_cracked": [130.0, 135.0, 140.0],  # higher than implied
         }
 
         result = allocate_top_down("product_c", parent_forecast, child_forecasts, blend_ratio=0.5)
-        c5 = result.child_allocations["c5_cracked"]
+        sample = result.child_allocations["sample_cracked"]
 
         # implied[0] = 100 * 1.20 = 120
         # own[0] = 130
         # blended[0] = 0.5 * 120 + 0.5 * 130 = 125
-        assert c5[0] == pytest.approx(125.0, abs=0.1)
+        assert sample[0] == pytest.approx(125.0, abs=0.1)
 
     def test_blend_ratio_0_uses_own_forecast(self):
         """blend_ratio=0.0 means use only the child's own forecast."""
         parent_forecast = [100.0]
-        child_forecasts = {"c5_cracked": [150.0]}
+        child_forecasts = {"sample_cracked": [150.0]}
 
         result = allocate_top_down("product_c", parent_forecast, child_forecasts, blend_ratio=0.0)
-        assert result.child_allocations["c5_cracked"][0] == pytest.approx(150.0, abs=0.1)
+        assert result.child_allocations["sample_cracked"][0] == pytest.approx(150.0, abs=0.1)
 
     def test_blend_ratio_1_uses_implied_forecast(self):
         """blend_ratio=1.0 means use only the parent-implied forecast."""
         parent_forecast = [100.0]
-        child_forecasts = {"c5_cracked": [150.0]}
+        child_forecasts = {"sample_cracked": [150.0]}
 
         result = allocate_top_down("product_c", parent_forecast, child_forecasts, blend_ratio=1.0)
         # implied = 100 * 1.20 = 120
-        assert result.child_allocations["c5_cracked"][0] == pytest.approx(120.0, abs=0.1)
+        assert result.child_allocations["sample_cracked"][0] == pytest.approx(120.0, abs=0.1)
 
     def test_length_mismatch_uses_implied(self):
         """If child forecast length != parent length, use implied only."""
         parent_forecast = [100.0, 105.0, 110.0]
-        child_forecasts = {"c5_cracked": [130.0, 135.0]}  # length 2 vs 3
+        child_forecasts = {"sample_cracked": [130.0, 135.0]}  # length 2 vs 3
 
         result = allocate_top_down("product_c", parent_forecast, child_forecasts)
         # Should use implied (120, 126, 132)
-        assert len(result.child_allocations["c5_cracked"]) == 3
-        assert result.child_allocations["c5_cracked"][0] == pytest.approx(120.0, abs=0.1)
+        assert len(result.child_allocations["sample_cracked"]) == 3
+        assert result.child_allocations["sample_cracked"][0] == pytest.approx(120.0, abs=0.1)
 
         # Should record adjustment
         assert any(a["type"] == "length_mismatch" for a in result.adjustments_made)
@@ -109,7 +109,7 @@ class TestTopDownAllocation:
     def test_adjustment_tracking(self):
         """Top-down adjustments should be tracked when blend changes the forecast."""
         parent_forecast = [100.0]
-        child_forecasts = {"c5_cracked": [200.0]}  # way above implied 120
+        child_forecasts = {"sample_cracked": [200.0]}  # way above implied 120
 
         result = allocate_top_down("product_c", parent_forecast, child_forecasts, blend_ratio=0.5)
         assert len(result.adjustments_made) > 0
@@ -128,10 +128,10 @@ class TestMiddleOutConstraint:
     def test_no_parent_no_violations(self):
         """Without parent forecast, only sibling ordering is checked."""
         sibling_forecasts = {
-            "c5_cracked": [120.0, 125.0],
+            "sample_cracked": [120.0, 125.0],
             "product_d": [150.0, 155.0],
         }
-        result = constrain_middle_out("c5_derivatives", sibling_forecasts)
+        result = constrain_middle_out("sample_derivatives", sibling_forecasts)
         assert isinstance(result, MiddleOutConstraintResult)
         # No excessive premium or sibling inversion
         assert all(v["type"] != "excessive_premium" for v in result.violations)
@@ -144,7 +144,7 @@ class TestMiddleOutConstraint:
         parent_forecast = [100.0]
 
         result = constrain_middle_out(
-            "c5_derivatives", sibling_forecasts,
+            "sample_derivatives", sibling_forecasts,
             parent_forecast=parent_forecast,
         )
         assert any(v["type"] == "excessive_premium" for v in result.violations)
@@ -152,12 +152,12 @@ class TestMiddleOutConstraint:
     def test_reasonable_premium_no_violation(self):
         """Reasonable premium (1.5x parent) should not flag."""
         sibling_forecasts = {
-            "c5_cracked": [120.0],  # 1.2x parent — reasonable
+            "sample_cracked": [120.0],  # 1.2x parent — reasonable
         }
         parent_forecast = [100.0]
 
         result = constrain_middle_out(
-            "c5_derivatives", sibling_forecasts,
+            "sample_derivatives", sibling_forecasts,
             parent_forecast=parent_forecast,
         )
         assert not any(v["type"] == "excessive_premium" for v in result.violations)
@@ -166,28 +166,28 @@ class TestMiddleOutConstraint:
         """If one sibling is >3x another, flag inversion."""
         sibling_forecasts = {
             "product_d": [300.0, 310.0],
-            "c5_cracked": [80.0, 85.0],  # product_d/c5 ≈ 3.75
+            "sample_cracked": [80.0, 85.0],  # product_d/sample ≈ 3.75
         }
 
-        result = constrain_middle_out("c5_derivatives", sibling_forecasts)
+        result = constrain_middle_out("sample_derivatives", sibling_forecasts)
         assert any(v["type"] == "sibling_inversion" for v in result.violations)
 
     def test_no_inversion_when_reasonable_ratio(self):
         """When sibling ratio is reasonable, no inversion flag."""
         sibling_forecasts = {
-            "c5_cracked": [120.0, 125.0],
-            "product_d": [150.0, 155.0],  # ratio ≈ 0.8 (product_d/c5)
+            "sample_cracked": [120.0, 125.0],
+            "product_d": [150.0, 155.0],  # ratio ≈ 0.8 (product_d/sample)
         }
 
-        result = constrain_middle_out("c5_derivatives", sibling_forecasts)
+        result = constrain_middle_out("sample_derivatives", sibling_forecasts)
         assert not any(v["type"] == "sibling_inversion" for v in result.violations)
 
     def test_adjusted_forecasts_unchanged_when_no_clamp(self):
         """If no clamping needed, adjusted == original."""
         sibling_forecasts = {
-            "c5_cracked": [120.0, 125.0],
+            "sample_cracked": [120.0, 125.0],
             "product_d": [150.0, 155.0],
         }
-        result = constrain_middle_out("c5_derivatives", sibling_forecasts)
+        result = constrain_middle_out("sample_derivatives", sibling_forecasts)
         for key in sibling_forecasts:
             assert result.adjusted_forecasts[key] == sibling_forecasts[key]

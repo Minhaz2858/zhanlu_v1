@@ -107,7 +107,7 @@ def test_intent_detected(message: str) -> None:
         "Show me last 30 days of inventory",
         "帮我查一下昨天的销售数据",
         "Forecast product e for next week",
-        "What's the price trend for cracked C5?",
+        "What's the price trend for cracked sample product?",
         # Data intents that mention "schedule" but are NOT automation setup.
         "Schedule a meeting with the sales team at 3pm",
         # Misc conversational messages.

@@ -58,3 +58,19 @@ piperylene
 Raffinate
 Piperylene
 Brent
+
+# C5/C9 framing — was reachable only via example strings
+C5/C9
+c5/c9
+C5_DERIVATIVE
+C9_DERIVATIVE
+生意社
+百川盈孚
+# NOTE: bare 'C5'/'C9' are deliberately NOT tokens — they collide with arbitrary
+# identifiers (test card ids, spreadsheet refs). Enforced via the unambiguous
+# forms below.
+C5/C9
+c5/c9
+C5_DERIVATIVE
+C9_DERIVATIVE
+C5树脂

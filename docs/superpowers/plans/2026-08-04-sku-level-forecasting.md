@@ -12,7 +12,7 @@
 
 **Phases:**
 - **Phase A (Tasks 1–9):** SKU-level data plumbing — replace `WHERE 1=1` blended ERP averages with per-`material_code` targets, drill-down UI, agent tool. No engine changes.
-- **Phase B (Tasks B1–B4):** Acme domain-signal layers — port tier-dampened causal-chain elasticities (product_c → C5 → downstream), per-product seasonal adjustment rules, and forecast trust tiers. Pure-Python overlay functions slotted into the engine between the intelligence overlay (Step 8.5) and the policy service (Step 8.6). Gated by `FORECAST_DOMAIN_SIGNALS_ENABLED` (default False).
+- **Phase B (Tasks B1–B4):** Acme domain-signal layers — port tier-dampened causal-chain elasticities (product_c → sample product → downstream), per-product seasonal adjustment rules, and forecast trust tiers. Pure-Python overlay functions slotted into the engine between the intelligence overlay (Step 8.5) and the policy service (Step 8.6). Gated by `FORECAST_DOMAIN_SIGNALS_ENABLED` (default False).
 
 Phase B is **independent of Phase A** — it can be executed before, after, or in parallel. Phase A targets are keyed by `material_code` but the product_id (`product_a`, `product_c`, etc.) used by the domain-signal dicts is unchanged, so the overlay works identically on SKU-level and family-level targets.
 
@@ -133,10 +133,10 @@ def test_groupby_averages_duplicate_dates():
 def test_groupby_noop_when_dates_already_unique():
     """md_market_price has duplicate dates with identical prices — avg is a no-op."""
     rows = [
-        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),
-        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),  # triplicate, same price
-        ("2026-07-01", 5500.0, "分解C5-分解C5均价"),
-        ("2026-07-02", 5600.0, "分解C5-分解C5均价"),
+        ("2026-07-01", 5500.0, "分解sample-分解sample均价"),
+        ("2026-07-01", 5500.0, "分解sample-分解sample均价"),  # triplicate, same price
+        ("2026-07-01", 5500.0, "分解sample-分解sample均价"),
+        ("2026-07-02", 5600.0, "分解sample-分解sample均价"),
     ]
     eng = _make_mock_engine_with_duplicates(rows)
     src = EdiaMysqlDataSource(engine=eng)
@@ -145,7 +145,7 @@ def test_groupby_noop_when_dates_already_unique():
         "table": "erp_test",
         "time_col": "PLANDATE",
         "measure": "FTAXPRICE",
-        "where": "material_code = '分解C5-分解C5均价'",
+        "where": "material_code = '分解sample-分解sample均价'",
         "granularity": "day",
     })
     # Identical prices → avg = same value → no-op
@@ -871,7 +871,7 @@ def test_no_sku_forecasts_for_md_lz_products(db_session):
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '分解C5-布伦特'",
+            "where": "FMATERIAL_NAME = '分解sample-基准A'",
             "granularity": "day",
         },
         level=2,
@@ -1754,9 +1754,9 @@ git commit -m "chore: SKU-level forecasting — final cleanup"
 
 **Goal:** Port three cheap, high-value domain-knowledge layers from Acme 5.1.2 that our statistical ensemble (ARIMA + XGBoost + STL) cannot infer from short price series alone:
 
-1. **Tier-dampened causal-chain elasticities** — product_c → C5 → downstream propagation. When product_c moves X%, `product_a` moves ~X × 0.62 × 0.72 = X × 0.45. Encodes petrochem supply-chain economics.
+1. **Tier-dampened causal-chain elasticities** — product_c → sample product → downstream propagation. When product_c moves X%, `product_a` moves ~X × 0.62 × 0.72 = X × 0.45. Encodes petrochem supply-chain economics.
 2. **Per-product seasonal adjustment rules** — additive % by (product_id, month). E.g. `product_a` is −2.5% Nov–Feb, +1.0% Mar–Oct. Captures demand seasonality the models under-fit on short series.
-3. **Forecast trust tiers** — label weekly-cadence products (`cracked_c9`, `feedstock_a`…) as "directional only" instead of presenting misleading daily precision. Four tiers: high / medium / directional / low, with bilingual labels + badge colors.
+3. **Forecast trust tiers** — label weekly-cadence products (`cracked_market`, `feedstock_a`…) as "directional only" instead of presenting misleading daily precision. Four tiers: high / medium / directional / low, with bilingual labels + badge colors.
 
 **Rationale:** Acme's ensemble is architecturally similar to ours but gained measurable accuracy and trustworthiness from these layers because they encode domain economics. All three are pure-Python dict + overlay functions — no new ML dependencies, no torch, no training data. ~2 days of work.
 
@@ -1834,7 +1834,7 @@ from app.services.forecasting.domain_signals import (
 
 def test_elasticities_dict_has_known_products():
     """The elasticity table should include the petrochem chain products."""
-    for pid in ("product_c", "cracked_c5", "product_d", "product_f",
+    for pid in ("product_c", "cracked_sample", "product_d", "product_f",
                 "product_b", "product_a", "feedstock_a", "sbs"):
         assert pid in _ELASTICITIES, f"{pid} missing from _ELASTICITIES"
 
@@ -1868,9 +1868,9 @@ def test_product_d_tier2_dampening():
 
 def test_seasonal_rules_cover_product_a_full_year():
     """product_a should have a rule for every month 1-12."""
-    c5_months = {m for (pid, m) in _SEASONAL_RULES if pid == "product_a"}
-    assert c5_months == set(range(1, 13)), (
-        f"product_a seasonal rules missing months: {set(range(1,13)) - c5_months}"
+    sample_months = {m for (pid, m) in _SEASONAL_RULES if pid == "product_a"}
+    assert sample_months == set(range(1, 13)), (
+        f"product_a seasonal rules missing months: {set(range(1,13)) - sample_months}"
     )
 
 
@@ -1995,8 +1995,8 @@ price series alone:
 1. **Tier-dampened causal-chain elasticities** — product_c is the root feedstock.
    When product_c moves X%, downstream products move X × (raw_elasticity ×
    tier_dampening)%. Three tiers model propagation attenuation:
-     Tier 1 (product_c → C5):        ×1.00
-     Tier 2 (C5 → downstream):     ×0.85
+     Tier 1 (product_c → sample product):        ×1.00
+     Tier 2 (sample product → downstream):     ×0.85
      Tier 3 (downstream → end-use): ×0.72
 
 2. **Per-product seasonal adjustment rules** — additive % by (product_id, month).
@@ -2022,14 +2022,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # product_id: (raw_elasticity, tier_dampening_factor)
-# Tier 1 (product_c → C5): ×1.00   Tier 2 (C5 → downstream): ×0.85
+# Tier 1 (product_c → sample product): ×1.00   Tier 2 (sample product → downstream): ×0.85
 # Tier 3 (downstream → end-use): ×0.72
 _RAW_ELASTICITIES: dict[str, tuple[float, float]] = {
     # product_id: (raw_elasticity, tier_dampening_factor)
     "product_c": (1.00, 1.00),
-    "cracked_c5": (0.82, 1.00),  # Tier 1
-    "mixed_c5": (0.82, 1.00),  # Tier 1
-    "cracked_c9": (0.65, 0.85),
+    "cracked_sample": (0.82, 1.00),  # Tier 1
+    "mixed_sample": (0.82, 1.00),  # Tier 1
+    "cracked_market": (0.65, 0.85),
     "product_d": (0.88, 0.85),  # Tier 2: 0.88 × 0.85 = 0.748
     "product_f": (0.85, 0.85),  # Tier 2: 0.85 × 0.85 = 0.7225
     "product_b": (0.78, 0.85),  # Tier 2: 0.78 × 0.85 = 0.663
@@ -2041,10 +2041,10 @@ _RAW_ELASTICITIES: dict[str, tuple[float, float]] = {
     "butadiene": (0.65, 0.85),
     "sbs": (0.60, 0.72),  # Tier 3
     "product_a": (0.62, 0.72),  # Tier 3: 0.62 × 0.72 = 0.4464
-    "mixed_c9": (0.65, 0.85),
-    "hydrogenated_c9": (0.60, 0.72),
+    "mixed_market": (0.65, 0.85),
+    "hydrogenated_market": (0.60, 0.72),
     "trimethylbenzene": (0.60, 0.72),
-    "c9_resin": (0.60, 0.72),  # legacy alias
+    "market_resin": (0.60, 0.72),  # legacy alias
 }
 
 # Pre-computed effective coefficients = raw × dampening
@@ -2081,11 +2081,11 @@ _SEASONAL_RULES: dict[tuple[str, int], float] = {
     ("product_b", 8): 1.5,
     ("product_d", 2): 0.8,
     ("product_d", 3): 0.8,
-    ("cracked_c5", 1): -1.0,
-    ("cracked_c5", 2): -1.0,
-    ("cracked_c5", 3): 0.5,
-    ("cracked_c5", 4): 0.5,
-    ("cracked_c5", 5): 0.5,
+    ("cracked_sample", 1): -1.0,
+    ("cracked_sample", 2): -1.0,
+    ("cracked_sample", 3): 0.5,
+    ("cracked_sample", 4): 0.5,
+    ("cracked_sample", 5): 0.5,
     ("product_f", 2): 1.2,
     ("product_f", 3): 1.2,
     ("sis", 2): 0.5,
@@ -2196,7 +2196,7 @@ git add backend/app/services/forecasting/domain_signals.py backend/tests/test_do
 git commit -m "feat(forecast): port Acme domain signals — elasticities + seasonal rules
 
 Two pure-Python overlay layers from Acme 5.1.2:
-- Tier-dampened causal-chain elasticities (product_c → C5 → downstream)
+- Tier-dampened causal-chain elasticities (product_c → sample product → downstream)
 - Per-product seasonal adjustment rules by (product_id, month)
 
 No new ML deps. Standalone module — wired into the engine in Task B2.
@@ -2453,8 +2453,8 @@ def test_high_skill_products_includes_known_set():
 
 def test_weekly_cadence_products_includes_known_set():
     """Products that trade weekly — daily forecast is misleading."""
-    assert "cracked_c9" in _WEEKLY_CADENCE_PRODUCTS
-    assert "mixed_c9" in _WEEKLY_CADENCE_PRODUCTS
+    assert "cracked_market" in _WEEKLY_CADENCE_PRODUCTS
+    assert "mixed_market" in _WEEKLY_CADENCE_PRODUCTS
     assert "trimethylbenzene" in _WEEKLY_CADENCE_PRODUCTS
     assert "feedstock_a" in _WEEKLY_CADENCE_PRODUCTS
 
@@ -2489,7 +2489,7 @@ def test_directional_tier_when_model_worse_than_naive():
 def test_directional_tier_for_weekly_cadence_product():
     """Weekly-cadence product with below_naive → directional + weekly reason."""
     result = compute_forecast_trust_tier(
-        product_id="cracked_c9",
+        product_id="cracked_market",
         below_naive=True,
         cadence_class="weekly",
         mape=30.0,
@@ -2501,7 +2501,7 @@ def test_directional_tier_for_weekly_cadence_product():
 def test_medium_tier_for_weekly_product_with_skill():
     """Weekly product NOT in high-skill set and NOT below_naive → medium."""
     result = compute_forecast_trust_tier(
-        product_id="cracked_c9",
+        product_id="cracked_market",
         below_naive=False,
         cadence_class="weekly",
         mape=15.0,
@@ -2560,7 +2560,7 @@ def test_tier_values_are_constrained():
     """tier must be one of the 4 valid values."""
     for pid, bn, cad in [
         ("product_d", False, "daily"),
-        ("cracked_c9", True, "weekly"),
+        ("cracked_market", True, "weekly"),
         ("unknown", False, "sparse"),
         ("random", False, "daily"),
     ]:
@@ -2619,8 +2619,8 @@ _HIGH_SKILL_PRODUCTS: frozenset[str] = frozenset({
 # Products that trade weekly or less frequently; daily forecast is misleading.
 # These get the "directional" tier even if they have some model signal.
 _WEEKLY_CADENCE_PRODUCTS: frozenset[str] = frozenset({
-    "cracked_c9",
-    "mixed_c9",
+    "cracked_market",
+    "mixed_market",
     "trimethylbenzene",
     "feedstock_a",
 })
@@ -2640,7 +2640,7 @@ def compute_forecast_trust_tier(
     """Compute a user-facing trust tier for a product's forecast.
 
     Args:
-        product_id: The dashboard product_id (e.g. "product_a", "cracked_c9").
+        product_id: The dashboard product_id (e.g. "product_a", "cracked_market").
         below_naive: Whether the model's MAPE exceeds a naive last-price-hold
             baseline on this run. If None, treated as False.
         cadence_class: One of "daily", "weekly", "sparse", "unknown".
@@ -3037,7 +3037,7 @@ Expected: All tests pass.
 | Acme Source | Task(s) | Status |
 |---|---|---|
 | `_RAW_ELASTICITIES` + `_ELASTICITIES` (product_c → downstream, 3 tiers) | Task B1 | ✓ — Ported verbatim, 19 products |
-| `_SEASONAL_RULES` (product_id, month → additive %) | Task B1 | ✓ — Ported verbatim, covers product_a/product_b/product_d/cracked_c5/product_f/sis |
+| `_SEASONAL_RULES` (product_id, month → additive %) | Task B1 | ✓ — Ported verbatim, covers product_a/product_b/product_d/cracked_sample/product_f/sis |
 | Causal-chain propagation: product_c % × elasticity | Task B1, B2 | ✓ — `compute_causal_chain_adjustment` + product_c fetcher |
 | Seasonal application: month lookup | Task B1, B2 | ✓ — `compute_seasonal_adjustment` + combined overlay |
 | Engine integration (Step 8.55) | Task B2 | ✓ — Slotted between 8.5 (intel) and 8.6 (policy), gated by flag |

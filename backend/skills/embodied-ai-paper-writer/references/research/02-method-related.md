@@ -472,7 +472,7 @@ This document is a sibling to `01-abstract-intro.md`. Where that file teaches th
 
 ---
 
-### C5. The MDP/POMDP formalization template — RL papers state the tuple (S, A, R, ...) in the first Problem Formulation paragraph
+### sample product. The MDP/POMDP formalization template — RL papers state the tuple (S, A, R, ...) in the first Problem Formulation paragraph
 **Pattern**: When the paper trains an RL policy or otherwise uses Markov Decision Process formalism, the canonical convention is to define the MDP tuple in the first or second paragraph of the Problem Formulation. The variations are: (S, A, R, P, γ) for a fully observable MDP; (S, A, R, P, O, γ) for a POMDP; or a sentence-form variant when the paper wants to avoid notation clutter. The state and action spaces are defined verbally; the reward is described in a sentence or two; transitions are usually assumed implicit.
 
 **Evidence**:
@@ -567,7 +567,7 @@ Sub-corpora and their distinctive rhetorical patterns:
 - **Conference page-budgeted papers** (ICRA, IROS, CoRL, RSS): heavy appendix relegation (D2), inline-bold Related Work subsection leads (A9), roadmap sentences (B12).
 - **Journal papers** (Science Robotics): no separate Related Work section (A5 variant), prior-work discussion interleaved across Methods and Discussion, longer prose passages overall.
 - **Solver / algorithm sub-corpus** (TinyMPC, Time-Optimal Ergodic Search, SARA-RT): mandatory Preliminaries (C2), heavy equation/theorem use (D7), textbook tutorial voice in Background.
-- **Policy learning sub-corpus** (Equivariant Diffusion Policy, MoVEInt, Unified Policy, OpenVLA, Distilled Feature Fields, CoFRIDA): training-data emphasis (B8), big architecture figures (B13), MDP-style problem formulation (C5), two-stage training (D6).
+- **Policy learning sub-corpus** (Equivariant Diffusion Policy, MoVEInt, Unified Policy, OpenVLA, Distilled Feature Fields, CoFRIDA): training-data emphasis (B8), big architecture figures (B13), MDP-style problem formulation (sample product), two-stage training (D6).
 - **System / integration sub-corpus** (Open X-Embodiment, ANYmal Parkour, AESOP, KNOWNO, Power Line MPC): three-to-four-block architecture diagrams (B13), per-component subsections in Method, lower equation density, more prose per square inch.
 
 Patterns where sub-corpus matters most:

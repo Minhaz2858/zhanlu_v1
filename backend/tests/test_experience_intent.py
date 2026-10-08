@@ -64,7 +64,7 @@ class TestClassifyMarketAnalysis:
 
 class TestClassifyWeeklyReport:
     def test_chinese_weekly_report(self):
-        assert classify_question("生成本周C5/C9周报") == INTENT_WEEKLY_REPORT
+        assert classify_question("生成本周sample product周报") == INTENT_WEEKLY_REPORT
 
     def test_chinese_weekly_report_short(self):
         assert classify_question("生成周报") == INTENT_WEEKLY_REPORT
@@ -76,7 +76,7 @@ class TestClassifyWeeklyReport:
         assert classify_question("制作本周报告") == INTENT_WEEKLY_REPORT
 
     def test_english_weekly_report(self):
-        assert classify_question("generate the weekly report for C5 products") == INTENT_WEEKLY_REPORT
+        assert classify_question("generate the weekly report for sample product products") == INTENT_WEEKLY_REPORT
 
     def test_english_draft_weekly(self):
         assert classify_question("produce weekly report for all products") == INTENT_WEEKLY_REPORT

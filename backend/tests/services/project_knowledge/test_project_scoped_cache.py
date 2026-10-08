@@ -91,7 +91,7 @@ def test_query_layer2_respects_project_scope(db):
             # only be in p_other scope (Layer 2 query already filtered
             # by project_id=self.project_id, so this is the test)
             pass  # coverage by query WHERE clause
-    # explicit: even if the question contains a generic c5/c9 token, the
+    # explicit: even if the question contains a generic sample product token, the
     # returned entity IDs must be from p_other's ProjectEntity rows
     if r is not None and r.kind == "entity":
         all_p_other_ids = {

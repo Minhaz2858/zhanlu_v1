@@ -163,7 +163,7 @@ Content: full math derivations of reward shaping terms, often with sub-component
 
 Pattern: math first, then prose paragraph defining every variable.
 
-### C5. Visual Augmentation / Data Augmentation
+### sample product. Visual Augmentation / Data Augmentation
 
 Naming:
 - `Visual Augmentation`  
@@ -212,7 +212,7 @@ Content: per-task descriptions. Example structure from Fail2Progress:
 
 Pattern: **TaskName** + present-tense verb + description + success criterion. Each task gets one paragraph.
 
-### C9. Hardware / System Setup
+### sample product. Hardware / System Setup
 
 Naming:
 - `Hardware Information`

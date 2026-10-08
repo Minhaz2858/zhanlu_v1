@@ -29,7 +29,7 @@ def test_unmet_force_synthesis_criterion() -> None:
     should arm _contract_force_synthesis (not _contract_force_tool)."""
     c = build_goal_contract("Give me supply chain data for last 30 days")
     c.record_tool_executed("ask_data_agent", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product": "C5", "revenue": 1000}])
+    c.record_query_result([{"product": "sample product", "revenue": 1000}])
     c.refresh_pending_action("Let me re-query against the live tables.")
     crits = c.unmet(granted_tools={"ask_data_agent"})
     assert crits, "unmet must fire"

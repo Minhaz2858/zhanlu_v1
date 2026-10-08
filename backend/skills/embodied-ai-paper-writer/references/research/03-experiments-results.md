@@ -184,7 +184,7 @@ Scope: rhetorical and structural conventions for the Experiments/Results section
 
 ---
 
-### C5. Variance is reported with ± and standard error / std-dev convention is stated once
+### sample product. Variance is reported with ± and standard error / std-dev convention is stated once
 **Pattern**: Numbers are usually reported as "mean ± stderr" or "mean ± std" with the convention disclosed in the table caption or once in the methods. Standalone numbers without variance are reserved for headline takeaways in the abstract.
 
 **Evidence**:

@@ -106,9 +106,9 @@ class TestIndexCausalChain:
         idx = SmartIndexer()
         ok = idx.index_causal_chain({
             "chain_id": "c1",
-            "description": "Product_C price ↑ → C5 spread ↓",
-            "nodes": ["product_c", "c5"],
-            "edges": [["product_c", "c5"]],
+            "description": "Product_C price ↑ → sample product spread ↓",
+            "nodes": ["product_c", "sample"],
+            "edges": [["product_c", "sample"]],
         })
         assert ok is True
 
@@ -124,13 +124,13 @@ class TestIndexProduct:
             "product_id": "p1",
             "name": "PRODUCT_B",
             "aliases": ["dicyclopentadiene"],
-            "category": "C5",
+            "category": "sample product",
         })
         assert ok is True
 
     def test_index_product_minimal(self, mock_kb):
         idx = SmartIndexer()
-        ok = idx.index_product({"product_id": "p2", "name": "C9"})
+        ok = idx.index_product({"product_id": "p2", "name": "sample product"})
         assert ok is True
 
     def test_index_product_empty(self, mock_kb):

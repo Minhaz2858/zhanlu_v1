@@ -12,7 +12,7 @@
 The user wants the Acme BI `forecast_agent` to **run continuously in the background** without human interaction. Specifically:
 
 - Compute forecasts silently every night at 2 AM
-- Cover all 12 dashboard products (Benchmark A, Product_C, Cracked fractions, Mixed fraction, Product_D, Product F, PRODUCT_B, SIS, Styrene, Blowing Agent, C5 Resin, Feedstock A)
+- Cover all 12 dashboard products (Benchmark A, Product_C, Cracked fractions, Mixed fraction, Product_D, Product F, PRODUCT_B, SIS, Styrene, Blowing Agent, sample product Resin, Feedstock A)
 - Forecast results automatically appear on the `/market-dashboard/overview` page
 
 The existing `ForecastEngine` (7-model ensemble: ARIMA, XGBoost, ETS, STL, naive, seasonal-naive, mean-reversion) is the source of truth — no new ML code.
@@ -67,7 +67,7 @@ class EdiaMysqlDataSource:
                 "table": "md_market_price",
                 "time_col": "FDATE",
                 "measure": "FTAXPRICE",
-                "where": "FMATERIAL_NAME = '分解C5-分解C5均价'",
+                "where": "FMATERIAL_NAME = '分解sample-分解sample均价'",
                 "granularity": "day"
             }
         Returns DataFrame with columns ['ds', 'y'] where:
@@ -111,7 +111,7 @@ FORECAST_TARGETS: list[dict] = [
             "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '分解C5-布伦特'",
+            "where": "FMATERIAL_NAME = '分解sample-基准A'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
@@ -127,11 +127,11 @@ def seed_acme_forecast_targets(db: Session, org_id: str = "default-org", app_id:
 **Product → source mapping** (matches `PRODUCT_TABLE_MAP` primary config):
 | product_id | source table | where clause | report_order |
 |---|---|---|---|
-| `product_e` | `md_market_price` | `FMATERIAL_NAME = '分解C5-布伦特'` | 1 |
-| `product_c` | `md_market_price` | `FMATERIAL_NAME = '分解C5-日本原料油'` | 2 |
-| `cracked_c5` | `md_market_price` | `FMATERIAL_NAME = '分解C5-分解C5均价'` | 3 |
-| `mixed_c5` | `md_market_price` | `FMATERIAL_NAME = '分解C5-扬子分解C5'` | 4 |
-| `cracked_c9` | `md_market_price` | `FMATERIAL_NAME = '分解C9-分解C9均价'` | 5 |
+| `product_e` | `md_market_price` | `FMATERIAL_NAME = '分解sample-基准A'` | 1 |
+| `product_c` | `md_market_price` | `FMATERIAL_NAME = '分解sample-日本原料油'` | 2 |
+| `cracked_sample` | `md_market_price` | `FMATERIAL_NAME = '分解sample-分解sample均价'` | 3 |
+| `mixed_sample` | `md_market_price` | `FMATERIAL_NAME = '分解sample-示例分解sample'` | 4 |
+| `cracked_market` | `md_market_price` | `FMATERIAL_NAME = '分解market-分解market均价'` | 5 |
 | `product_d` | `md_market_price` | `FMATERIAL_NAME = '电子元件-华东市场价'` | 6 |
 | `product_f` | `md_market_price` | `FMATERIAL_NAME = '材料C-华东市场价'` | 7 |
 | `product_b` | `md_market_price` | `FMATERIAL_NAME = '材料B-华东市场价'` | 8 |
@@ -169,7 +169,7 @@ For existing deployments that don't re-run `seed.py`:
 PRODUCT_FORECAST_TARGET_KEY = {
     "product_e":     "acme.product_e",
     "product_c":       "acme.product_c",
-    "cracked_c5":    "acme.cracked_c5",
+    "cracked_sample":    "acme.cracked_sample",
     # ... all 12
 }
 ```
@@ -315,7 +315,7 @@ NIGHTLY_FORECAST_CRON: str = os.getenv("NIGHTLY_FORECAST_CRON", "0 2 * * *")
 2. Frontend `useQuery` polls `/api/market-dashboard/forecast-base-batch?day=7` every 30s.
 3. Endpoint calls `get_forecast_base_batch_v2(product_ids, day=7)`:
    - Queries `forecast_runs` (latest per `target_id`) for the 12 mapped `ForecastTarget` rows.
-   - Returns `{"day": 7, "base_by_product": {"product_e": 84.5, "product_c": 826.0, "cracked_c5": 5685.0, ...}}`.
+   - Returns `{"day": 7, "base_by_product": {"product_e": 84.5, "product_c": 826.0, "cracked_sample": 5685.0, ...}}`.
 4. `ForecastCard` re-renders with new values; 30s cache means updates propagate within 30s of the next poll.
 
 ## 7. Error handling

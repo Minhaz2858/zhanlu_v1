@@ -62,7 +62,7 @@ def test_iso_date_strings():
     assert looks_like_iso_date("2026-08-26")
     assert looks_like_iso_date("2026-08-26T18:19:04")
     assert looks_like_iso_date("2026/08/26")
-    assert not looks_like_iso_date("cracked_c5")
+    assert not looks_like_iso_date("cracked_sample")
     assert not looks_like_iso_date("not-a-date")
     assert not looks_like_iso_date(None)
 
@@ -306,11 +306,11 @@ def db_path(tmp_path):
             region TEXT
         );
         INSERT INTO sales_orders VALUES
-            ('C5 Resin', 120.5, '2026-01-05', 'East'),
-            ('C5 Resin', 99.0, '2026-02-10', 'East'),
+            ('sample product Resin', 120.5, '2026-01-05', 'East'),
+            ('sample product Resin', 99.0, '2026-02-10', 'East'),
             ('Product_D', 250.0, '2026-03-15', 'West'),
-            ('C5 Resin', NULL, '2026-04-20', NULL),
-            ('C9 Resin', 88.0, '2026-05-25', 'East');
+            ('sample product Resin', NULL, '2026-04-20', NULL),
+            ('sample product Resin', 88.0, '2026-05-25', 'East');
         """
     )
     con.commit()

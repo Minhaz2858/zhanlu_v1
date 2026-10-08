@@ -77,7 +77,7 @@ describe('ScheduledPanel', () => {
         {
           id: 'exec-1',
           status: 'completed',
-          output_text: 'I have prepared your weekly C5 product price report for the week ending June 27, 2026.',
+          output_text: 'I have prepared your weekly sample product product price report for the week ending June 27, 2026.',
           started_at: '2026-07-27T08:00:00Z',
           completed_at: '2026-07-27T08:02:13Z',
           files: [],
@@ -85,7 +85,7 @@ describe('ScheduledPanel', () => {
         {
           id: 'exec-2',
           status: 'completed',
-          output_text: 'I have prepared your weekly C5 product price report for the week ending June 26, 2026.',
+          output_text: 'I have prepared your weekly sample product product price report for the week ending June 26, 2026.',
           started_at: '2026-07-26T08:00:00Z',
           completed_at: '2026-07-26T08:01:55Z',
           files: [],

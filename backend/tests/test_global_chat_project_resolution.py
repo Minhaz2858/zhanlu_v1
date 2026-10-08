@@ -2,7 +2,7 @@
 must resolve a project named in the user message and bind its KBs.
 
 Covers:
-1. 'make a c5 c9 market view ppt' → resolves SAMPLE project → its KBs bound
+1. 'make a sample market market view ppt' → resolves SAMPLE project → its KBs bound
 2. No project mention → zero bound KBs (anti-leakage preserved)
 3. Explicit project selected → normal scoping still works
 """
@@ -44,16 +44,16 @@ def db():
                    source_kind="database", project_id="proj-sample", project="SAMPLE")
     kb_demo = _fake_kb(id="kb-demo-001", name="Demo E2E PostgreSQL",
                        source_kind="database", project_id=None, project="global")
-    proj_c5 = _Row(id="proj-sample", name="SAMPLE", is_deleted=False)
+    proj_sample = _Row(id="proj-sample", name="SAMPLE", is_deleted=False)
     proj_global = _Row(id="proj-global", name="Global", is_deleted=False)
 
     m = MagicMock()
-    m.query.return_value.filter.return_value.all.return_value = [proj_c5, proj_global]
+    m.query.return_value.filter.return_value.all.return_value = [proj_sample, proj_global]
 
     def _query(model):
         q = MagicMock()
         if model.__name__ == "Project":
-            q.filter.return_value.all.return_value = [proj_c5, proj_global]
+            q.filter.return_value.all.return_value = [proj_sample, proj_global]
         return q
     m.query.side_effect = _query
     m.get.side_effect = lambda model, pk: None
@@ -62,7 +62,7 @@ def db():
 
 def test_resolve_project_from_message_sample(db):
     pid, pname = _resolve_project_from_message(
-        db, "make a c5 c9 market view ppt don't use my data use market data",
+        db, "make a sample market market view ppt don't use my data use market data",
         "default-org", "default-app",
     )
     assert pid == "proj-sample"
@@ -102,7 +102,7 @@ def test_prepare_global_chat_resolves_project(mock_extend, db):
                    return_value="PROJECT CONTEXT"):
             tools, prompt, extras = prepare_data_source_runtime(
                 db, agent, [], "",
-                user_message="make a c5 c9 market view ppt don't use my data use market data",
+                user_message="make a sample market market view ppt don't use my data use market data",
             )
 
     assert extras.get("bound_kb_ids") == ["kb-market", "kb-warehouse"]

@@ -1481,6 +1481,12 @@ class Settings(BaseSettings):
     # LOOP_POSTMORTEM_ENABLED: scheduled mining of failed agent loops into
     #   AgentMemory "LESSON" rows (failure-side counterpart of q_sql_examples).
     LOOP_POSTMORTEM_ENABLED: bool = False
+    # CREDENTIAL_ENCRYPTION_KEY (IBM framework-audit #3): Fernet key (or any
+    # passphrase — SHA-256-derived) encrypting stored credentials at rest
+    # (MCP OAuth tokens, external-agent bearer tokens). Empty = derived from
+    # JWT_SECRET (zero-setup encryption). Rotate carefully: ciphertexts from
+    # the old key become undecryptable.
+    CREDENTIAL_ENCRYPTION_KEY: str = ""
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

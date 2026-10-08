@@ -33,7 +33,7 @@ from app.services.artifacts.deck_planner import _PLAN_SCHEMA
 
 def _plan(theme: str = "", palette: str = "") -> DeckPlan:
     return DeckPlan(
-        title="C5/C9 Market View",
+        title="sample product Market View",
         theme_recommendation=theme,
         palette_recommendation=palette,
         slides=[],
@@ -42,7 +42,7 @@ def _plan(theme: str = "", palette: str = "") -> DeckPlan:
 
 def test_planner_recommendation_drives_theme() -> None:
     """Same user message, different recommendations -> different themes."""
-    msg = "make a c5 c9 market view ppt"
+    msg = "make a sample market market view ppt"
     seen = set()
     for rec in ("bold_signal", "neon_cyber", "paper_and_ink", "vintage_editorial"):
         theme = select_theme(_plan(rec), msg)
@@ -53,7 +53,7 @@ def test_planner_recommendation_drives_theme() -> None:
 
 def test_no_recommendation_falls_back_to_content_keyword() -> None:
     """No planner pick -> market content keyword still resolves business."""
-    theme = select_theme(_plan(), "make a c5 c9 market view ppt")
+    theme = select_theme(_plan(), "make a sample market market view ppt")
     assert theme.name == "swiss_modern"
 
 
@@ -102,7 +102,7 @@ def test_palette_rotation_varies_same_topic_decks() -> None:
     """No planner palette -> stable hash still gives per-message color variety."""
     seen = set()
     for msg in (
-        "make a c5 c9 market view ppt",
+        "make a sample market market view ppt",
         "market view deck for q3",
         "industry outlook presentation",
     ):

@@ -77,7 +77,7 @@ def test_directional_below_naive_code():
 
 
 def test_directional_weekly_product_has_both_codes():
-    out = compute_forecast_trust_tier("cracked_c9", below_naive=True, cadence_class="weekly")
+    out = compute_forecast_trust_tier("cracked_market", below_naive=True, cadence_class="weekly")
     assert "below_naive_baseline" in out["reason_codes"]
     assert "weekly_cadence" in out["reason_codes"]
 
@@ -319,7 +319,7 @@ Pack shape (all numbers raw, not formatted):
 ```
 `causal.implied_pct` = upstream[0].chg_30d_pct × elasticity (percent units). `divergent` = implied and expected_change_pct×100 differ in sign AND |implied − expected×100| > 2.0.
 `seasonal.label_zh`: adj<0 → "传统需求淡季", adj>0 → "传统需求旺季", 0 → None.
-`UPSTREAM_MAP`: product_b/product_d/product_f/feedstock_a/sis/product_a → ["cracked_c5"]; styrene/blowing_agent/cracked_c9 → wait, cracked_c9's upstream is product_c: styrene/blowing_agent → ["cracked_c9"]; cracked_c5/cracked_c9 → ["product_c"]; product_c → ["product_e"]; product_e → [].
+`UPSTREAM_MAP`: product_b/product_d/product_f/feedstock_a/sis/product_a → ["cracked_sample"]; styrene/blowing_agent/cracked_market → wait, cracked_market's upstream is product_c: styrene/blowing_agent → ["cracked_market"]; cracked_sample/cracked_market → ["product_c"]; product_c → ["product_e"]; product_e → [].
 
 - [ ] **Step 1: Write the failing test**
 
@@ -336,7 +336,7 @@ def _history(start=6000.0, n=100, step=1.0):
 
 def _explanation():
     return {
-        "drivers": [{"feature": "cracked_c5", "weight": 0.42},
+        "drivers": [{"feature": "cracked_sample", "weight": 0.42},
                      {"feature": "fx", "weight": 0.2},
                      {"feature": "event", "weight": 0.1},
                      {"feature": "extra", "weight": 0.05}],
@@ -356,7 +356,7 @@ def _pack(**over):
     kw = dict(
         product_id="product_b", name_zh="材料B", day=7,
         history_rows=_history(start=7000.0, step=-0.8),
-        upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)},
+        upstream_histories={"cracked_sample": _history(start=5800.0, step=-0.5)},
         run_results={"7": {"base": [6660.0, 6650.0], "bull": [6900.0, 6950.0], "bear": [6400.0, 6350.0]}},
         model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.09, "naive_mape": 0.11},
         explanation=_explanation(),
@@ -381,7 +381,7 @@ def test_pack_core_numbers():
 def test_pack_causal_transmission():
     p = _pack()
     up = p["upstream"][0]
-    assert up["product_id"] == "cracked_c5"
+    assert up["product_id"] == "cracked_sample"
     assert up["chg_30d_pct"] is not None and up["chg_30d_pct"] < 0
     assert p["causal"]["elasticity"] == 0.663
     assert p["causal"]["implied_pct"] < 0  # falling upstream → negative implied
@@ -426,7 +426,7 @@ def test_price_percentile():
 
 def test_upstream_map_covers_board_products():
     for pid in ("product_d", "product_f", "product_b", "feedstock_a", "sis",
-                "product_a", "styrene", "blowing_agent", "cracked_c5", "cracked_c9"):
+                "product_a", "styrene", "blowing_agent", "cracked_sample", "cracked_market"):
         assert pid in UPSTREAM_MAP
 ```
 
@@ -452,17 +452,17 @@ from app.services.forecasting.domain_signals import (
 )
 
 UPSTREAM_MAP: dict[str, list[str]] = {
-    "product_d": ["cracked_c5"], "product_f": ["cracked_c5"],
-    "product_b": ["cracked_c5"], "feedstock_a": ["cracked_c5"],
-    "sis": ["cracked_c5"], "product_a": ["cracked_c5"],
-    "styrene": ["cracked_c9"], "blowing_agent": ["cracked_c9"],
-    "cracked_c5": ["product_c"], "cracked_c9": ["product_c"],
+    "product_d": ["cracked_sample"], "product_f": ["cracked_sample"],
+    "product_b": ["cracked_sample"], "feedstock_a": ["cracked_sample"],
+    "sis": ["cracked_sample"], "product_a": ["cracked_sample"],
+    "styrene": ["cracked_market"], "blowing_agent": ["cracked_market"],
+    "cracked_sample": ["product_c"], "cracked_market": ["product_c"],
     "product_c": ["product_e"], "product_e": [],
 }
 
 _UPSTREAM_NAME_ZH = {
     "product_e": "原油", "product_c": "原料油",
-    "cracked_c5": "分解原料A", "cracked_c9": "分解材料M",
+    "cracked_sample": "分解原料A", "cracked_market": "分解材料M",
 }
 
 
@@ -602,7 +602,7 @@ def _product_b_pack():
     return build_pack(
         product_id="product_b", name_zh="材料B", day=7,
         history_rows=_history(start=7000.0, step=-0.8),
-        upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)},
+        upstream_histories={"cracked_sample": _history(start=5800.0, step=-0.5)},
         run_results={"7": {"base": [6660.0, 6650.0], "bull": [6900.0, 6950.0], "bear": [6400.0, 6350.0]}},
         model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.09, "naive_mape": 0.11},
         explanation=_explanation(), as_of_month=8,
@@ -654,7 +654,7 @@ def test_brief_buy_case():
     pack = build_pack(
         product_id="product_d", name_zh="电子元件", day=7,
         history_rows=_history(start=12000.0, step=2.0),
-        upstream_histories={"cracked_c5": _history(start=5800.0, step=1.0)},
+        upstream_histories={"cracked_sample": _history(start=5800.0, step=1.0)},
         run_results={"7": {"base": [12500.0, 12600.0], "bull": [12900.0, 13100.0], "bear": [12100.0, 12000.0]}},
         model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.07, "naive_mape": 0.1},
         explanation=exp, as_of_month=8,

@@ -8,7 +8,7 @@ Ran a Python script that:
 3. For each of 3 sampled products, pulled real data via the same SQL pattern the engine uses
 4. Ran the data through `truth_gate.wrap_forecast_result` to verify the gating logic
 
-### Question 1: cracked_c5 (`v_demo_data`)
+### Question 1: cracked_sample (`v_demo_data`)
 
 - **Outcome:** SUCCESS — 392 rows, real data
 - **Source table:** `v_demo_data`
@@ -19,7 +19,7 @@ Ran a Python script that:
 - **Truth gate:** `success=True`
 - **Verdict:** PASS — would produce a real forecast with data anchor
 
-### Question 2: cracked_c9 (`v_材料K_data`)
+### Question 2: cracked_market (`v_材料K_data`)
 
 - **Outcome:** SUCCESS — 330 rows, real data
 - **Source table:** `v_材料K_data`
@@ -45,8 +45,8 @@ Ran a Python script that:
 
 | Pack product | Warehouse data | Forecast works? |
 |---|---|---|
-| cracked_c5 | 392 rows | ✓ YES |
-| cracked_c9 | 330 rows | ✓ YES |
+| cracked_sample | 392 rows | ✓ YES |
+| cracked_market | 330 rows | ✓ YES |
 | product_d | 305 rows | ✓ YES |
 | product_f | (not sampled but in seed) | ✓ YES (expected) |
 | product_b | (not sampled but in seed) | ✓ YES (expected) |
@@ -55,7 +55,7 @@ Ran a Python script that:
 | trimethylbenzene | (not sampled but in seed) | ✓ YES (expected) |
 | styrene | (not sampled but in seed) | ✓ YES (expected) |
 | **9 / 16 products** | | **9/16 work** |
-| product_c, feedstock_a, product_a, hydrogenated_c9, product_e, butadiene, sbs | NO warehouse data | Returns "ForecastTarget not found" — truth_gate catches this as insufficient_data |
+| product_c, feedstock_a, product_a, hydrogenated_market, product_e, butadiene, sbs | NO warehouse data | Returns "ForecastTarget not found" — truth_gate catches this as insufficient_data |
 
 ## Overall
 

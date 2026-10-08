@@ -25,7 +25,7 @@
 - SQL → direct read-only QueryService; Python/charts → sandbox. Never reversed.
 - Flags off = byte-identical current behavior; coded fallbacks preserved everywhere.
 - `agents.py` chat FSM untouched. (If ever touched: initialize-before-conditional rule + AST regression test.)
-- Entity enrichment fully generic: no domain-specific examples (no "C5", no product/industry names) in prompts, seeds, or tests.
+- Entity enrichment fully generic: no domain-specific examples (no "sample product", no product/industry names) in prompts, seeds, or tests.
 - Tests individually via `backend/venv/bin/python -m pytest <file>`; avoid `tests/test_intelligence/`, `tests/test_document_ingestion`.
 - Ops: `docker restart zhanlu-backend` after service changes; `.env` flips need `docker compose up -d --force-recreate backend`.
 

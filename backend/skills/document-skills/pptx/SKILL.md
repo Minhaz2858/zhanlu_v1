@@ -83,7 +83,7 @@ When creating a new PowerPoint presentation from scratch, use the **html2pptx** 
 6. **Deep Purple & Emerald**: Purple (#B165FB), dark blue (#181B24), emerald (#40695B), white (#FFFFFF)
 7. **Cream & Forest Green**: Cream (#FFE1C7), forest green (#40695B), white (#FCFCFC)
 8. **Pink & Purple**: Pink (#F8275B), coral (#FF574A), rose (#FF737D), purple (#3D2F68)
-9. **Lime & Plum**: Lime (#C5DE82), plum (#7C3A5F), coral (#FD8C6E), blue-gray (#98ACB5)
+9. **Lime & Plum**: Lime (#sampleDE82), plum (#7C3A5F), coral (#FD8C6E), blue-gray (#98ACB5)
 10. **Black & Gold**: Gold (#BF9A4A), black (#000000), cream (#F4F6F6)
 11. **Sage & Terracotta**: Sage (#87A96B), terracotta (#E07A5F), cream (#F4F1DE), charcoal (#2C2C2C)
 12. **Charcoal & Red**: Charcoal (#292929), red (#E33737), light gray (#CCCBCB)

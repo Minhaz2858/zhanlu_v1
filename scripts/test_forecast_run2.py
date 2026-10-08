@@ -12,13 +12,13 @@ from app.services.forecasting.engine import ForecastEngine
 
 PRODUCTS = [
     # Updated to ERP primary (should now have 400+ rows → XGBoost activates)
-    "acme.cracked_c5",
+    "acme.cracked_sample",
     "acme.product_d",
     "acme.product_f",
     "acme.product_b",
     "acme.blowing_agent",
     # Updated extra_sources (marginal ERP data added)
-    "acme.cracked_c9",
+    "acme.cracked_market",
     # New ERP product families (dynamic SKU discovery)
     "acme.ethylene_carbon_black.202000022",
     "acme.industrial_hexane.202000009",

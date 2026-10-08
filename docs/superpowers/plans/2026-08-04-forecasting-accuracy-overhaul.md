@@ -1173,7 +1173,7 @@ git add -A && git commit -m "feat(forecast): accuracy overhaul Phase C-F complet
 |-------|--------|--------|--------|
 | C | 7d MAPE (aggregate) | 11.4% | <9% |
 | C | 30d MAPE (aggregate) | 23.5% | <18% |
-| C | XGBoost inf% products | 2 (C9, Styrene) | 0 |
+| C | XGBoost inf% products | 2 (sample product, Styrene) | 0 |
 | C | Reported MAPE honesty | in-sample (optimistic) | walk-forward (true OOS) |
 | D | Prediction interval coverage | uncalibrated (±sigma) | ~90% empirical |
 | D | Price-change probability | none | per-horizon p_rise + thresholds |

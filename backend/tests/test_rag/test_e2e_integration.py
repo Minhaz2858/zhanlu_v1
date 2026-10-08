@@ -76,7 +76,7 @@ class TestE2EPipeline:
             "product_id": "p_mc_1",
             "name": "PRODUCT_B",
             "aliases": ["dicyclopentadiene"],
-            "category": "C5",
+            "category": "sample product",
         })
 
         # Build a multi-collection context block
@@ -124,12 +124,12 @@ class TestE2EPipeline:
         idx = SmartIndexer()
         idx.index_causal_chain({
             "chain_id": "c_rt_1",
-            "description": "Product_C price ↑ → C5 spread ↓ → PRODUCT_B margin shrinks",
-            "nodes": ["product_c", "c5", "product_b"],
-            "edges": [["product_c", "c5"], ["c5", "product_b"]],
+            "description": "Product_C price ↑ → sample product spread ↓ → PRODUCT_B margin shrinks",
+            "nodes": ["product_c", "sample", "product_b"],
+            "edges": [["product_c", "sample"], ["sample", "product_b"]],
         })
         hits = retrieve_rich(
-            query="Product_C C5 spread",
+            query="Product_C sample product spread",
             n_results=3,
             collection="causal_graph_embeddings",
         )

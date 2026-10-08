@@ -787,7 +787,7 @@ Expected: 103/103 tests pass.
 
 - [ ] **Step 2: Manual smoke test**
 
-Have the user re-ask: "Weekly market reports — full CEO-level C5/C9 rundown i need comprehensive answer i need in ppt format"
+Have the user re-ask: "Weekly market reports — full CEO-level sample product rundown i need comprehensive answer i need in ppt format"
 
 Expected: User gets a comprehensive CEO report (same as Query 1) + a PPT file is generated.
 

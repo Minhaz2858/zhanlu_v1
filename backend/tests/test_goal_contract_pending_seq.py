@@ -34,10 +34,10 @@ def test_two_ok_queries_then_exit_promise_fires_force_synthesis() -> None:
     c = build_goal_contract("Give me supply chain data for last 30 days")
     # query #1: stale table, but usable rows
     c.record_tool_executed("ask_data_agent", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C5", "revenue": 1000}])
+    c.record_query_result([{"product_name": "sample product", "revenue": 1000}])
     # query #2: live table, usable rows
     c.record_tool_executed("ask_data_agent", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C9", "revenue": 5000}])
+    c.record_query_result([{"product_name": "sample product", "revenue": 5000}])
     # exit branch: model writes a promise as the final answer
     c.refresh_pending_action(
         "The first attempt used the stale table. Let me re-query against "
@@ -149,7 +149,7 @@ def test_model_armed_disarmed_by_clean_prose() -> None:
 def test_force_synthesis_when_usable_results_exist() -> None:
     c = build_goal_contract("show me shipments")
     c.record_tool_executed("ask_data_agent", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product": "C5", "qty": 500}])
+    c.record_query_result([{"product": "sample product", "qty": 500}])
     c.refresh_pending_action("Let me pull the shipment data now.")
     crits = c.unmet(granted_tools={"ask_data_agent"})
     assert crits[0].force_synthesis is True
@@ -219,9 +219,9 @@ def test_two_ok_queries_then_rerun_aggregation_promise_fires() -> None:
     force_synthesis=True (usable data already retrieved)."""
     c = build_goal_contract("Give me supply chain data for last 30 days")
     c.record_tool_executed("ask_data_agent", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C5", "revenue": 1000}])
+    c.record_query_result([{"product_name": "sample product", "revenue": 1000}])
     c.record_tool_executed("ask_data_agent", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C9", "revenue": 5000}])
+    c.record_query_result([{"product_name": "sample product", "revenue": 5000}])
     c.refresh_pending_action(
         "Let me re-run a single clean aggregation to confirm the totals are "
         "internally consistent across all metrics."

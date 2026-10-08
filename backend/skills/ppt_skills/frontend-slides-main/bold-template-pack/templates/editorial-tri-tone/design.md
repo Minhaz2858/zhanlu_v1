@@ -583,7 +583,7 @@ ZCOOL XiaoWei is the right aesthetic match for the em-switch role, but it ships 
 
 1. Section labels always use the `§ NN — Title` convention in JetBrains Mono with `{typography.label}` tracking.
 2. Every headline with an em/italic moment uses `<em>` to trigger Instrument Serif. Never use `font-style: italic` on Bricolage Grotesque directly.
-3. Value card alternation: odd-numbered cards (c1, c3, c5, c7) are dark (burgundy/butter); even-numbered (c2, c4, c6, c8) are light (butter/burgundy).
+3. Value card alternation: odd-numbered cards (c1, c3, sample, c7) are dark (burgundy/butter); even-numbered (c2, c4, c6, c8) are light (butter/burgundy).
 4. New dark-surface sections use `rgba(246,237,220,0.25)` for dividers — not `{colors.butter}` at full opacity.
 5. New pills follow the existing alternation: burgundy-bg/pink-text and butter-bg/burgundy-text for variety in clusters.
 6. Adding a chart series: use the four established visual encodings (area, bars, circles, dotted line) before inventing a new one.

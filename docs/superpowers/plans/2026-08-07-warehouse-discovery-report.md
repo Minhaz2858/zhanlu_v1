@@ -76,12 +76,12 @@ The procurement questionnaire is no longer blocking.
 ### Upstream Market Data from 隆众资讯 (Oilchem)
 | Table | Rows | Date Range | Columns |
 |-------|------|------------|---------|
-| `oilchem_data` | 74 | 2026-04 → 2026-08 | benchmark_a_crude, japan_product_c, industrial_cracking_c5, industrial_cracking_c9 |
+| `oilchem_data` | 74 | 2026-04 → 2026-08 | benchmark_a_crude, japan_product_c, industrial_cracking_sample, industrial_cracking_market |
 
 This is **daily upstream market data** scraped from oilchem.net (隆众资讯). Currently only 4 months, but actively updated (last: 2026-08-07). This provides:
 - **Benchmark A crude** — the ultimate upstream feedstock price
 - **Japan product_c** — Asian benchmark for industrial feedstock
-- **Cracking C5/C9** — direct feedstock for the customer's products
+- **Cracking sample product** — direct feedstock for the customer's products
 
 ### Contract Data (14 years)
 | Table | Rows | Date Range |
@@ -139,7 +139,7 @@ Standalone product tables with 日期Time column (2025-03 to 2026-03):
 
 ### Priority 4: Upstream Market Data Loader
 - **Source**: `oilchem_data`
-- **Output**: Daily Benchmark A crude, Japan product_c, C5/C9 cracking prices
+- **Output**: Daily Benchmark A crude, Japan product_c, sample product cracking prices
 - **74 rows but growing daily** — critical upstream exogenous feature
 
 ### Priority 5: Sales Volume + Price Loader (enhance existing)

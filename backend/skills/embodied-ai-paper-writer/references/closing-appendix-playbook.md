@@ -340,7 +340,7 @@ Walk through the network in **input-to-output order**, with explicit tensor dime
 > `R_manip = δ w_manip_shaping R_manip_shaping + w_progress ΔP + γ R_finish_task`
 > `The variable δ is 1 if the end effector has not reached the target region, and 0 otherwise.`
 
-### Visual Augmentation (C5)
+### Visual Augmentation (sample product)
 One paragraph, bold transform name + colon + parenthetical hyperparameters + semicolon separator:
 > `**ColorJitter**: Adjusts brightness (0.4), contrast (0.4), saturation (0.2), and hue (0.05); **GaussianBlur**: Applies a blur effect with a kernel size of (5,9) and sigma range of (0.1,2); ...`
 

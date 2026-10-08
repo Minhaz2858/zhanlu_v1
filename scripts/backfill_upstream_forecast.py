@@ -196,7 +196,7 @@ if __name__ == "__main__":
     keys = sys.argv[1:] or [
         "acme.product_e",
         "acme.product_c",
-        "acme.cracked_c5",
-        "acme.cracked_c9",
+        "acme.cracked_sample",
+        "acme.cracked_market",
     ]
     main(keys)

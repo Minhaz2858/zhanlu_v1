@@ -400,6 +400,83 @@ def _handle_orchestrate(arguments: dict, db, user_id) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# ── Group chat (AutoGen/SK-style shared-thread rounds — IBM gap #1) ──────
+
+def _handle_group_chat(arguments: dict, db, user_id) -> dict:
+    """Multi-agent group chat: shared-thread rounds with speaker selection."""
+    import asyncio
+
+    from app.services.swarm.group_chat import run_group_chat
+    from app.services.swarm.team_registry import (
+        get_swarm_coordinator, get_team_registry,
+    )
+
+    team_id = arguments.get("team_id")
+    topic = (arguments.get("topic") or "").strip()
+    agent_names = arguments.get("agents") or []
+    max_rounds = max(1, min(int(arguments.get("max_rounds") or 6), 12))
+    speaker_policy = arguments.get("speaker_policy") or "round_robin"
+
+    if not team_id or not topic or not isinstance(agent_names, list) or len(agent_names) < 2:
+        return {
+            "success": False,
+            "error": "team_id, topic, and agents (>= 2 names) are required",
+        }
+
+    coordinator = get_swarm_coordinator()
+    registry = get_team_registry()
+
+    async def _go():
+        return await run_group_chat(
+            coordinator, registry, str(team_id), topic,
+            [str(a) for a in agent_names],
+            max_rounds=max_rounds,
+            speaker_policy=speaker_policy if speaker_policy in ("round_robin", "llm") else "round_robin",
+            db=db, user_id=user_id,
+        )
+
+    try:
+        return asyncio.run(_go())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("swarm_group_chat failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+
+_GROUP_CHAT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "swarm_group_chat",
+        "description": (
+            "Run a multi-agent GROUP CHAT: agents take turns replying in one "
+            "shared team thread, each seeing what the others said, until the "
+            "goal is achieved (an agent emits [COMPLETE]) or max_rounds is "
+            "reached. Requires a team created via swarm_create_team. Use for "
+            "problems that need agents to actually discuss and converge — "
+            "not just receive independent subtasks (use swarm_orchestrate "
+            "for that)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Team id from swarm_create_team."},
+                "topic": {"type": "string", "description": "The shared goal/problem for the group."},
+                "agents": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Agent names participating (>= 2), e.g. ['plan', 'data_agent', 'verification'].",
+                },
+                "max_rounds": {"type": "integer", "description": "Hard bound on reply rounds (default 6, max 12)."},
+                "speaker_policy": {
+                    "type": "string",
+                    "enum": ["round_robin", "llm"],
+                    "description": "'round_robin' = deterministic turns; 'llm' = a moderator call picks the most useful next speaker.",
+                },
+            },
+            "required": ["team_id", "topic", "agents"],
+        },
+    },
+}
+
+
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -480,6 +557,15 @@ def register_swarm_tools() -> None:
         toolset="swarm",
         is_async=False,
         description=_ORCHESTRATE_SCHEMA["function"]["description"],
+    )
+    reg.register(
+        name="swarm_group_chat",
+        schema=_GROUP_CHAT_SCHEMA,
+        handler=_handle_group_chat,
+        category="swarm",
+        toolset="swarm",
+        is_async=False,
+        description=_GROUP_CHAT_SCHEMA["function"]["description"],
     )
 
 

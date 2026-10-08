@@ -14,7 +14,7 @@ from app.services.report_ai_service import (
 
 def mock_execution_chart():
     return [
-        {"product": "C5树脂", "contract_qty": 500.0, "out_qty": 380.0, "execution_rate": 76.0},
+        {"product": "复合材料", "contract_qty": 500.0, "out_qty": 380.0, "execution_rate": 76.0},
         {"product": "材料C", "contract_qty": 200.0, "out_qty": 190.0, "execution_rate": 95.0},
     ]
 
@@ -22,7 +22,7 @@ def mock_execution_chart():
 def mock_unshipped():
     return [
         {
-            "product": "C5树脂",
+            "product": "复合材料",
             "customer": "青岛橡塑",
             "contract_qty": 300,
             "unshipped_qty": 120,
@@ -43,7 +43,7 @@ class TestBuildAiContext:
             "2025-07-31",
         )
         assert "示例工厂" in ctx
-        assert "C5树脂" in ctx
+        assert "复合材料" in ctx
         assert "材料C" in ctx
         assert "76" in ctx or "76.0" in ctx
         assert "未出库" in ctx

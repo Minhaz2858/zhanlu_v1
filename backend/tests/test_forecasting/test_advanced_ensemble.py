@@ -41,17 +41,17 @@ def make_correlated_data(n: int = 200, seed: int = 42) -> dict[str, pd.Series]:
     products["product_c"] = pd.Series(
         trend + base_season + rng.normal(0, 1.5, n), index=dr, name="product_c",
     )
-    # C5 correlated with product_c (upstream)
-    products["C5"] = pd.Series(
-        0.9 * products["product_c"].values + rng.normal(0, 1, n), index=dr, name="C5",
+    # sample product correlated with product_c (upstream)
+    products["sample product"] = pd.Series(
+        0.9 * products["product_c"].values + rng.normal(0, 1, n), index=dr, name="sample product",
     )
-    # Product_D correlated with C5
+    # Product_D correlated with sample product
     products["product_d"] = pd.Series(
-        1.1 * products["C5"].values + rng.normal(0, 1, n), index=dr, name="product_d",
+        1.1 * products["sample product"].values + rng.normal(0, 1, n), index=dr, name="product_d",
     )
-    # PRODUCT_B correlated with C5 and product_d
+    # PRODUCT_B correlated with sample product and product_d
     products["PRODUCT_B"] = pd.Series(
-        0.7 * products["C5"].values + 0.2 * products["product_d"].values + rng.normal(0, 1, n),
+        0.7 * products["sample product"].values + 0.2 * products["product_d"].values + rng.normal(0, 1, n),
         index=dr, name="PRODUCT_B",
     )
     # product_a downstream
@@ -182,7 +182,7 @@ class TestVARModel:
     def test_create(self):
         from app.services.forecasting.models.var_model import VARModel
 
-        m = VARModel(product_key="C5")
+        m = VARModel(product_key="sample product")
         assert m.name == "var_model"
         assert m.min_history == 60
         assert m.uses_exog is False
@@ -191,8 +191,8 @@ class TestVARModel:
     def test_fit_with_correlated_data(self, correlated):
         from app.services.forecasting.models.var_model import VARModel
 
-        y = correlated["C5"]
-        m = VARModel(product_key="C5", correlated_data=correlated, max_lags=3)
+        y = correlated["sample product"]
+        m = VARModel(product_key="sample product", correlated_data=correlated, max_lags=3)
         m.fit(y)
         assert m.fitted
         assert m.selected_lags >= 1
@@ -201,8 +201,8 @@ class TestVARModel:
     def test_forecast_after_fit(self, correlated):
         from app.services.forecasting.models.var_model import VARModel
 
-        y = correlated["C5"]
-        m = VARModel(product_key="C5", correlated_data=correlated, max_lags=3)
+        y = correlated["sample product"]
+        m = VARModel(product_key="sample product", correlated_data=correlated, max_lags=3)
         m.fit(y)
         fc = m.forecast(h=7)
         assert isinstance(fc, pd.Series)
@@ -211,7 +211,7 @@ class TestVARModel:
     def test_forecast_without_fit_returns_naive(self):
         from app.services.forecasting.models.var_model import VARModel
 
-        m = VARModel(product_key="C5")
+        m = VARModel(product_key="sample product")
         fc = m.forecast(h=7)
         assert isinstance(fc, pd.Series)
         assert len(fc) == 7
@@ -236,29 +236,29 @@ class TestVARModel:
 
         # Very short series for all products
         short = {k: s.iloc[:30] for k, s in correlated.items()}
-        y = short["C5"]
-        m = VARModel(product_key="C5", correlated_data=short, max_lags=3)
+        y = short["sample product"]
+        m = VARModel(product_key="sample product", correlated_data=short, max_lags=3)
         m.fit(y)
         assert not m.fitted
 
     def test_joint_columns(self, correlated):
         from app.services.forecasting.models.var_model import VARModel
 
-        y = correlated["C5"]
-        m = VARModel(product_key="C5", correlated_data=correlated, max_lags=3)
+        y = correlated["sample product"]
+        m = VARModel(product_key="sample product", correlated_data=correlated, max_lags=3)
         m.fit(y)
         if m.fitted:
             cols = m.joint_columns
-            assert "C5" in cols
+            assert "sample product" in cols
             assert len(cols) >= 3  # at least 3 products after filtering
 
     def test_correlated_groups(self):
         from app.services.forecasting.models.var_model import _CORRELATED_GROUPS
 
-        assert "C5" in _CORRELATED_GROUPS
-        assert "product_c" in _CORRELATED_GROUPS["C5"]
-        assert "product_d" in _CORRELATED_GROUPS["C5"]
-        assert "PRODUCT_B" in _CORRELATED_GROUPS["C5"]
+        assert "sample product" in _CORRELATED_GROUPS
+        assert "product_c" in _CORRELATED_GROUPS["sample product"]
+        assert "product_d" in _CORRELATED_GROUPS["sample product"]
+        assert "PRODUCT_B" in _CORRELATED_GROUPS["sample product"]
 
 
 # ================================================================

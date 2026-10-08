@@ -54,7 +54,7 @@ class TestWebSearchCitations:
                 "success": True,
                 "query": "industrial market",
                 "results": [
-                    {"title": "C5 resin demand", "url": "https://example.com/c5", "description": "s"},
+                    {"title": "sample product resin demand", "url": "https://example.com/sample", "description": "s"},
                 ],
                 "count": 1,
             },
@@ -62,8 +62,8 @@ class TestWebSearchCitations:
         citations = _extract_citations_from_tool_calls(tool_calls)
         assert len(citations) == 1
         assert citations[0]["kind"] == "web"
-        assert citations[0]["url"] == "https://example.com/c5"
-        assert citations[0]["source_id"] == "https://example.com/c5"
+        assert citations[0]["url"] == "https://example.com/sample"
+        assert citations[0]["source_id"] == "https://example.com/sample"
 
     def test_web_results_capped_at_five(self):
         tool_calls = [{

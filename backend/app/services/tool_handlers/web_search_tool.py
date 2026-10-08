@@ -264,7 +264,7 @@ def _provider_for(name: str) -> SearchProvider:
 # ---------------------------------------------------------------------------
 # Poisoned-SERP failure mode: keyless HTML-scraped engines (Bing from a
 # datacenter IP) return 200 OK with plausible-looking but IRRELEVANT rows —
-# the C5/C9 industrial query got "C5驾驶证" (driver's license), CSGO item
+# the industrial query got "无关结果" (driver's license), CSGO item
 # markets, and a military transport plane. The agent trusted them, spent a
 # turn extracting the wrong pages, and fell back to internal data — the
 # "not informative vs Kimi/Claude" gap. A result must share enough
@@ -286,7 +286,7 @@ def _significant_tokens(query: str) -> list[str]:
     """Meaningful tokens of a query for relevance matching.
 
     ASCII: words >= 3 letters plus short alphanumerics with a digit
-    ("c5", "c9", "5g").  CJK: every 2-char bigram of each Chinese run
+    ("sample", "market", "5g").  CJK: every 2-char bigram of each Chinese run
     ("分解原料A" -> 分解/解碳/原料A) — the standard Chinese relevance unit.
     """
     tokens: list[str] = []
@@ -403,7 +403,7 @@ async def _web_search(
             raw_results = []
             continue
         # Relevance filter: keyless scraped engines can return 200 OK with
-        # plausible-looking but irrelevant rows (C5驾驶证 for a C5/C9 resin
+        # plausible-looking but irrelevant rows (无关结果 for a resin
         # query). Drop junk before trusting the provider; when everything is
         # junk, treat the provider as empty so the chain moves on (or the
         # turn fails honestly instead of extracting the wrong pages).

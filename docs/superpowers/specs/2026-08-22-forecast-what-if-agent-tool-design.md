@@ -6,7 +6,7 @@
 
 ## 1. Problem Statement
 
-The Market Dashboard has a "What-If Analysis" sidebar panel (`WhatIfPanel.jsx`) with two sliders (Benchmark A Crude, Product_C) and a `Run Simulation` button. User feedback: clicking `Run Simulation` "nothing happens" — the result renders inline but is easy to miss, and the button is disabled when both sliders are at 0, making the panel feel broken. The user requested moving this capability into the conversational AI agent so users can simply ask "what if Benchmark A jumps +10%?" / "如果布伦特涨10%会怎样?" and get an answer in chat.
+The Market Dashboard has a "What-If Analysis" sidebar panel (`WhatIfPanel.jsx`) with two sliders (Benchmark A Crude, Product_C) and a `Run Simulation` button. User feedback: clicking `Run Simulation` "nothing happens" — the result renders inline but is easy to miss, and the button is disabled when both sliders are at 0, making the panel feel broken. The user requested moving this capability into the conversational AI agent so users can simply ask "what if Benchmark A jumps +10%?" / "如果基准A涨10%会怎样?" and get an answer in chat.
 
 The what-if math already exists in the backend (`GET /forecast-ops/what-if/{product_key}`), but **no agent tool exposes it** — the agent currently cannot answer scenario questions even though it can answer forecast run/accuracy/report questions. This spec closes that gap.
 
@@ -176,7 +176,7 @@ Regression: the existing forecast_ops what-if test (if any) is pointed at the ex
 
 - **Backend**: bind-mount means Python changes are picked up by `docker restart zhanlu-backend` (no rebuild).
 - **Frontend**: `./node_modules/.bin/vite build --emptyOutDir=false` (capture output to a log file and poll it — the environment intercepts `vite build` as a watch command), then `docker restart zhanlu-frontend`.
-- Manual smoke test: ask the agent "如果布伦特涨10%, product_a 会怎样?" and verify a text answer + 7-day comparison table; also verify the dashboard no longer shows the What-If panel. (The tool is visible because it is registered `enabled_by_default=True` and listed in `DEFAULT_TOOLS_BY_AGENT` — no flag flip required.)
+- Manual smoke test: ask the agent "如果基准A涨10%, product_a 会怎样?" and verify a text answer + 7-day comparison table; also verify the dashboard no longer shows the What-If panel. (The tool is visible because it is registered `enabled_by_default=True` and listed in `DEFAULT_TOOLS_BY_AGENT` — no flag flip required.)
 
 ## 12. File Manifest
 

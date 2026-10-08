@@ -89,7 +89,7 @@ def test_score_skill_match_above_threshold():
         "trigger": "weekly report, weekly market report, market report, weekly summary",
     }
     for msg in [
-        "generate the weekly report for C5",
+        "generate the weekly report for sample product",
         "please give me a weekly market report",
         "I need the weekly summary of sales",
     ]:
@@ -119,7 +119,7 @@ def test_post_router_pick_forces_weekly_report_skill():
     ]
 
     result = post_router_pick(
-        "Give me the weekly market report for C5 resin",
+        "Give me the weekly market report for sample product resin",
         candidates=candidates,
     )
     assert result is not None

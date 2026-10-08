@@ -13,7 +13,7 @@ Developer-focused, hacker aesthetic — GitHub's dark theme as a presentation. E
     --border: #30363d;
     --green: #39d353;
     --green-muted: rgba(57, 211, 83, 0.4);
-    --text: #c9d1d9;
+    --text: #marketd1d9;
     --text-muted: #8b949e;
     --comment: #484f58;
     --yellow: #e3b341;   /* warnings */

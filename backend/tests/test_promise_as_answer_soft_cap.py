@@ -37,7 +37,7 @@ def test_promise_then_tool_execution_satisfies_seq_stamp_but_phrase_remains():
     c = build_goal_contract("Give me supply chain data for last 30 days")
     # Query #1 succeeds
     c.record_tool_executed("execute_query", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C5", "revenue": 1000}])
+    c.record_query_result([{"product_name": "sample product", "revenue": 1000}])
 
     # Model produces promise text (would happen in LLM response alongside tool calls)
     _last_iter_prose = "Let me verify the revenue field is actually correct."
@@ -72,7 +72,7 @@ def test_promise_phrase_survives_despite_satisfied_seq_stamp():
     # Multiple queries already executed
     for _ in range(3):
         c.record_tool_executed("execute_query", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C5", "qty": 500}])
+    c.record_query_result([{"product_name": "sample product", "qty": 500}])
 
     # Last iter: model promises AND calls a tool
     _prose = (
@@ -102,7 +102,7 @@ def test_soft_cap_promise_forces_synthesis_when_data_exists():
     promise-as-answer: record a force and set _contract_force_synthesis."""
     c = build_goal_contract("Give me supply chain data for last 30 days")
     c.record_tool_executed("execute_query", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C5", "revenue": 1000}])
+    c.record_query_result([{"product_name": "sample product", "revenue": 1000}])
 
     _last_iter_prose = "Let me verify the revenue field is actually correct."
     c.refresh_pending_action(_last_iter_prose)
@@ -146,7 +146,7 @@ def test_soft_cap_no_force_when_force_budget_exhausted():
     force another iteration (prevents infinite loops)."""
     c = build_goal_contract("Give me supply chain data for last 30 days")
     c.record_tool_executed("execute_query", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C5", "revenue": 1000}])
+    c.record_query_result([{"product_name": "sample product", "revenue": 1000}])
 
     # Exhaust the force budget
     for _ in range(c.max_forces):
@@ -169,11 +169,11 @@ def test_soft_cap_no_force_when_clean_prose():
     """When the last iter's prose has no pending-action phrase, no force."""
     c = build_goal_contract("Give me supply chain data for last 30 days")
     c.record_tool_executed("execute_query", result_quality=RESULT_QUALITY_ASSUMED_OK)
-    c.record_query_result([{"product_name": "C5", "revenue": 1000}])
+    c.record_query_result([{"product_name": "sample product", "revenue": 1000}])
 
     _last_iter_prose = (
         "The total sales revenue for the last 30 days is ¥12.5M across "
-        "all C5/C9 products. Inventory positions are stable."
+        "all sample products. Inventory positions are stable."
     )
     # No pending phrase
     assert pending_action_phrase(_last_iter_prose) is None

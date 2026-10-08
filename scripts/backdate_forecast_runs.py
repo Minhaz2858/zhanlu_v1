@@ -1,7 +1,7 @@
 """Backdate ForecastRun created_date so the step-function Previous AI line
 renders across the past zone in the upstream forecast chart.
 
-For each upstream product (product_e, product_c, cracked_c5):
+For each upstream product (product_e, product_c, cracked_sample):
   - Ensure at least 3 runs exist.
   - If a run was created today, shift its created_date back 13 or 26 days
     so the step-function algorithm spans ~26 days of past history.
@@ -21,7 +21,7 @@ from app.database import SessionLocal
 from app.models.forecasting import ForecastTarget, ForecastRun
 
 ORG_ID = "default-org"
-UPSTREAM_KEYS = {"acme.product_e", "acme.product_c", "acme.cracked_c5"}
+UPSTREAM_KEYS = {"acme.product_e", "acme.product_c", "acme.cracked_sample"}
 BACKDATE_OFFSETS = [13, 26]  # days to shift for 2 additional past runs
 TODAY = date.today()
 

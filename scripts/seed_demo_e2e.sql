@@ -44,8 +44,8 @@ INSERT INTO customers (id, name, region, revenue) VALUES
 
 -- Products (12; volume = typical unit price in USD, integer).
 INSERT INTO products (id, name, volume) VALUES
-  (1,  'C5 Resin',          1450),
-  (2,  'C9 Resin',          1320),
+  (1,  'sample product Resin',          1450),
+  (2,  'sample product Resin',          1320),
   (3,  'Product F',        980),
   (4,  'Product_D',          2100),
   (5,  'PRODUCT_B',              1650),
