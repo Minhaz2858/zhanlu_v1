@@ -1427,6 +1427,11 @@ class Settings(BaseSettings):
     # whitelist) instead of the hand-rolled sub-loop. Fail-open: any swarm
     # error falls through to the legacy loop. Default OFF (measure first).
     DATA_AGENT_SWARM_ENABLED: bool = False
+    # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
+    # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
+    # classifier threshold from measured per-route success/latency. Read
+    # only + fail-open; default OFF keeps hand-tuned thresholds.
+    ROUTING_FEEDBACK_ENABLED: bool = False
 
     # ── OCI NL2SQL parity — planning, feedback loop, visualization ────────
     # All four default OFF (the standing convention); each is an independent
