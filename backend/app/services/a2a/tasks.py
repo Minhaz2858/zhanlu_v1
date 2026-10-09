@@ -147,12 +147,59 @@ class A2aExecutor(Protocol):
     async def run(self, *, task: A2aTask, agent_app: Any, db) -> None: ...
 
 
+def _enabled_endpoints(db) -> list:
+    """Enabled LLM endpoints ordered default-first (provider ladder for
+    delegated turns). Never raises; empty list → legacy default routing."""
+    try:
+        from app.config import settings
+        from app.models.llm_model import LlmModel
+        from app.services.crypto_utils import decrypt_value
+        from app.services.llm_router import LLMEndpoint
+
+        rows = (
+            db.query(LlmModel)
+            .filter(
+                LlmModel.enabled.is_(True),
+                LlmModel.is_deleted.is_(False),
+            )
+            .order_by(LlmModel.is_default.desc(), LlmModel.created_date.asc())
+            .all()
+        )
+        out = []
+        for row in rows:
+            try:
+                api_key = decrypt_value(row.api_key) or ""
+            except Exception:  # noqa: BLE001
+                api_key = ""
+            if not api_key:
+                continue  # a keyless endpoint can only produce illegal headers
+            out.append(LLMEndpoint(
+                base_url=row.base_url or "",
+                api_key=api_key,
+                model_id=row.model_id or "",
+                is_private=bool(row.is_private),
+                provider=row.provider or "",
+                context_window=getattr(row, "context_window", None),
+                max_output_tokens=getattr(row, "max_output_tokens", None),
+            ))
+        return out
+    except Exception as e:  # noqa: BLE001 — fail-soft to legacy routing
+        logger.debug("a2a: endpoint ladder unavailable: %s", e)
+        return []
+
+
 class DefaultA2aExecutor:
-    """Runs the message through the Synexia FSM (governed single turn)."""
+    """Runs the delegated turn through the governed ReAct sub-agent loop.
+
+    2026-10-09 root-fix: the executor previously ran the Synexia FSM, whose
+    finalize step returned empty/canned assistant content for open-ended
+    questions — external partners got "I've processed your request." with a
+    `completed` status. Now the delegation runs the SAME governed sub-agent
+    loop used for internal `delegate_task` (self-healing tools, bounded
+    iterations, guard fixes), and an empty response is an explicit task
+    failure, never a canned success."""
 
     async def run(self, *, task: A2aTask, agent_app: Any, db) -> None:
-        from app.services.synexia.fsm import ExecutionRequest, SynexiaFSM
-
         store = A2aTaskStore(db)
         store.update_status(task, "working")
         try:
@@ -162,20 +209,48 @@ class DefaultA2aExecutor:
                 if isinstance(p, dict) and p.get("text")
             ).strip() or "Continue."
             publish(task.id, {"type": "status", "status": "working"})
-            request = ExecutionRequest(
-                conversation_id=str(uuid4()),
-                agent_name=agent_app.name,
-                user_message=text,
-                mode="dynamic",
-                org_id=getattr(agent_app, "org_id", "default-org") or "default-org",
-                app_id=getattr(agent_app, "app_id", "default-app") or "default-app",
+
+            from app.services.tool_handlers.delegate_tool import (
+                _run_sub_agent_inner,
             )
-            result = SynexiaFSM(db).run(request, generate_response=True)
+
+            # Provider ladder: try each enabled model (default first) so a
+            # dead/out-of-credit provider doesn't fail the delegation.
+            last_error = None
+            result = None
+            endpoints = _enabled_endpoints(db) or [None]
+            for endpoint in endpoints:
+                result = await _run_sub_agent_inner(
+                    task=text,
+                    agent_name=agent_app.name,
+                    db=db,
+                    user_id="a2a-delegation",
+                    max_iterations=6,
+                    endpoint=endpoint,
+                )
+                if result.get("success") and (result.get("response") or "").strip():
+                    break
+                last_error = result.get("error")
+            else:
+                store.update_status(
+                    task, "failed",
+                    error=last_error or "agent returned an empty response",
+                )
+                return
+            response = (result.get("response") or "").strip()
+            if not response or result.get("success") is not True:
+                error = result.get("error") or "agent returned an empty response"
+                store.update_status(task, "failed", error=str(error))
+                return
             store.update_status(task, "completed")
             store.append_artifact(task, {
                 "name": "reply",
                 "mimeType": "text/plain",
-                "text": result.assistant_content or "",
+                "text": response,
+            })
+            store.append_message(task, {
+                "role": "assistant",
+                "parts": [{"kind": "text", "text": response}],
             })
         except Exception as exc:  # noqa: BLE001
             logger.warning("A2A task %s failed: %s", task.id, exc)

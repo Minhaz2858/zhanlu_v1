@@ -226,3 +226,49 @@ def test_remote_client_send_and_get(monkeypatch):
 
     got = asyncio.run(client_mod.get_task("https://ext.example.com/", "t1", token="tok"))
     assert got["status"] == "completed"
+
+
+# ── Card-form agent id resolution (interop fix, 2026-10-09) ──────────────
+
+def test_tasks_send_accepts_card_form_agent_id(client, db):
+    """External clients send the skill id exactly as the agent card
+    advertises it ('agent-<uuid>'). The router must resolve it — previously
+    the over-long id hit a varchar(36) overflow and 500'd."""
+    agent = _seed_agent(db, name="card-id-agent")
+    resp = client.post("/a2a", json={
+        "jsonrpc": "2.0", "id": "card-1", "method": "tasks/send",
+        "params": {
+            "agent_id": f"agent-{agent.id}",
+            "message": {"role": "user", "parts": [{"text": "hello"}]},
+        },
+    })
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["result"]["status"] == "completed"
+    assert body["result"]["agent_id"] == agent.id
+
+
+def test_tasks_send_accepts_agent_name(client, db):
+    agent = _seed_agent(db, name="by-name-agent")
+    resp = client.post("/a2a", json={
+        "jsonrpc": "2.0", "id": "name-1", "method": "tasks/send",
+        "params": {
+            "agent_id": "by-name-agent",
+            "message": {"role": "user", "parts": [{"text": "hello"}]},
+        },
+    })
+    assert resp.json()["result"]["agent_id"] == agent.id
+
+
+def test_tasks_send_unknown_agent_clean_error(client, db):
+    resp = client.post("/a2a", json={
+        "jsonrpc": "2.0", "id": "unk-1", "method": "tasks/send",
+        "params": {
+            "agent_id": "agent-00000000-0000-0000-0000-000000000000",
+            "message": {"role": "user", "parts": [{"text": "hi"}]},
+        },
+    })
+    body = resp.json()
+    assert resp.status_code == 200  # JSON-RPC errors ride HTTP 200
+    assert body["error"]["code"] == -32602
+    assert "Unknown agent" in body["error"]["message"]

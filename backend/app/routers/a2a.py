@@ -126,18 +126,37 @@ async def a2a_jsonrpc(
 async def _tasks_send(
     req_id: Any, params: dict[str, Any], db: Session, auth: dict[str, str],
 ) -> dict[str, Any]:
-    agent_id = params.get("agent_id")
+    agent_ref = params.get("agent_id")
     message = params.get("message") or {}
     parts = message.get("parts") if isinstance(message, dict) else None
-    if not agent_id or not isinstance(parts, list):
+    if not agent_ref or not isinstance(parts, list):
         return _error_response(req_id, -32602, "Invalid params: agent_id and message.parts required")
 
-    # ADLC P1-5 canary: deterministic per-caller bucket vs rollout_percent.
     from app.models.agent_app import AgentApp
     from app.services.agent_lifecycle import rollout_allows
 
-    agent_row = db.query(AgentApp).filter(AgentApp.id == agent_id).first()
-    if agent_row is not None and not rollout_allows(agent_row, auth.get("user_id")):
+    # Interop fix (2026-10-09): external clients pass the agent id exactly as
+    # the agent card advertises it — skill ids are "agent-<uuid>" display
+    # form, and some callers send the agent NAME. Resolve all three forms;
+    # anything unknown returns a clean JSON-RPC error, never a 500.
+    raw = str(agent_ref).strip()
+    candidate = raw[len("agent-"):] if raw.startswith("agent-") else raw
+    agent_row = None
+    if candidate:
+        agent_row = db.query(AgentApp).filter(
+            AgentApp.id == candidate,
+            AgentApp.is_deleted == False,  # noqa: E712
+        ).first()
+    if agent_row is None:
+        agent_row = db.query(AgentApp).filter(
+            AgentApp.name == raw,
+            AgentApp.status == "published",
+            AgentApp.is_deleted == False,  # noqa: E712
+        ).first()
+    if agent_row is None:
+        return _error_response(req_id, -32602, f"Unknown agent: {raw}")
+
+    if not rollout_allows(agent_row, auth.get("user_id")):
         return _error_response(
             req_id, -32001,
             f"Agent '{agent_row.name}' is in a canary rollout "
@@ -145,18 +164,22 @@ async def _tasks_send(
         )
 
     store = tasks_mod.A2aTaskStore(db)
-    task = store.create(
-        task_id=params.get("id"),
-        agent_app_id=agent_id,
-        message_parts=parts,
-        metadata=params.get("metadata"),
-        external=True,
-        created_by_id=auth.get("user_id"),
-    )
-    # Await dispatch inline so callers can immediately tasks/get a settled
-    # task; long-running agents can switch to spawn_dispatch for backgrounding.
-    await tasks_mod.dispatch_task(db, task.id)
-    db.refresh(task)
+    try:
+        task = store.create(
+            task_id=params.get("id"),
+            agent_app_id=agent_row.id,
+            message_parts=parts,
+            metadata=params.get("metadata"),
+            external=True,
+            created_by_id=auth.get("user_id"),
+        )
+        # Await dispatch inline so callers can immediately tasks/get a settled
+        # task; long-running agents can switch to spawn_dispatch for backgrounding.
+        await tasks_mod.dispatch_task(db, task.id)
+        db.refresh(task)
+    except Exception as exc:  # noqa: BLE001 — JSON-RPC surfaces errors, never 500s
+        logger.exception("a2a: tasks/send dispatch failed")
+        return _error_response(req_id, -32000, f"Task dispatch failed: {exc}")
     return _result_response(req_id, store.to_dict(task))
 
 
