@@ -61,3 +61,13 @@ docker-compose.copy.yml
 
 # caches / OS junk
 .ruff_cache/
+
+# Agent tool state — never source
+.codebuddy/
+.workbuddy/
+.superpowers/
+.hermes/
+
+# QA archive + generated deliverables (artifacts, not source)
+agent_qa/
+outputs/
