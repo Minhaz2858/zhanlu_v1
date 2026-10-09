@@ -1547,6 +1547,15 @@ class Settings(BaseSettings):
     # Scheduled DB scan for generic-fallback / apology assistant turns;
     # CRITICAL log when the ratio breaches the threshold.
     TURN_HEALTH_MONITOR_ENABLED: bool = True
+    # ── Local embedding fallback (2026-10-09) ──
+    # When no EMBEDDING_API_KEY is configured, embeddings fall back to an
+    # in-process sentence-transformers model. Default:
+    # sentence-transformers/all-MiniLM-L6-v2 (cached, ST-compatible, 384-dim).
+    # For stronger Chinese semantics, download BAAI/bge-m3 and set
+    # EMBEDDING_LOCAL_MODEL=BAAI/bge-m3. Consumers: semantic memory recall,
+    # tool-search, case-based reasoning.
+    EMBEDDING_LOCAL_FALLBACK_ENABLED: bool = True
+    EMBEDDING_LOCAL_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

@@ -131,6 +131,83 @@ def _post_embeddings(texts: list[str], model: str, api_base: str, api_key: str) 
     return vectors
 
 
+# ── Local embedding fallback (2026-10-09) ─────────────────────────────────
+# When no EMBEDDING_API_KEY is configured (or the API keeps failing), fall
+# back to an in-process sentence-transformers model — BAAI/bge-m3 by default
+# (multilingual, strong Chinese, already cached for document ingestion).
+# Consumers (semantic recall, tool-search, CBR) get real vectors instead of
+# degrading to lexical scoring.
+_LOCAL_MODEL: Any = None
+_LOCAL_LOCK = threading.Lock()
+_API_FAIL_UNTIL: float = 0.0  # circuit breaker: skip the API while broken
+_API_FAIL_COOLDOWN_S = 300.0
+
+
+def _local_fallback_enabled() -> bool:
+    try:
+        from app.config import settings
+
+        return bool(getattr(settings, "EMBEDDING_LOCAL_FALLBACK_ENABLED", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _local_embed(texts: list[str]) -> list[list[float]]:
+    """Embed with the local sentence-transformers model (lazy singleton)."""
+    global _LOCAL_MODEL
+    if _LOCAL_MODEL is None:
+        with _LOCAL_LOCK:
+            if _LOCAL_MODEL is None:
+                try:
+                    from app.config import settings
+
+                    name = getattr(
+                        settings, "EMBEDDING_LOCAL_MODEL",
+                        "sentence-transformers/all-MiniLM-L6-v2",
+                    )
+                except Exception:  # noqa: BLE001
+                    name = "sentence-transformers/all-MiniLM-L6-v2"
+                from sentence_transformers import SentenceTransformer
+
+                logger.info(
+                    "embeddings: no API backend — loading local model %s "
+                    "(first call may take a while) ...", name,
+                )
+                _LOCAL_MODEL = SentenceTransformer(name)
+    vecs = _LOCAL_MODEL.encode(
+        texts, convert_to_numpy=True, show_progress_bar=False,
+        normalize_embeddings=True,
+    )
+    return [v.tolist() for v in vecs]
+
+
+def _local_fallback_vectors(texts: list[str]) -> list[Optional[list[float]]]:
+    """Local vectors for the given texts, or all-None if the fallback is
+    disabled / the model fails to load. Never raises."""
+    if not _local_fallback_enabled() or not texts:
+        return [None] * len(texts)
+    try:
+        vectors = _local_embed(texts)
+        try:
+            from app.config import settings
+
+            model = f"local:{getattr(settings, 'EMBEDDING_LOCAL_MODEL', 'bge-m3')}"
+        except Exception:  # noqa: BLE001
+            model = "local:bge-m3"
+        out: list[Optional[list[float]]] = []
+        for text, vec in zip(texts, vectors):
+            out.append(vec)
+            _cache_set(f"local:{_hash_text(text)}", vec)
+        logger.info(
+            "embeddings: local fallback produced %d vectors (%s)",
+            len(vectors), model,
+        )
+        return out
+    except Exception as exc:  # noqa: BLE001 — degrade to lexical scoring
+        logger.warning("embeddings: local fallback failed: %s", exc)
+        return [None] * len(texts)
+
+
 def get_embedding(
     text: str,
     *,
@@ -152,8 +229,13 @@ def get_embedding(
     api_key = api_key or os.environ.get("EMBEDDING_API_KEY") or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 
     if not api_key:
-        logger.debug("embeddings: no API key; skipping")
-        return None
+        # No API backend configured — use the local model (flag-gated).
+        logger.debug("embeddings: no API key; local fallback")
+        vecs = _local_fallback_vectors([text])
+        return EmbeddingResult(
+            text=text, vector=vecs[0] or [], model="local",
+            cached=False, duration_ms=0.0,
+        ) if vecs[0] else None
 
     cache_key = f"{model}:{_hash_text(text)}"
     if use_cache:
@@ -164,11 +246,28 @@ def get_embedding(
             )
 
     started = time.time()
+    global _API_FAIL_UNTIL
+    if time.time() < _API_FAIL_UNTIL:
+        # Circuit breaker open: the API just failed — skip the doomed call.
+        vecs = _local_fallback_vectors([text])
+        return EmbeddingResult(
+            text=text, vector=vecs[0] or [], model="local",
+            cached=False, duration_ms=0.0,
+        ) if vecs[0] else None
     try:
         vectors = _post_embeddings([text], model=model, api_base=api_base, api_key=api_key)
     except Exception as exc:
-        logger.warning("embeddings: API call failed (%s); lexical fallback", exc)
-        return None
+        # Circuit breaker: a persistently broken API must not add its failure
+        # latency to every call — go local directly for the cooldown window.
+        _API_FAIL_UNTIL = time.time() + _API_FAIL_COOLDOWN_S
+        logger.warning(
+            "embeddings: API call failed (%s); local fallback", exc,
+        )
+        vecs = _local_fallback_vectors([text])
+        return EmbeddingResult(
+            text=text, vector=vecs[0] or [], model="local",
+            cached=False, duration_ms=0.0,
+        ) if vecs[0] else None
 
     if not vectors or not vectors[0]:
         return None
@@ -194,6 +293,7 @@ def get_embeddings_batch(
     individual failure (including missing API key).  Cache hits short
     circuit the network call per item.
     """
+    global _API_FAIL_UNTIL
     if not texts:
         return []
     out: list[Optional[list[float]]] = [None] * len(texts)
@@ -216,7 +316,12 @@ def get_embeddings_batch(
                 api_key=api_key or os.environ.get("EMBEDDING_API_KEY") or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", ""),
             )
         except Exception as exc:
-            logger.warning("embeddings: batch call failed (%s)", exc)
+            _API_FAIL_UNTIL = time.time() + _API_FAIL_COOLDOWN_S
+            logger.warning("embeddings: batch call failed (%s); local fallback", exc)
+            local = _local_fallback_vectors([t for _, t in chunk])
+            for (orig_idx, _t), vec in zip(chunk, local):
+                if vec:
+                    out[orig_idx] = vec
             continue
         for (orig_idx, text), vec in zip(chunk, vectors):
             if vec:
