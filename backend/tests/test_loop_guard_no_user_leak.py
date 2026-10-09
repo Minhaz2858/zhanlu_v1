@@ -102,10 +102,14 @@ def test_loop_guard_user_facing_text_present():
         block = "\n".join(src.splitlines()[line - 1: line + 40])
         # Look for an assistant_content = "..." (single-line) or
         # assistant_content = ( "..." "..." ) (multi-line parenthesized),
-        # or a `user_facing` variable (used by the v3 stream delta emit).
+        # a `user_facing` variable (used by the v3 stream delta emit), or
+        # the single-source-of-truth helper `_loop_guard_message(agent_name)`
+        # (2026-10-09: the guard blocks delegate the user-facing text to
+        # that helper instead of inline string literals).
         user_facing = re.search(
             r"(?:assistant_content|user_facing)\s*=\s*"
-            r"(?:\"[^\"]+\"|\'[^\']+\'|\(\s*(?:\"[^\"]+\"|\'[^\']+\')[\s\S]*?\))",
+            r"(?:\"[^\"]+\"|\'[^\']+\'|\(\s*(?:\"[^\"]+\"|\'[^\']+\')[\s\S]*?\)"
+            r"|_loop_guard_message\()",
             block,
         )
         assert user_facing, (

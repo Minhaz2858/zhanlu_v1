@@ -287,20 +287,27 @@ class TestSuccessAwareLoopGuard:
     """
 
     def test_successful_calls_trip_at_cap(self):
-        """``memory`` cap is 1 — a single successful call trips the guard."""
+        """``memory`` cap is 3 — three identical successful calls trip,
+        while 1-2 do NOT (2026-10-09 empty-bubble collapse fix: cap=1
+        armed the guard on the FIRST memory call and collapsed turns)."""
         from app.routers.agents import _detect_tool_call_loop
-        messages = [
-            _msg("user", "save a memory"),
-            _msg("assistant", "", tool_calls=[_tc("memory", {"content": "foo"}, call_id="c1")]),
-            _msg("tool", json.dumps({"success": True}), tool_call_id="c1"),
-        ]
+        messages = [_msg("user", "save a memory")]
+        for i in (1, 2):
+            messages.append(_msg("assistant", "", tool_calls=[
+                _tc("memory", {"content": "foo"}, call_id=f"c{i}")]))
+            messages.append(_msg("tool", json.dumps({"success": True}), tool_call_id=f"c{i}"))
+        assert _detect_tool_call_loop(messages) is None, (
+            "1-2 successful memory calls should NOT trip cap=3")
+        messages.append(_msg("assistant", "", tool_calls=[
+            _tc("memory", {"content": "foo"}, call_id="c3")]))
+        messages.append(_msg("tool", json.dumps({"success": True}), tool_call_id="c3"))
         info = _detect_tool_call_loop(messages)
-        assert info is not None, "1 successful memory call should trip cap=1"
+        assert info is not None, "3 successful memory calls should trip cap=3"
         assert info[0] == "memory"
 
     def test_failed_calls_do_not_trip_at_cap(self):
-        """``memory`` cap is 1, but a single *failed* call should NOT trip
-        the guard — the LLM gets one extra chance to reformulate args."""
+        """``memory`` cap is 3, but failed calls get one extra chance —
+        a single *failed* call should NOT trip the guard."""
         from app.routers.agents import _detect_tool_call_loop
         messages = [
             _msg("user", "save a memory"),
@@ -309,37 +316,35 @@ class TestSuccessAwareLoopGuard:
         ]
         info = _detect_tool_call_loop(messages)
         assert info is None, (
-            "1 failed memory call should NOT trip — failure cap is cap+1=2, "
-            "giving the LLM one extra chance to reformulate."
+            "1 failed memory call should NOT trip — failure cap is cap+1=4, "
+            "giving the LLM extra chances to reformulate."
         )
 
     def test_failed_calls_trip_at_cap_plus_one(self):
-        """``memory`` cap is 1 — 2 failed calls trip the guard (cap+1=2)."""
+        """``memory`` cap is 3 — 4 failed calls trip the guard (cap+1=4)."""
         from app.routers.agents import _detect_tool_call_loop
-        messages = [
-            _msg("user", "save a memory"),
-            _msg("assistant", "", tool_calls=[_tc("memory", {"content": "foo"}, call_id="c1")]),
-            _msg("tool", json.dumps({"success": False, "error": "db locked"}), tool_call_id="c1"),
-            _msg("assistant", "", tool_calls=[_tc("memory", {"content": "foo"}, call_id="c2")]),
-            _msg("tool", json.dumps({"success": False, "error": "db locked"}), tool_call_id="c2"),
-        ]
+        messages = [_msg("user", "save a memory")]
+        for i in (1, 2, 3, 4):
+            messages.append(_msg("assistant", "", tool_calls=[
+                _tc("memory", {"content": "foo"}, call_id=f"c{i}")]))
+            messages.append(_msg("tool", json.dumps({"success": False, "error": "db locked"}), tool_call_id=f"c{i}"))
         info = _detect_tool_call_loop(messages)
-        assert info is not None, "2 failed memory calls should trip (cap+1=2)"
+        assert info is not None, "4 failed memory calls should trip (cap+1=4)"
         assert info[0] == "memory"
-        assert info[1] >= 2
+        assert info[1] >= 4
 
     def test_requires_approval_counts_as_success(self):
         """``requires_approval`` is a pending user action, not a failure.
-        It should count toward the success cap (trip at cap=1 for memory)."""
+        It should count toward the success cap (trip at cap=3 for memory)."""
         from app.routers.agents import _detect_tool_call_loop
-        messages = [
-            _msg("user", "save a memory"),
-            _msg("assistant", "", tool_calls=[_tc("memory", {"content": "foo"}, call_id="c1")]),
-            _msg("tool", json.dumps({"success": False, "requires_approval": True}), tool_call_id="c1"),
-        ]
+        messages = [_msg("user", "save a memory")]
+        for i in (1, 2, 3):
+            messages.append(_msg("assistant", "", tool_calls=[
+                _tc("memory", {"content": "foo"}, call_id=f"c{i}")]))
+            messages.append(_msg("tool", json.dumps({"success": False, "requires_approval": True}), tool_call_id=f"c{i}"))
         info = _detect_tool_call_loop(messages)
         assert info is not None, (
-            "requires_approval should count as success → trips at cap=1"
+            "requires_approval should count as success → trips at cap=3"
         )
 
     def test_default_tool_success_trips_at_6(self):
@@ -385,14 +390,14 @@ class TestSuccessAwareLoopGuard:
         assert info[0] == "skills"
 
     def test_mixed_success_failure_trips_on_success(self):
-        """If a tool succeeds once (cap=1 for memory), then fails, the guard
-        should have already tripped on the successful call."""
+        """Successes count toward the success cap: 3 successful identical
+        memory calls trip regardless of interleaved failures."""
         from app.routers.agents import _detect_tool_call_loop
-        messages = [
-            _msg("user", "save memory"),
-            _msg("assistant", "", tool_calls=[_tc("memory", {"content": "foo"}, call_id="c1")]),
-            _msg("tool", json.dumps({"success": True}), tool_call_id="c1"),
-        ]
+        messages = [_msg("user", "save memory")]
+        for i, ok in enumerate([True, False, True, True], start=1):
+            messages.append(_msg("assistant", "", tool_calls=[
+                _tc("memory", {"content": "foo"}, call_id=f"c{i}")]))
+            messages.append(_msg("tool", json.dumps({"success": ok}), tool_call_id=f"c{i}"))
         info = _detect_tool_call_loop(messages)
         assert info is not None
         assert info[0] == "memory"
@@ -402,15 +407,15 @@ class TestSuccessAwareLoopGuard:
         (call still in progress), default to treating it as a success —
         conservative behavior that doesn't prematurely trip the guard."""
         from app.routers.agents import _detect_tool_call_loop
-        messages = [
-            _msg("user", "save memory"),
-            _msg("assistant", "", tool_calls=[_tc("memory", {"content": "foo"}, call_id="c1")]),
-            # No tool result message — call is still in progress
-        ]
+        messages = [_msg("user", "save memory")]
+        for i in (1, 2, 3):
+            messages.append(_msg("assistant", "", tool_calls=[
+                _tc("memory", {"content": "foo"}, call_id=f"c{i}")]))
+            # No tool result messages — calls still in progress
         info = _detect_tool_call_loop(messages)
-        # memory cap is 1 — in-progress call defaults to success → trips
+        # memory cap is 3 — in-progress calls default to success → trip
         assert info is not None, (
-            "In-progress call defaults to success → trips at cap=1 for memory"
+            "In-progress calls default to success → trip at cap=3 for memory"
         )
 
     def test_different_args_success_no_trip(self):

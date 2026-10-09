@@ -3373,13 +3373,19 @@ def _harvest_text_answer(result: dict) -> str | None:
     return None
 
 
-# Per-tool overrides for the loop guard. ``memory`` is idempotent-write —
-# one identical call is already a loop. ``ask_data_agent`` is capped per turn
+# Per-tool overrides for the loop guard. ``ask_data_agent`` is capped per turn
 # by name. For report creation, repeated serial data-agent calls are the
 # dominant latency source; one comprehensive query should gather the full
 # dataset, and a second call is the hard stop.
 TOOL_CALL_CAPS: dict[str, int] = {
-    "memory": 1,
+    # 2026-10-09 FIX (empty-bubble collapse): memory was capped at 1, and the
+    # guard trips at ``succ >= cap`` — so the FIRST memory call armed the
+    # guard, the "tool-free synthesis pass" still exposed tools, weak models
+    # re-called memory, the loop broke empty and the user got the generic
+    # "had trouble putting it all together" fallback (conv 2e34ab0f).
+    # cap=3 tolerates legitimate save+update flows; the genuinely tool-free
+    # synthesis pass (see _loop_guard_tool_free) handles the rest.
+    "memory": 3,
     "ask_data_agent": 6,
     "fetch_data_batch": 3,  # direct SQL fast path; each call can have up to 8 queries
     # Defense-in-depth against the interrupt leak: if an agent re-enables the
@@ -7057,6 +7063,8 @@ async def add_message(
         # trips, then True so the guard grants exactly ONE tool-free answer
         # pass and only stops if the model repeats anyway.
         _loop_guard_synthesis_used = False
+        # Loop-guard granted pass → genuinely tool-free (see v3 _loop_guard_tool_free).
+        _loop_guard_tool_free = False
         # Phase 1c: put this chat turn on the harness run spine. One AgentRun
         # per turn + one AgentRunStep per model call / tool call, written by the
         # existing CheckpointSink. Fail-open: recording never changes the turn,
@@ -7114,6 +7122,7 @@ async def add_message(
                 # answer — a data question split across several
                 # ask_data_agent calls is normal, not a runaway loop.
                 _loop_guard_synthesis_used = True
+                _loop_guard_tool_free = True
                 logger.warning(
                     "Tool-call loop guard tripped in conversation %s: "
                     "tool=%r count=%d (cap=%d). Granting one tool-free "
@@ -7238,7 +7247,8 @@ async def add_message(
                 prune_tool_results_only(llm_messages, model=get_model())
                 sanitize_messages(llm_messages)
                 llm_response = await _call_llm_with_tools(
-                    llm_messages, tools, tool_choice=tool_choice,
+                    llm_messages, [] if _loop_guard_tool_free else tools,
+                    tool_choice="none" if _loop_guard_tool_free else tool_choice,
                     endpoint=_eff_llm_v2.endpoint,
                     temperature=llm_overrides.get("temperature"),
                     max_tokens=llm_overrides.get("max_tokens"),
@@ -8800,6 +8810,9 @@ async def resume_conversation(
     _wrapup_nudged = False
     # See _loop_guard_message: one tool-free answer pass before the guard stops.
     _loop_guard_synthesis_used = False
+    # G1-fix: make that pass genuinely tool-free (weak models re-called the
+    # capped tool and the turn collapsed to the empty fallback).
+    _loop_guard_tool_free = False
     # ── Dynamic per-turn budget (schema-aware soft cap) ────────────
     # Resumes are user-approval-driven (never unattended automation), so
     # the automation heuristic stays off here. MAX_TOOL_ITERATIONS remains
@@ -8849,6 +8862,7 @@ async def resume_conversation(
             # First trip: grant one tool-free pass so the gathered results
             # become the answer instead of being discarded.
             _loop_guard_synthesis_used = True
+            _loop_guard_tool_free = True
             logger.warning(
                 "Tool-call loop guard tripped in resumed conversation %s: "
                 "tool=%r count=%d (cap=%d). Granting one tool-free synthesis "
@@ -8915,7 +8929,8 @@ async def resume_conversation(
             prune_tool_results_only(llm_messages, model=get_model())
             sanitize_messages(llm_messages)
             llm_response = await _call_llm_with_tools(
-                llm_messages, tools, tool_choice=tool_choice,
+                llm_messages, [] if _loop_guard_tool_free else tools,
+                tool_choice="none" if _loop_guard_tool_free else tool_choice,
                 temperature=llm_overrides.get("temperature"),
                 max_tokens=llm_overrides.get("max_tokens"),
             )
@@ -13397,7 +13412,12 @@ async def add_message_stream(
         _wrapup_nudged = False
         # See _loop_guard_message: one tool-free answer pass before stopping.
         _loop_guard_synthesis_used = False
-        # ── Dynamic per-turn budget (schema-aware soft cap) ───────────
+        # G1-fix: when the loop guard grants its one synthesis pass, the NEXT
+        # LLM call is made genuinely tool-free (tools=[], tool_choice="none")
+        # — previously the pass only appended a nudge, weak models re-called
+        # the capped tool, the loop broke empty and the turn collapsed to the
+        # generic fallback.
+        _loop_guard_tool_free = False
         # db-bound agents get a dynamic iteration budget that scales with
         # schema-graph join complexity (see calculate_agent_budget in
         # agent_prompts). MAX_TOOL_ITERATIONS stays the absolute hard cap;
@@ -13957,6 +13977,10 @@ async def add_message_stream(
                 # away (a data question decomposed into several ask_data_agent
                 # calls is normal, not a runaway loop).
                 _loop_guard_synthesis_used = True
+                # Make the granted pass genuinely tool-free (see the flag's
+                # comment at init): the model must answer from the results
+                # it already has — it cannot re-call the capped tool.
+                _loop_guard_tool_free = True
                 logger.warning(
                     "Tool-call loop guard tripped in conversation %s: "
                     "tool=%r count=%d (cap=%d). Granting one tool-free "
@@ -14219,10 +14243,14 @@ async def add_message_stream(
                     # raise into the outer handler as before.
                     _it_finish_reason = None
                     _stream_attempt = 1
+                    # Loop-guard granted pass: answer from gathered results,
+                    # with NO tools available (see _loop_guard_tool_free).
+                    _iter_tools = [] if _loop_guard_tool_free else tools
+                    _iter_choice = "none" if _loop_guard_tool_free else tool_choice
                     while True:
                         try:
                             async for ev_type, ev_data in _stream_llm_with_tools(
-                                llm_messages, tools, tool_choice=tool_choice,
+                                llm_messages, _iter_tools, tool_choice=_iter_choice,
                                 model_override=user_model,
                                 endpoint=effective_llm.endpoint,
                                 temperature=llm_overrides.get("temperature"),
@@ -14445,7 +14473,8 @@ async def add_message_stream(
                 else:
                     # ── Legacy buffered path ──────────────────────────
                     llm_response = await _call_llm_with_tools(
-                        llm_messages, tools, tool_choice=tool_choice,
+                        llm_messages, [] if _loop_guard_tool_free else tools,
+                        tool_choice="none" if _loop_guard_tool_free else tool_choice,
                         model_override=user_model,
                         endpoint=effective_llm.endpoint,
                         temperature=llm_overrides.get("temperature"),
