@@ -18944,6 +18944,26 @@ async def add_message_stream(
                 if _dash_ok:
                     accumulated_content = _dash_ok
             if not (accumulated_content or "").strip():
+                # 2026-10-09 root-fix (empty-bubble collapse): before the
+                # generic fallback, prefer (a) the best content the turn
+                # actually produced, and (b) an honest reason when the loop
+                # guard cut the turn short — never claim "try a more
+                # specific request" when the real cause was a guard trip.
+                _recovered = ""
+                try:
+                    _recovered = (_v3_recovered_best[0] or "").strip()
+                except Exception:  # noqa: BLE001
+                    _recovered = ""
+                if _recovered:
+                    accumulated_content = _recovered
+                elif _loop_guard_synthesis_used:
+                    accumulated_content = (
+                        "I stopped partway through this turn to avoid "
+                        "repeating the same step, and hadn't gathered enough "
+                        "to answer yet. Could you rephrase or narrow the "
+                        "request?"
+                    )
+            if not (accumulated_content or "").strip():
                 try:
                     accumulated_content = _choose_fallback(
                         tool_calls_for_frontend, _orch_created,

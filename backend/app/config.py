@@ -1543,6 +1543,10 @@ class Settings(BaseSettings):
     # Sent as X-Agent-Id + User-Agent on every A2A/ACP/MCP outbound call so
     # remote parties can trace which platform agent contacted them.
     A2A_SELF_AGENT_ID: str = "zhanlu-platform"
+    # ── Turn-health monitor (2026-10-09, empty-bubble root-fix layer 3) ──
+    # Scheduled DB scan for generic-fallback / apology assistant turns;
+    # CRITICAL log when the ratio breaches the threshold.
+    TURN_HEALTH_MONITOR_ENABLED: bool = True
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

@@ -249,6 +249,25 @@ async def _run_procedural_promotion_cycle() -> None:
         logger.exception("[procedural_promotion] Cycle failed")
 
 
+# ---- Turn Health Monitor (empty-bubble root-fix, layer 3) ------------------
+
+TURN_HEALTH_MONITOR_INTERVAL = 6 * 3600  # every 6 hours
+
+
+async def _run_turn_health_monitor_cycle() -> None:
+    """Scan recent assistant turns for fallback-collapse symptoms."""
+    from app.config import settings
+
+    if not getattr(settings, "TURN_HEALTH_MONITOR_ENABLED", True):
+        return
+    try:
+        from app.services.turn_health_monitor import monitor_cycle
+
+        await monitor_cycle()
+    except Exception:
+        logger.exception("[turn_health_monitor] Cycle failed")
+
+
 # ---- Nightly Forecast (2 AM UTC daily, NOT a UI-visible AutomationTask) -------
 
 def _calculate_seconds_until_2am() -> float:
@@ -775,6 +794,10 @@ def start_scheduled_tasks() -> None:
         loop.create_task(
             _periodic_task("procedural_promotion", PROCEDURAL_PROMOTION_INTERVAL, _run_procedural_promotion_cycle),
             name="sched-procedural-promotion",
+        ),
+        loop.create_task(
+            _periodic_task("turn_health_monitor", TURN_HEALTH_MONITOR_INTERVAL, _run_turn_health_monitor_cycle),
+            name="sched-turn-health-monitor",
         ),
     ]
 
