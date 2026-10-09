@@ -2796,6 +2796,25 @@ export default function Chat() {
     await deleteSession(s);
   }
 
+  // G1 (IBM best practice: interruption): graceful mid-turn cancellation.
+  // The Stop button previously only aborted the SSE fetch — the backend
+  // deliberately kept running the agent loop. Now we first ask the backend
+  // to cancel the in-flight run (loop stops at the next iteration
+  // checkpoint, partial content preserved), then abort the local fetch.
+  async function handleStopStreaming() {
+    try {
+      const s = getSession ? getSession(activeId) : null;
+      const convId = s?.conversation_id;
+      if (convId) {
+        await authFetch(
+          `/api/apps/${appParams.appId}/agents/conversations/${convId}/cancel`,
+          { method: 'POST' },
+        );
+      }
+    } catch { /* the local abort below still happens */ }
+    stream.abort();
+  }
+
   // Stop button handler for automation runs. The "response" the user
   // is watching in the chat surface is actually a background executor
   // spawned by ``runAutomationTask`` — there is no SSE stream to abort
@@ -3256,7 +3275,7 @@ export default function Chat() {
                     list and the "→ steer" pills are no longer needed. */}
                   </div>
                 </div>
-                <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
+                <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={handleStopStreaming} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
               </>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center px-6 pb-12">
@@ -3265,7 +3284,7 @@ export default function Chat() {
                 </div>
                 <h1 className="break-words px-4 text-center font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
                 <div className="mt-8 w-full max-w-4xl">
-                  <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name, id) => setPendingProject(name, id)} centered inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
+                  <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={handleStopStreaming} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name, id) => setPendingProject(name, id)} centered inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
                   {chips.length > 0 && (
                     <RelatedContent
                       chips={chips}

@@ -229,9 +229,22 @@ async def connect_http(
     """Connect to a streamable-HTTP MCP server (2026 spec transport)."""
     stack = AsyncExitStack()
     url = base_url.rstrip("/") + "/mcp" if not base_url.rstrip("/").endswith("/mcp") else base_url.rstrip("/")
+    # Outbound agent identity (IBM best practice #3): identify the calling
+    # platform unless the caller supplied their own.
+    try:
+        from app.config import settings
+
+        _self_id = getattr(settings, "A2A_SELF_AGENT_ID", "zhanlu-platform")
+    except Exception:  # noqa: BLE001
+        _self_id = "zhanlu-platform"
+    merged_headers = {
+        "User-Agent": f"ZhanluAgent/1.0 ({_self_id})",
+        "X-Agent-Id": _self_id,
+        **(headers or {}),
+    }
     try:
         read, write, _get_session_id = await stack.enter_async_context(
-            streamablehttp_client(url, headers=headers or {}, timeout=timeout_s)
+            streamablehttp_client(url, headers=merged_headers, timeout=timeout_s)
         )
         session = await stack.enter_async_context(ClientSession(read, write))
         init = await session.initialize()

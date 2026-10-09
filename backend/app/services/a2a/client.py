@@ -19,7 +19,15 @@ DEFAULT_TIMEOUT_S = 60.0
 
 
 def _headers(token: str | None) -> dict[str, str]:
-    headers = {"Content-Type": "application/json"}
+    """Identity-carrying headers (IBM best practice: unique agent
+    identifiers so remote parties can trace the caller)."""
+    from app.config import settings
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": f"ZhanluAgent/1.0 ({getattr(settings, 'A2A_SELF_AGENT_ID', 'zhanlu-platform')})",
+        "X-Agent-Id": getattr(settings, "A2A_SELF_AGENT_ID", "zhanlu-platform"),
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers

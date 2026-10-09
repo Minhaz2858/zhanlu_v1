@@ -1539,6 +1539,10 @@ class Settings(BaseSettings):
     # deployment).
     REWOO_ENABLED: bool = False
     REWOO_MAX_STEPS: int = 6
+    # ── Outbound agent identity (2026-10-09, IBM best practice #3) ──
+    # Sent as X-Agent-Id + User-Agent on every A2A/ACP/MCP outbound call so
+    # remote parties can trace which platform agent contacted them.
+    A2A_SELF_AGENT_ID: str = "zhanlu-platform"
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

@@ -516,6 +516,52 @@ async def execute_tool(
         if not perm_result.allowed:
             logger.warning("Tool '%s' blocked by permission check: %s", tool_name, perm_result.reason)
             return {"success": False, "error": f"Permission denied: {perm_result.reason}"}
+        # G3: agent-level risk-tier policy — the AgentApp catalog's
+        # policy_profile tightens gating for high/critical-tier agents and
+        # enforces the per-agent tool rate limit. System meta-agents keep
+        # their orchestrator bypass below. Fail-open (advisory on errors).
+        try:
+            from app.services.governance.agent_tier import (
+                check_agent_rate_limit,
+                escalation_applies,
+                resolve_agent_tier_policy,
+            )
+
+            _tier, _rate = resolve_agent_tier_policy(db, context)
+            if _rate:
+                _agent_key = str(
+                    (context or {}).get("agent_app_id")
+                    or (context or {}).get("agent_name")
+                    or tool_name
+                )
+                _allowed, _retry = check_agent_rate_limit(_agent_key, _rate)
+                if not _allowed:
+                    logger.warning(
+                        "Agent rate limit hit for %s (%d/min), tool '%s' denied",
+                        _agent_key, _rate, tool_name,
+                    )
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Agent tool rate limit exceeded ({_rate}/min); "
+                            f"retry in {_retry:.0f}s"
+                        ),
+                    }
+            if (
+                escalation_applies(_tier)
+                and agent_name not in SYSTEM_META_AGENTS
+                and not perm_result.requires_confirmation
+            ):
+                from app.services.permissions import resolve_risk as _rr
+
+                if _rr(tool_name, arguments).level in ("write", "destructive"):
+                    perm_result.requires_confirmation = True
+                    logger.info(
+                        "Tier policy: agent tier '%s' forces confirmation for '%s'",
+                        _tier, tool_name,
+                    )
+        except Exception as _tier_err:  # noqa: BLE001 — never break tools
+            logger.debug("tier policy skipped: %s", _tier_err)
         # Plan mode (Phase 1d) sits AFTER the authorization deny — a hard deny
         # always wins — and BEFORE the approval gate, because there is no point
         # asking the user to approve a call that will not run. Reads proceed;

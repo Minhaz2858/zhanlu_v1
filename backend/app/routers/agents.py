@@ -10937,6 +10937,39 @@ async def steer_conversation(
     return {"ok": True, "queued": True}
 
 
+@router.post("/apps/{app_id}/agents/conversations/{conversation_id}/cancel")
+async def cancel_conversation_turn(
+    app_id: str,
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Graceful mid-turn cancellation (IBM best practice: interruption).
+
+    Asks the in-flight agent loop on this conversation to stop at the next
+    iteration checkpoint. Partial content is preserved and finalized by
+    the normal post-loop path; the done event carries
+    ``"status": "cancelled"``. Returns immediately.
+    """
+    try:
+        conv = db.query(AgentConversation).filter(
+            AgentConversation.id == conversation_id,
+        ).first()
+        if conv is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        if conv.created_by_id != user.id and user.role != "admin":
+            raise HTTPException(status_code=403, detail="Not authorized to access this conversation")
+    except HTTPException:
+        raise
+    except Exception as _cancel_lookup_err:  # noqa: BLE001 — best-effort
+        logger.warning("cancel: conversation lookup failed (non-fatal): %s", _cancel_lookup_err)
+
+    from app.services.run_control import request_cancel
+
+    result = request_cancel(conversation_id)
+    return result
+
+
 def _chunk_stream_text(text: str, size: int = 180) -> list:
     """Split text into ~``size``-char SSE chunks, preferring newline breaks."""
     if not text:
@@ -13560,6 +13593,16 @@ async def add_message_stream(
         # nonlocal (same pattern as _stream_compaction_attempted).
         _v3_recovered_best = [None]  # type: ignore[var-annotated]
         accumulated_content: str = ""  # post-loop computed; safe default for early-exit paths
+        # G1: mid-turn cancellation — register this run so the /cancel
+        # endpoint can flag it; the loop checks at every iteration top.
+        try:
+            from app.services import run_control as _run_control
+
+            _run_control.register_run(str(conversation_id))
+        except Exception as _rc_err:  # noqa: BLE001 — never break the stream
+            logger.debug("run_control: register failed: %s", _rc_err)
+            _run_control = None
+        _v3_cancelled = False
         # D1/D2 (2026-08-20): once a gate nudges a re-synthesis, every
         # subsequent streamed delta must REPLACE the bubble (content_replace
         # SSE) instead of appending — otherwise the nudge-reply prose leaks
@@ -13683,6 +13726,18 @@ async def add_message_stream(
             )
         )
         for iteration in range(_v3_max_iterations):
+            # ── G1: user-requested mid-turn cancellation ─────────────────
+            # Checked at every iteration top (and it also gates the
+            # expensive post-loop synthesis below). Partial content is
+            # preserved and finalized by the normal post-loop path.
+            if _run_control is not None and _run_control.is_cancelled(str(conversation_id)):
+                _v3_cancelled = True
+                logger.warning(
+                    "v3 stream: user cancellation honored on conv %s (iter=%d) — "
+                    "stopping loop, preserving partial content",
+                    conversation_id, iteration,
+                )
+                break
             # ── ONE shared refinement budget (2026-09-20) ────────────────
             # _nudge_replacement_pending means a gate discarded the previous
             # answer and asked for a full regeneration — so THIS iteration is a
@@ -17814,6 +17869,26 @@ async def add_message_stream(
                 _marker_outer_err,
             )
 
+        # ── G1: post-loop cancellation materialization ───────────────────
+        # The run is no longer cancellable (it already stopped). If the
+        # user cancelled before any answer text existed, materialize the
+        # best partial content (or a short notice) so the expensive
+        # post-loop LLM fallbacks self-skip and the bubble is not empty.
+        try:
+            if _run_control is not None:
+                _run_control.unregister_run(str(conversation_id))
+        except Exception:  # noqa: BLE001
+            pass
+        if _v3_cancelled and not (assistant_content or "").strip():
+            _restored = _v3_recovered_best[0] or ""
+            assistant_content = (
+                (_restored + "\n\n") if _restored else ""
+            ) + "_Stopped by user — partial answer preserved._"
+            logger.info(
+                "v3 stream: cancelled turn finalized (conv=%s, %d chars)",
+                conversation_id, len(assistant_content),
+            )
+
         # Emit the final assistant content as a delta — but ONLY if it
         # was not already streamed token-by-token above (STREAM_TOKEN_DELTAS
         # path). Re-emitting would duplicate the text in the UI. The
@@ -19330,7 +19405,10 @@ async def add_message_stream(
                 )
             except Exception as _inv_err:  # noqa: BLE001 — non-fatal
                 logger.warning("v3 stream: invocation record failed (non-fatal): %s", _inv_err)
-            yield f'data: {json.dumps({"type": "done", "content": _done_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
+            _done_payload = {"type": "done", "content": _done_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()}
+            if _v3_cancelled:
+                _done_payload["status"] = "cancelled"
+            yield f'data: {json.dumps(_done_payload)}\n\n'
         except (GeneratorExit, StopIteration):
             raise
         except Exception as _done_err:
