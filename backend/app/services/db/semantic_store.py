@@ -276,6 +276,10 @@ class SemanticStore:
         self.agent_id = agent_id
         self._relations: list[SemanticRelation] | None = None
         self._workload: dict[str, WorkloadSignal] | None = None
+        # P0-1 (OCI offline-enrichment parity): mined table_pair (frequent
+        # joins) + table_filter (common predicates) from the workload miner —
+        # collected since its introduction but never consumed until now.
+        self._mined: dict[str, dict] | None = None
 
     # -- schema info -------------------------------------------------------
     def relations(self, force: bool = False) -> list[SemanticRelation]:
@@ -790,6 +794,123 @@ class SemanticStore:
 
     def _workload_enabled(self) -> bool:
         return bool(getattr(_settings(), "SEMANTIC_STORE_WORKLOAD_ENABLED", True))
+
+    # -- mined workload stats (P0-1: table_pair / table_filter) -------------
+    def _load_mined(self) -> dict:
+        """Load the workload miner's table_pair / table_filter stats,
+        kb-scoped and cached. ``{"pairs": {...}, "filters": {...}}``."""
+        if self._mined is not None:
+            return self._mined
+        out: dict[str, dict] = {"pairs": {}, "filters": {}}
+        try:
+            from app.models.query_workload_stat import QueryWorkloadStat
+
+            rows = (
+                self.db.query(QueryWorkloadStat)
+                .filter(
+                    QueryWorkloadStat.kb_id.in_(list(self.kb_ids)),
+                    QueryWorkloadStat.stat_kind.in_(["table_pair", "table_filter"]),
+                    QueryWorkloadStat.occurrences > 0,
+                )
+                .order_by(QueryWorkloadStat.occurrences.desc())
+                .limit(2000)
+                .all()
+            )
+            for r in rows:
+                occ = int(r.occurrences or 0)
+                if r.stat_kind == "table_pair":
+                    key = tuple(sorted((r.table_name or "", r.peer or "")))
+                    if not all(key):
+                        continue
+                    out["pairs"][key] = out["pairs"].get(key, 0) + occ
+                elif r.stat_kind == "table_filter":
+                    table = (r.table_name or "").lower()
+                    if not table:
+                        continue
+                    detail = r.detail if isinstance(r.detail, dict) else {}
+                    filt = str(detail.get("filter") or "").strip()
+                    if not filt:
+                        continue
+                    bucket = out["filters"].setdefault(table, {})
+                    bucket[filt] = bucket.get(filt, 0) + occ
+        except Exception as e:  # pragma: no cover — hints are best-effort
+            logger.debug("semantic_store: mined stats unavailable: %s", e)
+        self._mined = out
+        return out
+
+    def join_hints(self, *, min_occurrences: int = 2, k: int = 10) -> list[dict]:
+        """Workload-validated join paths (table pairs analysts actually
+        joined), most frequent first. These are LEARNED_FROM_WORKLOAD hints —
+        ranking evidence for linking, never a promise of a real FK."""
+        pairs = self._load_mined()["pairs"]
+        ranked = sorted(
+            ((a, b, n) for (a, b), n in pairs.items() if n >= min_occurrences),
+            key=lambda t: -t[2],
+        )[:k]
+        return [
+            {"table_a": a, "table_b": b, "occurrences": n, "tier": TIER_LEARNED}
+            for a, b, n in ranked
+        ]
+
+    def common_filters(self, tables: list[str], *, k: int = 6) -> list[dict]:
+        """Most frequent mined predicates for the given candidate tables —
+        how analysts actually filter them (column = literal value)."""
+        filters = self._load_mined()["filters"]
+        wanted = {t.lower() for t in (tables or []) if t}
+        flat: list[tuple[str, str, int]] = []
+        for table, bucket in filters.items():
+            if table not in wanted:
+                continue
+            for filt, occ in bucket.items():
+                flat.append((table, filt, occ))
+        flat.sort(key=lambda t: -t[2])
+        return [
+            {"table": t, "filter": f, "occurrences": n, "tier": TIER_LEARNED}
+            for t, f, n in flat[:k]
+        ]
+
+    def workload_hints_for_tables(self, tables: list[str]) -> str:
+        """Compact prompt block: workload-validated join paths + common
+        filters for the selected tables. Empty string when nothing mined —
+        the prompt must stay clean for fresh warehouses."""
+        try:
+            from app.config import settings as _s
+
+            if not getattr(_s(), "NL2SQL_WORKLOAD_HINTS_ENABLED", True):
+                return ""
+        except Exception:  # noqa: BLE001
+            pass
+        if not self.kb_ids or not tables:
+            return ""
+        joins = self.join_hints(min_occurrences=2, k=5)
+        sel = {t.lower() for t in tables if t}
+        joins = [
+            j for j in joins
+            if j["table_a"] in sel and j["table_b"] in sel
+        ]
+        filters = self.common_filters(tables, k=6)
+        parts: list[str] = []
+        if joins:
+            joined = "; ".join(
+                f"{j['table_a']} ⋈ {j['table_b']} ({j['occurrences']}×)"
+                for j in joins
+            )
+            parts.append(
+                "Workload-validated join paths (tables analysts actually "
+                f"joined here): {joined}."
+            )
+        if filters:
+            filt = "; ".join(f"{f['table']}.{f['filter']} ({f['occurrences']}×)" for f in filters)
+            parts.append(
+                "Common filters analysts apply (reuse the convention when it "
+                f"fits the question): {filt}."
+            )
+        if not parts:
+            return ""
+        return (
+            "[WORKLOAD HINTS — learned from successful past queries; "
+            "verify columns exist before using them]\n" + "\n".join(parts)
+        )
 
     # -- retrieval ---------------------------------------------------------
     def rank_relations(

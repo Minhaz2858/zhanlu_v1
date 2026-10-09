@@ -982,8 +982,11 @@ def create_app() -> FastAPI:
 
     # Project Data Map: catalog browser, overlays, entities, resource registry
     from app.routers.project_catalog import register_project_catalog_router
+    from app.routers.terminologies import register_terminologies_router
 
     app.include_router(register_project_catalog_router())
+    # P1-3 VERIFIED glossary authoring (paths are /api/datasources/...)
+    app.include_router(register_terminologies_router(), prefix="/api")
 
     app.include_router(functions_router, prefix="/api")
     app.include_router(integrations_router, prefix="/api")

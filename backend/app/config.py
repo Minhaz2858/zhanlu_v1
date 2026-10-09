@@ -1572,11 +1572,29 @@ class Settings(BaseSettings):
     # NL2SQL_CHART_SUGGESTION_ENABLED: attach a deterministic chart-type
     #   suggestion inferred from result shape to the answer payload. See
     #   services/db/chart_suggestor.py.
-    NL2SQL_PLANNER_ENABLED: bool = False
-    NL2SQL_CLARIFY_ON_UNCERTAIN_ENABLED: bool = False
-    NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED: bool = False
+    # 2026-10-09: activated (was False) — the article's "Agent Planning"
+    # stage: one bounded LLM call, fail-soft to byte-identical legacy
+    # behavior, grounded in the semantic store's VERIFIED vocabulary only.
+    # Required for the clarify gate and multi-turn state below to function.
+    NL2SQL_PLANNER_ENABLED: bool = True
+    # 2026-10-09: activated (was False). The planner's structured
+    # clarification (metric/time/slice options) is consumed at both call
+    # sites (nl_answer_service + delegation_tools) and relayed to the user
+    # by the calling agent — the OCI multi-turn clarify behavior.
+    NL2SQL_CLARIFY_ON_UNCERTAIN_ENABLED: bool = True
+    # P0-1: mined workload hints (join paths + common filters) injected into
+    # the SQL prompt; empty for fresh warehouses (nothing mined yet).
+    NL2SQL_WORKLOAD_HINTS_ENABLED: bool = True
+    # P2-5: EXPLAIN-based scan-size assessment + rewrite-outcome history.
+    # Read-only toward the datasource; enable per deployment once EXPLAIN
+    # permissions on the warehouse are confirmed.
+    NL2SQL_EXPLAIN_FEEDBACK_ENABLED: bool = False
+    # 2026-10-09: activated (was False) — deduped + capped per datasource,
+    # never overwrites authored rows, only promotes contract-passing runs.
+    NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED: bool = True
     NL2SQL_EXAMPLE_AUTO_PROMOTION_MAX: int = 100
-    NL2SQL_CHART_SUGGESTION_ENABLED: bool = False
+    # 2026-10-09: activated (was False) — deterministic, additive payload key.
+    NL2SQL_CHART_SUGGESTION_ENABLED: bool = True
     # NL2SQL_JOIN_PARTNER_GUARANTEE_ENABLED: when the catalog knows a relation
     #   for a selected table but its partner was NOT selected, pull the best
     #   partner into the selection before the DDL slice is built. Kills the

@@ -21,7 +21,8 @@ class QueryWorkloadStat(TimestampedBase):
     # The knowledge base (data source) the mined statements ran against.
     kb_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     # 'table_pair' (co-joined tables) | 'table_filter' (common WHERE literal
-    # conjunct) | 'popular_table' (statement frequency).
+    # conjunct) | 'popular_table' (statement frequency) | 'rewrite_outcome'
+    # (execution_feedback: rules applied + estimated rows for one rewrite).
     stat_kind: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     # The subject table (one side of a pair; the filtered/popular table).
     table_name: Mapped[str] = mapped_column(String(256), nullable=False)

@@ -63,6 +63,7 @@ from app.models.metric_definition import MetricDefinition
 from app.models.semantic_mapping import SemanticMapping
 from app.models.query_plan_memory import QueryPlanMemory
 from app.models.query_workload_stat import QueryWorkloadStat
+from app.models.terminology import Terminology  # P1-3: register for create_all
 from app.models.nl2sql_turn_state import Nl2sqlTurnState
 from app.models.context_manifest import ContextManifest
 from app.models.experience_entry import ExperienceEntry

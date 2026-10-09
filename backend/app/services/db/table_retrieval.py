@@ -344,6 +344,36 @@ def retrieve_for_question(
     except Exception as e:
         logger.debug("table_retrieval: domain scoping unavailable: %s", e)
 
+    # ── 3b. workload pair-boost (P0-1): when a mined table_pair has one side
+    # already scored as a candidate, boost its partner — analysts actually
+    # join these two tables together, so the partner belongs in the DDL slice
+    # even if the question text never mentions it.
+    if enabled and store_obj is not None:
+        try:
+            _W_PAIR = 0.75
+            scored = {
+                n.lower() for n, s in scores.items() if s >= _W_PLAN
+            }
+            if scored:
+                for hint in store_obj.join_hints(min_occurrences=2, k=25):
+                    a, b = hint["table_a"].lower(), hint["table_b"].lower()
+                    partner = None
+                    if a in scored and b not in scored:
+                        partner = b
+                    elif b in scored and a not in scored:
+                        partner = a
+                    if partner:
+                        _add(
+                            partner,
+                            _W_PAIR,
+                            f"frequently joined with "
+                            f"{a if partner == b else b} (workload "
+                            f"{hint['occurrences']}×)",
+                            "workload-pair",
+                        )
+        except Exception as e:
+            logger.debug("table_retrieval: workload pair-boost unavailable: %s", e)
+
     # ── 4. fused catalog evidence: text / columns / metrics / similarity ────
     if enabled:
         try:

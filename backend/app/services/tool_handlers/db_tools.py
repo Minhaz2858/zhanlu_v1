@@ -935,6 +935,26 @@ async def _execute_query(
         except Exception as exc:
             logger.debug("execute_query: sql rewrite skipped: %s", exc)
 
+    # ── OCI stage 5b: explain-plan feedback (P2-5, flag-gated) ──
+    # Bounded EXPLAIN (Postgres/MySQL only) → estimated rows + rewrite-outcome
+    # history. Read-only toward the datasource; default off until EXPLAIN
+    # permissions on the warehouse are confirmed.
+    try:
+        from app.services.db.execution_feedback import (
+            assess_scan,
+            persist_rewrite_outcome,
+        )
+
+        _fb = assess_scan(db, sql)
+        if _fb is not None or _rewrites_applied:
+            persist_rewrite_outcome(
+                db, kb_id, sql,
+                rules_applied=_rewrites_applied,
+                estimated_rows=(_fb or {}).get("estimated_rows"),
+            )
+    except Exception as _fb_err:
+        logger.debug("execute_query: execution feedback skipped: %s", _fb_err)
+
     # Read-only gate: this KB never accepts write/DDL statements. Runs before
     # the data-access-policy check so the rejection reason is unambiguous.
     from app.services.nl2sql.schema_validator import check_read_only_sql

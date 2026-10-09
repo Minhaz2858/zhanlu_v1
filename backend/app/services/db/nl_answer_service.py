@@ -865,6 +865,34 @@ class NLAnswerService:
             schema_info = _filter_schema_info(schema_info, resolved_policy, kb_id)
             schema_text = _format_schema_for_prompt(schema_info)
 
+        # 1b-wl (P0-1): mined workload hints — validated join paths among the
+        # selected tables + the filters analysts actually apply. Appended to
+        # the schema text so the SQL model reuses proven conventions instead
+        # of inventing joins. Empty for fresh warehouses (nothing mined).
+        try:
+            if getattr(settings, "NL2SQL_WORKLOAD_HINTS_ENABLED", True):
+                from app.services.db.semantic_store import get_semantic_store
+
+                _wl_store = get_semantic_store(
+                    self._db, [kb_id], project_id=project_id,
+                )
+                _wl_tables = [
+                    t.get("table_name")
+                    for t in (schema_info or {}).get("tables") or []
+                    if t.get("table_name")
+                ]
+                if _wl_tables:
+                    _wl_text = _wl_store.workload_hints_for_tables(_wl_tables)
+                    if _wl_text:
+                        schema_text = (schema_text or "") + "\n\n" + _wl_text
+                        logger.info(
+                            "NLAnswer: workload hints injected (%d chars, "
+                            "tables=%d)",
+                            len(_wl_text), len(_wl_tables),
+                        )
+        except Exception as _wl_err:
+            logger.debug("NLAnswer: workload hints skipped: %s", _wl_err)
+
         # 1c. GROUNDED PLAN (P3). One record of what this turn may answer with,
         # assembled from artifacts already computed above (catalog, retrieval,
         # policy, dialect layer, capability profile). This is NOT a second
