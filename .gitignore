@@ -71,3 +71,4 @@ docker-compose.copy.yml
 # QA archive + generated deliverables (artifacts, not source)
 agent_qa/
 outputs/
+backend/data/
