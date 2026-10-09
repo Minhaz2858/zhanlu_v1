@@ -140,6 +140,32 @@ def record_invocation(
         )
         db.add(row)
         db.commit()
+        # RL Phase 0: persist the formalized reward for this trajectory
+        # (bandit policy updates + SFT/GRPO datasets consume these).
+        try:
+            from app.services.rl.rewards import compute_reward
+            from app.models.trajectory_reward import TrajectoryReward
+
+            reward, components = compute_reward(
+                status=status,
+                duration_ms=duration_ms,
+                tool_call_count=tool_call_count,
+            )
+            db.add(TrajectoryReward(
+                invocation_id=row.id,
+                agent_name=invocation_type,
+                route=route,
+                reward=reward,
+                components=components,
+                source="auto",
+            ))
+            db.commit()
+            # RL Phase 1: feed the policy bandit (route arm).
+            from app.services.rl.policy_bandit import record_reward
+
+            record_reward(route or "", reward)
+        except Exception as _rw_err:  # noqa: BLE001 — rewards are never fatal
+            logger.debug("trajectory reward persist failed (non-fatal): %s", _rw_err)
         return row.id
     except Exception as exc:  # noqa: BLE001 — recording must never break the loop
         logger.warning("agent_invocations: failed to record (%s) — non-fatal", exc)

@@ -24,6 +24,7 @@ from app.models.external_agent import ExternalAgent
 from app.models.agent_app_revision import AgentAppRevision
 from app.models.red_team_result import RedTeamResult
 from app.models.swarm_mailbox import SwarmMailboxMessage
+from app.models.trajectory_reward import TrajectoryReward
 from app.models.a2a_task import A2aTask
 from app.models.user_setting import UserSetting
 from app.models.agent_conversation import AgentConversation

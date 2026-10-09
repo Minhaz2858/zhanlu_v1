@@ -26,7 +26,9 @@ ROOT_FILES = ["Makefile", "README.md", "PROJECT.md", "ZHANLU_PROJECT_OVERVIEW.md
 
 EXCLUDE_PARTS = {
     "node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build",
-    ".next", ".mypy_cache", ".pytest_cache", "NL2SQL", "n8n-master",
+    ".next", ".mypy_cache", ".pytest_cache", "vendor", ".ruff_cache",
+    # vendored third-party trees (now under vendor/, kept here for safety)
+    "NL2SQL", "n8n-master",
     "deepseek-harness-master", "superpowers-main", "backups", "data", "uploads",
     "agent_qa", "outputs",
 }

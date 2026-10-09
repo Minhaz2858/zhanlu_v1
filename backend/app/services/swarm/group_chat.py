@@ -126,11 +126,36 @@ async def run_group_chat(
             content=reply[:4000],
             summary=f"round {round_no}: {reply[:80]}",
         )
+        # RL Phase 4 (MARL-lite credit assignment): every speaker's turn is
+        # one recorded trajectory with route="group_chat" — the reward
+        # function scores it (outcome/latency), and the completer's
+        # declaration is captured in the transcript credit field. Full
+        # multi-agent credit assignment stays deferred (research-grade);
+        # this gives the bandit/SFT datasets per-agent group-chat data.
+        try:
+            from app.services.agent_invocations import record_invocation
+
+            record_invocation(
+                db,
+                conversation_id=None,
+                user_id=user_id,
+                invocation_type="group_chat",
+                input_message=task[:2000],
+                status="completed" if result.success else "failed",
+                assistant_content=reply[:10000],
+                error_message=result.error,
+                route="group_chat",
+            )
+        except Exception as _inv_err:  # noqa: BLE001 — non-fatal
+            logger.debug("group_chat: invocation record failed: %s", _inv_err)
+
+        is_completer = COMPLETE_MARKER in reply[:200]
         transcript.append({
             "round": round_no, "speaker": speaker, "reply": reply[:2000],
             "success": result.success,
+            "credit": 2.0 if is_completer else (1.0 if result.success else -1.0),
         })
-        if COMPLETE_MARKER in reply[:200]:
+        if is_completer:
             completed_by = speaker
             logger.info("group_chat: %s declared completion (round %d)",
                         speaker, round_no)

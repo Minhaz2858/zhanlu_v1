@@ -58,3 +58,6 @@ logs/
 
 # dev-copy isolation override (local only)
 docker-compose.copy.yml
+
+# caches / OS junk
+.ruff_cache/

@@ -1504,6 +1504,20 @@ class Settings(BaseSettings):
     #   docs < 800 tokens skipped, ≤6 LLM windows per doc, ≤64 chunks.
     #   OFF by default — enable per deployment; it multiplies ingest cost.
     RAG_AGENTIC_CHUNKING_ENABLED: bool = False
+    # ── RL for agents (2026-10-09, Phases 1-4) ──
+    # RL_BANDIT_ENABLED: ε-greedy bandit over loop-level policy decisions
+    #   (route/model arms), fed by trajectory rewards. Advisory only.
+    RL_BANDIT_ENABLED: bool = True
+    # RL_ART_*: OpenPipe/ART GRPO training (Phase 3). The GPU training
+    # server runs vLLM + LoRA; the backend only needs these to submit
+    # rollouts. Empty = training not configured (the harness raises a
+    # clear RuntimeError instead of failing silently).
+    RL_ART_SERVER_URL: str = ""
+    RL_ART_BASE_MODEL: str = ""          # e.g. Qwen/Qwen3-8B
+    RL_ART_MODEL_NAME: str = "zhanlu-agent"
+    RL_ART_ROLLOUTS_PER_TASK: int = 4
+    RL_ART_MAX_STEPS: int = 20
+    RL_ART_BACKEND: str = ""             # optional serverless backend id
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read
