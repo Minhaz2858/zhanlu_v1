@@ -1518,6 +1518,27 @@ class Settings(BaseSettings):
     RL_ART_ROLLOUTS_PER_TASK: int = 4
     RL_ART_MAX_STEPS: int = 20
     RL_ART_BACKEND: str = ""             # optional serverless backend id
+    # ── Semantic tool-selection (2026-10-09, IBM tool-calling P0-2) ──
+    # When the eligible tool catalog exceeds TOOL_SEARCH_TOP_K schemas,
+    # inject only the top-K most relevant for the user message plus an
+    # essential set + the search_tools meta-tool (discovery escape hatch).
+    TOOL_SEARCH_ENABLED: bool = True
+    TOOL_SEARCH_TOP_K: int = 32
+    # ── Case-based reasoning (2026-10-09, IBM agent-memory P1-3) ──
+    # Successful turns are recorded as episodic task→solution cases and
+    # recalled into the system prompt for similar future tasks.
+    CBR_RECORDING_ENABLED: bool = True
+    CBR_RECALL_ENABLED: bool = True
+    # P1-5: repeated episodic cases are distilled into procedural playbooks
+    # (scheduled every 24h; mirrors loop_postmortem).
+    PROCEDURAL_PROMOTION_ENABLED: bool = True
+    # P1-4: ReWOO light mode for research-shaped sub-agent tasks — one
+    # planner call + deterministic tool execution + one solver call,
+    # instead of an interleaved ReAct round-trip per step. Fail-open to
+    # ReAct on any error. Default False (behavior-changing; enable per
+    # deployment).
+    REWOO_ENABLED: bool = False
+    REWOO_MAX_STEPS: int = 6
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

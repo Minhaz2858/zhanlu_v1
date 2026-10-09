@@ -149,7 +149,10 @@ async def run_group_chat(
         except Exception as _inv_err:  # noqa: BLE001 — non-fatal
             logger.debug("group_chat: invocation record failed: %s", _inv_err)
 
-        is_completer = COMPLETE_MARKER in reply[:200]
+        # Only a SUCCESSFUL turn may declare completion — a failed reply
+        # that happens to contain the marker must not claim the completer
+        # credit (2.0) nor terminate the loop as "completed".
+        is_completer = result.success and COMPLETE_MARKER in reply[:200]
         transcript.append({
             "round": round_no, "speaker": speaker, "reply": reply[:2000],
             "success": result.success,

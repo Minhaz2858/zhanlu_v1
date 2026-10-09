@@ -8,10 +8,12 @@ decisions Zhanlu's loop actually makes every turn:
 - **pull** = a real invocation on that arm
 - **reward** = the trajectory reward from services/rl/rewards.py
 
-Algorithm: ε-greedy with exponential-decay means (recent turns matter more
-than ancient ones) and a persistence bootstrap from ``trajectory_rewards``
-joined ``agent_invocations``. Exploration is capped by epsilon; everything
-is advisory — callers keep their deterministic fallback.
+Algorithm: ε-greedy with running means (capped learning rate
+``1/min(count+1, 20)`` — recent turns matter more than ancient ones) and a
+persistence bootstrap from ``trajectory_rewards`` joined
+``agent_invocations`` (lazy, once per process, on first pull). Exploration
+is capped by epsilon; everything is advisory — callers keep their
+deterministic fallback.
 
 NOT (yet) full RL: no policy gradient, no environment model. This is the
 bandit layer of the article's runtime control loop; GRPO/ART (Phase 3)
@@ -28,7 +30,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DECAY = 0.98          # exponential-decay factor per update
 _DEFAULT_EPSILON = 0.1
 _MIN_PULLS_FOR_EXPLOIT = 5  # fewer pulls than this → treat as unexplored
 
@@ -65,15 +66,14 @@ class EpsilonGreedyBandit:
             return best or arms[0]
 
     def update(self, arm: str, reward: float) -> float:
-        """Incremental mean with exponential decay. Returns the new mean."""
+        """Incremental running mean (learning rate 1/min(count+1, 20)).
+        Returns the new mean."""
         with self._lock:
             count = self._counts.get(arm, 0)
             old = self._values.get(arm, 0.0)
             if count == 0:
                 new = reward
             else:
-                # decayed mean: weight the new sample as 1/(1+decay^count)….
-                # simpler and stable: alpha = 1/min(count+1, 20)
                 alpha = 1.0 / min(count + 1, 20)
                 new = old + alpha * (reward - old)
             self._values[arm] = new
@@ -124,12 +124,43 @@ def get_route_bandit() -> EpsilonGreedyBandit:
         return _route_bandit
 
 
+_bootstrapped = False
+
+
+def _bootstrap_once(bandit: "EpsilonGreedyBandit") -> None:
+    """One-time persistence bootstrap: seed a fresh bandit from saved
+    trajectory rewards so a process restart doesn't wipe policy state."""
+    global _bootstrapped
+    if _bootstrapped or bandit._counts:
+        return
+    _bootstrapped = True
+    try:
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            n = bootstrap_from_rewards(db)
+        finally:
+            db.close()
+        if n:
+            logger.info("policy_bandit: lazy bootstrap loaded %d pulls", n)
+    except Exception as e:  # noqa: BLE001 — bootstrap is best-effort
+        logger.debug("policy_bandit: lazy bootstrap skipped: %s", e)
+
+
 def record_reward(route: str, reward: float) -> None:
     """Record one trajectory reward into the route bandit (called by the
-    reward writer when the invocation has a route)."""
+    reward writer when the invocation has a route). No-op unless
+    ``RL_BANDIT_ENABLED``."""
+    from app.config import settings
+
+    if not getattr(settings, "RL_BANDIT_ENABLED", False):
+        return
     if route:
         try:
-            get_route_bandit().update(route, reward)
+            bandit = get_route_bandit()
+            _bootstrap_once(bandit)
+            bandit.update(route, reward)
         except Exception as e:  # noqa: BLE001
             logger.debug("bandit update failed: %s", e)
 

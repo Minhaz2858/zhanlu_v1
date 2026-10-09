@@ -230,6 +230,25 @@ async def _run_loop_postmortem_cycle() -> None:
         logger.exception("[postmortem] Cycle failed")
 
 
+# ---- Procedural Memory Promotion (IBM agent-memory P1-5) ------------------
+
+PROCEDURAL_PROMOTION_INTERVAL = 24 * 3600  # every 24 hours
+
+
+async def _run_procedural_promotion_cycle() -> None:
+    """Distill repeated episodic cases into procedural playbooks."""
+    from app.config import settings
+
+    if not getattr(settings, "PROCEDURAL_PROMOTION_ENABLED", True):
+        return
+    try:
+        from app.services.procedural_promotion import promotion_cycle
+
+        await promotion_cycle()
+    except Exception:
+        logger.exception("[procedural_promotion] Cycle failed")
+
+
 # ---- Nightly Forecast (2 AM UTC daily, NOT a UI-visible AutomationTask) -------
 
 def _calculate_seconds_until_2am() -> float:
@@ -752,6 +771,10 @@ def start_scheduled_tasks() -> None:
         loop.create_task(
             _periodic_task("loop_postmortem", LOOP_POSTMORTEM_INTERVAL, _run_loop_postmortem_cycle),
             name="sched-loop-postmortem",
+        ),
+        loop.create_task(
+            _periodic_task("procedural_promotion", PROCEDURAL_PROMOTION_INTERVAL, _run_procedural_promotion_cycle),
+            name="sched-procedural-promotion",
         ),
     ]
 

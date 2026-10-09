@@ -360,6 +360,28 @@ async def _run_sub_agent_inner(
     guard_ctrl = ToolLoopGuardController()
     conv_budget = IterationBudget(max_total=max_iterations)
 
+    # P1-4 ReWOO light mode: research-shaped sub-agent tasks run as
+    # plan→execute→solve (2 LLM calls instead of one per tool step).
+    # Fail-open: any failure/invalid plan falls through to ReAct below.
+    try:
+        from app.services.rewoo import rewoo_should_run, run_rewoo
+
+        if rewoo_should_run(agent_name, task, tool_schemas):
+            rewoo_result = await run_rewoo(
+                task, tool_schemas, db=db, user_id=user_id,
+                endpoint=endpoint,
+                max_steps=int(getattr(settings, "REWOO_MAX_STEPS", 6)),
+            )
+            if rewoo_result.get("success"):
+                metrics.record_budget(1, conv_budget.max_total)
+                return rewoo_result
+            logger.info(
+                "rewoo: falling back to ReAct for %r: %s",
+                task[:80], rewoo_result.get("error"),
+            )
+    except Exception as _rewoo_err:  # noqa: BLE001 — never break delegation
+        logger.warning("rewoo: crashed, ReAct fallback: %s", _rewoo_err)
+
     # Run tool-calling loop
     for iteration in range(max_iterations):
         # P0: consume one iteration from the conversation-level budget

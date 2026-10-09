@@ -279,6 +279,90 @@ async def test_group_chat_records_credit_per_speaker(db, monkeypatch):
     assert by_speaker["plan"]["credit"] == 1.0
 
 
+@pytest.mark.asyncio
+async def test_group_chat_failed_completer_gets_no_credit(db):
+    """Regression: a FAILED turn containing [COMPLETE] must not claim the
+    2.0 completer credit nor end the chat as completed."""
+    from app.services.swarm import group_chat as gc
+    from app.services.swarm.team_registry import get_team_registry
+    from app.models.agent_app import AgentApp
+
+    db.add(AgentApp(name="general_assistant", description="d",
+                    prompt_identity="x", status="published",
+                    org_id="default-org", app_id="default-app"))
+    db.commit()
+
+    registry = get_team_registry()
+    team = registry.create_team("rl-fail-completer-team", description="t")
+    replies = {
+        "flaky": "[COMPLETE] Done (but the run actually failed)",
+        "backup": "still working on it",
+    }
+
+    class R:
+        def __init__(self, n):
+            self.final_response = replies[n]
+            self.success = n == "backup"   # flaky FAILS
+            self.error = "boom" if n == "flaky" else None
+
+    class C:
+        async def run_task(self, team_id, agent_name, task,
+                           member_name=None, db=None, user_id=None):
+            return R(agent_name)
+
+    result = await gc.run_group_chat(
+        C(), registry, team.id, "verify things", ["flaky", "backup"],
+        max_rounds=4, speaker_policy="round_robin", db=db, user_id="u1")
+
+    by_speaker = {t["speaker"]: t for t in result["transcript"]}
+    assert by_speaker["flaky"]["credit"] == -1.0
+    assert by_speaker["backup"]["credit"] == 1.0
+    # the failed [COMPLETE] must not terminate the chat as completed
+    assert result["completed"] is False
+
+
+# ── Bandit flag gate + persistence bootstrap ─────────────────────────────
+
+def test_record_reward_gated_by_flag(monkeypatch):
+    from app.config import settings
+    from app.services.rl import policy_bandit as pb
+
+    b = pb.EpsilonGreedyBandit("flag-test")
+    monkeypatch.setattr(pb, "get_route_bandit", lambda: b)
+    monkeypatch.setattr(pb, "_bootstrapped", True)
+    monkeypatch.setattr(settings, "RL_BANDIT_ENABLED", False)
+    pb.record_reward("react", 1.0)
+    assert b._counts.get("react", 0) == 0
+
+    monkeypatch.setattr(settings, "RL_BANDIT_ENABLED", True)
+    pb.record_reward("react", 1.0)
+    assert b._counts.get("react", 0) == 1
+
+
+def test_reward_quality_score_clamped():
+    """A mis-scaled judge (0-100) must not inject an unbounded bonus."""
+    _, c = compute_reward(status="completed", quality_score=80)
+    assert c["quality_bonus"] == 0.5  # clamped to 1.0 × 0.5 weight
+
+
+# ── ART rollout wiring (static) ──────────────────────────────────────────
+
+def test_art_rollout_wired_to_governed_loop():
+    """Regression: _run_rollout must drive the real governed sub-agent loop
+    (the old wiring imported a nonexistent run_single_case and silently
+    rewarded every rollout −1.0)."""
+    import inspect
+
+    from app.services.rl import art_training
+
+    src = inspect.getsource(art_training._run_rollout)
+    assert "_run_sub_agent_inner" in src
+    assert "run_single_case" not in src
+    # evaluate_quality requires task_spec — must be supplied
+    assert "task_spec" in src
+    assert callable(art_training._art_endpoint)
+
+
 # ── Admin RL summary endpoint ───────────────────────────────────────────
 
 def test_rl_summary_endpoint(db):

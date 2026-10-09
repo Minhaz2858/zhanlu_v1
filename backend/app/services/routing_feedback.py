@@ -131,6 +131,39 @@ _CACHE_LOCK = threading.Lock()
 _CACHE_TTL_S = 300.0
 
 
+def _bandit_override() -> dict | None:
+    """Reward-bandit signal (RL Phase 1) when the stats-based threshold is
+    inconclusive. Advisory only; same clamp as the stats path."""
+    from app.config import settings
+
+    if not getattr(settings, "RL_BANDIT_ENABLED", False):
+        return None
+    try:
+        from app.services.rl.policy_bandit import (
+            bandit_backed_routing_decision,
+            get_route_bandit,
+        )
+
+        arms = get_route_bandit().snapshot()["arms"]
+        fsm, react = arms.get("fsm"), arms.get("react")
+        if not fsm or not react:
+            return None
+        delta = bandit_backed_routing_decision(
+            fsm["mean"], fsm["count"], react["mean"], react["count"],
+        )
+        if delta is None:
+            return None
+        suggested = max(_THRESHOLD_FLOOR, min(_THRESHOLD_CEIL, 0.5 + delta))
+        logger.info(
+            "routing_feedback: bandit signal %.2f → FSM threshold %.2f",
+            delta, suggested,
+        )
+        return {"fsm_plan_confidence": suggested}
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        logger.debug("routing_feedback: bandit override failed: %s", exc)
+        return None
+
+
 def get_suggested_overrides(db: Session, *, force: bool = False) -> dict | None:
     """Overrides for the routing ladder, cached 5 minutes.
 
@@ -157,6 +190,10 @@ def get_suggested_overrides(db: Session, *, force: bool = False) -> dict | None:
                 "(stats over window; set ROUTING_FEEDBACK_ENABLED=false to pin)",
                 0.5, suggested,
             )
+        else:
+            # Stats inconclusive → fall back to the reward-bandit signal
+            # (wires bandit_backed_routing_decision into the ladder).
+            overrides = _bandit_override()
         with _CACHE_LOCK:
             _CACHE["overrides"] = overrides
             _CACHE["expires"] = now + _CACHE_TTL_S

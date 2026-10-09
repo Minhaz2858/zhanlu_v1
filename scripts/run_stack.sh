@@ -13,8 +13,8 @@
 #
 # Usage:
 #   scripts/run_stack.sh up        # build sandbox images + start (default)
+#   scripts/run_stack.sh restart   # stop + start (no rebuild — fast)
 #   scripts/run_stack.sh down      # stop (keeps volumes)
-#   scripts/run_stack.sh restart
 #   scripts/run_stack.sh status
 #   scripts/run_stack.sh logs [service]
 #
@@ -36,21 +36,29 @@ wait_for() { # url name
   echo "  $name did NOT come up — check: ${COMPOSE[*]} logs"; return 1
 }
 
+build_sandbox() {
+  echo "== building sandbox images"
+  # Non-fatal: the sandbox-* services are build-only helpers; if the registry is
+  # unreachable but the images already exist, the stack still starts fine.
+  "${COMPOSE[@]}" build sandbox-python sandbox-office sandbox-pptx sandbox-webapp \
+    || echo "  !! sandbox build failed — continuing (images likely already present)"
+}
+
+start_stack() {
+  echo "== starting"
+  "${COMPOSE[@]}" up -d --remove-orphans
+  echo "== waiting for API"
+  wait_for "http://localhost:${API_PORT}/healthz" "API  :${API_PORT}"
+  echo "== waiting for UI"
+  wait_for "http://localhost:${UI_PORT}/" "UI   :${UI_PORT}"
+  echo
+  echo "  UI  http://localhost:${UI_PORT}     API http://localhost:${API_PORT}"
+}
+
 case "${1:-up}" in
-  up)
-    echo "== building sandbox images"
-    "${COMPOSE[@]}" build sandbox-python sandbox-office sandbox-pptx sandbox-webapp
-    echo "== starting"
-    "${COMPOSE[@]}" up -d --remove-orphans
-    echo "== waiting for API"
-    wait_for "http://localhost:${API_PORT}/healthz" "API  :${API_PORT}"
-    echo "== waiting for UI"
-    wait_for "http://localhost:${UI_PORT}/" "UI   :${UI_PORT}"
-    echo
-    echo "  UI  http://localhost:${UI_PORT}     API http://localhost:${API_PORT}"
-    ;;
-  down)    "${COMPOSE[@]}" down ;;
-  restart) "$0" down; "$0" up ;;
+  up)      build_sandbox; start_stack ;;
+  restart) echo "== stopping"; "${COMPOSE[@]}" down || true; start_stack ;;
+  down)    "${COMPOSE[@]}" down || true ;;
   status)  "${COMPOSE[@]}" ps ;;
   logs)    shift; "${COMPOSE[@]}" logs -f --tail=100 "${@:-backend}" ;;
   *)       echo "usage: $0 {up|down|restart|status|logs [service]}"; exit 1 ;;

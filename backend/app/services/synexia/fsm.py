@@ -525,6 +525,24 @@ class SynexiaFSM:
             task_spec=self.execution.task_spec,
             agent_name=request.agent_name,
         )
+        # P2-6 utility-based plan scoring: deterministic cost/latency/risk
+        # estimate surfaced with the policy decision (advisory only).
+        try:
+            from app.config import settings as _settings
+            from app.services.synexia.plan_utility import score_plan
+
+            if getattr(_settings, "PLAN_UTILITY_ENABLED", True):
+                decision["plan_utility"] = score_plan(self.plan)
+                _u = (decision.get("plan_utility") or {}).get("utility")
+                if _u is not None:
+                    logger.info(
+                        "Plan utility: %.2f (%d nodes, warnings=%s)",
+                        _u,
+                        (decision.get("plan_utility").get("components") or {}).get("nodes", 0),
+                        decision.get("plan_utility").get("warnings", []),
+                    )
+        except Exception as _pu_err:  # noqa: BLE001 — advisory only
+            logger.debug("plan_utility: gate scoring skipped: %s", _pu_err)
         self.execution.policy_decision = decision
         self.db.commit()
         logger.info("Policy decision: %s (risk=%s)", decision.get("decision", "allow"), decision.get("risk_tier", "low"))

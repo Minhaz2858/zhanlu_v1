@@ -6897,6 +6897,15 @@ async def add_message(
 
         # Get tool definitions (uses registry if tool_config is set)
         tools = get_tools(agent_name, tool_config, agent_app)
+        # P0-2 semantic tool-selection: when the catalog exceeds the top-K
+        # budget, inject only the relevant schemas + search_tools escape
+        # hatch (flag-gated, fail-open to the full list).
+        try:
+            from app.services.tool_search import select_relevant_tools
+
+            tools = select_relevant_tools(user_content, tools)
+        except Exception as _ts_err:  # noqa: BLE001 — never break assembly
+            logger.debug("tool_search skipped: %s", _ts_err)
         # Pin web_search to the front of the tool list when the user
         # message is time-sensitive (hard-MUST grounding enforcement).
         if user_content:
@@ -9612,6 +9621,26 @@ async def _bg_extract_memories(
                             "Auto-extracted %d memory(ies) for agent %s",
                             len(saved), agent_app_id,
                         )
+                    # P1-3 case-based reasoning: record the final
+                    # task→solution exchange as an episodic case for recall
+                    # on similar future tasks (flag-gated, best-effort).
+                    try:
+                        from app.services.case_based_reasoning import record_case
+
+                        last_user, last_assistant = "", ""
+                        for m in messages or []:
+                            role = m.get("role")
+                            if role == "user":
+                                last_user = m.get("content") or ""
+                            elif role == "assistant" and last_user:
+                                last_assistant = m.get("content") or ""
+                        if last_user and last_assistant:
+                            record_case(
+                                db, str(agent_app_id), last_user, last_assistant,
+                                project_id=project_id,
+                            )
+                    except Exception as _cbr_err:  # noqa: BLE001
+                        logger.debug("cbr: case record failed: %s", _cbr_err)
                 finally:
                     loop.close()
             finally:
@@ -11151,6 +11180,23 @@ def add_message_feedback(
             db.rollback()
         except Exception:
             pass
+
+    # 1b) HITL reward override (RL Phase 0): thumbs feedback becomes a
+    # source="human" TrajectoryReward + bandit signal, closing the loop
+    # between user feedback and the learning elements.
+    try:
+        from app.services.agent_invocations import (
+            apply_human_feedback,
+            resolve_invocation_for_feedback,
+        )
+
+        _inv_id = resolve_invocation_for_feedback(
+            db, conversation_id, target_msg.get("content") or "")
+        if _inv_id:
+            apply_human_feedback(
+                db, invocation_id=_inv_id, rating=rating, comment=comment)
+    except Exception as _hitl_err:  # noqa: BLE001 — best-effort
+        logger.debug("feedback: HITL reward failed: %s", _hitl_err)
 
     # 2) Recipe adjustment (Layer 1).
     if getattr(settings, "RECIPE_LEARNING_ENABLED", False):
@@ -12750,6 +12796,29 @@ async def add_message_stream(
             )
 
     tools = get_tools(agent_name, tool_config, agent_app)
+    # P0-2 semantic tool-selection (v3 loop): top-K relevant schemas +
+    # search_tools discovery meta-tool instead of the full catalog.
+    try:
+        from app.services.tool_search import select_relevant_tools
+
+        tools = select_relevant_tools(user_content, tools)
+    except Exception as _ts_err:  # noqa: BLE001 — never break assembly
+        logger.debug("tool_search skipped: %s", _ts_err)
+    # P1-3 case-based reasoning: inject how similar past tasks were solved
+    # (episodic/procedural memories; flag-gated, advisory only).
+    try:
+        from app.services.case_based_reasoning import build_cbr_block
+
+        _cbr_block = build_cbr_block(
+            db,
+            str(getattr(agent_app, "id", None) or agent_name or "general_assistant"),
+            user_content,
+            project_id=getattr(conv, "project_id", None),
+        )
+        if _cbr_block:
+            system_prompt += "\n\n" + _cbr_block
+    except Exception as _cbr_err:  # noqa: BLE001 — advisory block only
+        logger.debug("cbr: recall failed: %s", _cbr_err)
 
     # Reuse the pre-computed data-source runtime from above (avoids a
     # duplicate DB query). `prepare_data_source_runtime` is purely a

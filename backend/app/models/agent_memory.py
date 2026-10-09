@@ -42,6 +42,13 @@ class AgentMemory(TimestampedBase):
     # and survive compaction/eviction — the "always-in-context" layer.
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # CoALA memory taxonomy (2026-10-09, P1-3): "semantic" (facts/notes —
+    # the default reading for legacy NULL rows), "episodic" (task→solution
+    # cases for case-based reasoning), "procedural" (promoted playbooks).
+    # Nullable so legacy rows need no backfill; consumers treat NULL as
+    # semantic.
+    memory_type: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
+
     # Semantic recall (P0 — agent-improvement roadmap). Stores the content's
     # embedding vector as a JSON float list so it works on both SQLite and
     # Postgres without requiring a pgvector extension. Populated best-effort

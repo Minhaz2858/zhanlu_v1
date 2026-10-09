@@ -186,8 +186,6 @@ async def train_with_art(
     if not tasks:
         return {"started": False, "reason": "no golden tasks available"}
 
-    from app.services.synexia.quality_eval import evaluate_quality
-
     model = art.TrainableModel(
         name=config.model_name,
         base_model=config.base_model,
@@ -204,8 +202,8 @@ async def train_with_art(
             for _ in range(config.rollouts_per_task):
                 # The rollout executes the governed agent loop against the
                 # ART-served model; messages + tool calls accumulate into the
-                # trajectory (see services/rl/README_ART.md for the wiring).
-                trajectory = await _run_rollout(model, task)
+                # trajectory.
+                trajectory = await _run_rollout(config, db, task)
                 group.add(trajectory)
             groups.append(group)
         await model.train(groups)
@@ -219,13 +217,27 @@ async def train_with_art(
     }
 
 
-async def _run_rollout(model, task: RolloutTask):
-    """One rollout: the agent loop against the ART-served model.
+def _art_endpoint(config: ARTConfig):
+    """LLMEndpoint pointing at the ART server's OpenAI-compatible vLLM."""
+    from app.services.llm_router import LLMEndpoint
 
-    Delegates to the golden runner's agent execution so rollouts exercise
-    the SAME governed loop as production. The judge supplies the quality
+    return LLMEndpoint(
+        base_url=config.server_url,
+        api_key="art-training",
+        model_id=config.base_model,
+    )
+
+
+async def _run_rollout(config: ARTConfig, db, task: RolloutTask):
+    """One rollout: the governed agent loop against the ART-served model.
+
+    The ART server exposes an OpenAI-compatible vLLM endpoint, so the
+    rollout pins it as the candidate LLMEndpoint and drives the SAME
+    governed sub-agent loop as production. The judge supplies the quality
     component of the reward.
     """
+    import asyncio
+
     import art  # type: ignore
 
     trajectory = art.Trajectory(
@@ -233,20 +245,35 @@ async def _run_rollout(model, task: RolloutTask):
         metadata={"task_id": task.task_id},
     )
     try:
-        from app.services.golden_eval_runner import run_single_case  # noqa: F401
-        # Execution wiring per deployment — the golden runner drives the
-        # governed loop; final content lands in the trajectory.
-        result = await run_single_case(task.prompt)
-        final_response = result.get("assistant_content", "") if isinstance(
-            result, dict) else str(result)
+        from app.config import settings
+        from app.services.tool_handlers.delegate_tool import _run_sub_agent_inner
+
+        endpoint = _art_endpoint(config)
+        result = await asyncio.wait_for(
+            _run_sub_agent_inner(
+                task=task.prompt,
+                agent_name="general_assistant",
+                db=db,
+                user_id="art-rollout",
+                max_iterations=config.max_steps,
+                endpoint=endpoint,
+            ),
+            timeout=float(getattr(settings, "EVAL_GATE_CASE_TIMEOUT_S", 120)),
+        )
+        final_response = result.get("response") or result.get("error") or ""
         trajectory.messages_and_choices.append(
             {"role": "assistant", "content": final_response})
         judge_score = 0.0
         try:
+            from app.services.synexia.quality_eval import evaluate_quality
+
             judge = evaluate_quality(
-                user_message=task.prompt, assistant_text=final_response)
+                user_message=task.prompt,
+                assistant_text=final_response,
+                task_spec={"acceptance_criteria": list(task.expected_criteria)},
+            )
             judge_score = float(getattr(judge, "completeness_score", 0.0) or 0.0)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — judge failure = neutral quality
             judge_score = 0.0
         reward, components = reward_function(
             task=task, final_response=final_response, judge_score=judge_score,

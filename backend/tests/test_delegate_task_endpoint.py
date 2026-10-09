@@ -105,7 +105,7 @@ class TestDelegateTaskEndpoint(unittest.TestCase):
         endpoint = MagicMock(name="kimi-endpoint")
         captured = {}
 
-        async def fake_run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint=None):
+        async def fake_run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint=None, context=None):
             captured["endpoint"] = endpoint
             return {"success": True, "task": task, "response": "ok"}
 
@@ -127,7 +127,7 @@ class TestDelegateTaskEndpoint(unittest.TestCase):
 
         captured = {}
 
-        async def fake_run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint=None):
+        async def fake_run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint=None, context=None):
             captured["endpoint"] = endpoint
             return {"success": True, "task": task, "response": "ok"}
 

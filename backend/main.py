@@ -240,6 +240,9 @@ def _specific_migrations() -> dict:
             ("project_id", "VARCHAR(36)"),
             # 2026-08-27 pinned memory (interactive review/edit UI).
             ("pinned", "BOOLEAN DEFAULT 0"),
+            # 2026-10-09 CoALA taxonomy (P1-3): episodic cases + procedural
+            # playbooks; NULL/legacy rows read as semantic.
+            ("memory_type", "VARCHAR(24)"),
         ],
         "agent_run_steps": [
             # 2026-08-27 run-timeline observability (tokens + outcome).

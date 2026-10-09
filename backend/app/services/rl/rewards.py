@@ -66,7 +66,10 @@ def compute_reward(
 
     quality_bonus = 0.0
     if isinstance(quality_score, (int, float)):
-        quality_bonus = _QUALITY_BONUS_WEIGHT * float(quality_score)
+        # Judge scores are 0-1 by contract — clamp so a mis-scaled judge
+        # (0-100) can't inject an unbounded bonus into the reward.
+        clamped = max(0.0, min(1.0, float(quality_score)))
+        quality_bonus = _QUALITY_BONUS_WEIGHT * clamped
         components["quality_bonus"] = round(quality_bonus, 3)
 
     reward = outcome + latency_penalty + tool_efficiency + quality_bonus

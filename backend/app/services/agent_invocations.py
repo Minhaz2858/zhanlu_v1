@@ -150,6 +150,12 @@ def record_invocation(
                 status=status,
                 duration_ms=duration_ms,
                 tool_call_count=tool_call_count,
+                # Wire the caller-supplied judge confidence (0-1) into the
+                # quality-bonus component; previously it was always dropped.
+                quality_score=(
+                    confidence_score
+                    if isinstance(confidence_score, (int, float)) else None
+                ),
             )
             db.add(TrajectoryReward(
                 invocation_id=row.id,
@@ -169,6 +175,113 @@ def record_invocation(
         return row.id
     except Exception as exc:  # noqa: BLE001 — recording must never break the loop
         logger.warning("agent_invocations: failed to record (%s) — non-fatal", exc)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
+def resolve_invocation_for_feedback(
+    db: Session, conversation_id: str, assistant_content: str
+) -> Optional[str]:
+    """Find the invocation a thumbs rating applies to (best-effort).
+
+    Matches the latest invocations of the conversation against the message
+    content (loose prefix match, either direction — the stored
+    ``assistant_content`` may be truncated or the message edited).
+    """
+    try:
+        from app.models.agent_invocation import AgentInvocation
+
+        rows = (
+            db.query(AgentInvocation)
+            .filter(AgentInvocation.conversation_id == conversation_id)
+            .order_by(AgentInvocation.created_date.desc())
+            .limit(25)
+            .all()
+        )
+        if not rows:
+            return None
+        needle = (assistant_content or "").strip()[:120]
+        if needle:
+            for inv in rows:
+                content = (inv.assistant_content or "").strip()[:120]
+                if content and (
+                    needle == content
+                    or needle.startswith(content)
+                    or content.startswith(needle)
+                ):
+                    return inv.id
+        for inv in rows:  # fallback: the latest main-loop turn
+            if inv.invocation_type == "conversation":
+                return inv.id
+        return rows[0].id
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.debug("agent_invocations: feedback resolve failed: %s", exc)
+        return None
+
+
+def apply_human_feedback(
+    db: Session,
+    *,
+    invocation_id: str,
+    rating: int,
+    comment: str = "",
+) -> Optional[str]:
+    """Record a human (HITL) reward override for one invocation.
+
+    Upserts the ``source="human"`` TrajectoryReward (auto rows stay
+    untouched) and feeds the route bandit, so explicit user feedback
+    steers policy — the feedback loop the RL phases consumed but nothing
+    wrote to. Best-effort; never raises.
+    """
+    try:
+        from app.models.agent_invocation import AgentInvocation
+        from app.models.trajectory_reward import TrajectoryReward
+        from app.services.rl.policy_bandit import record_reward as _bandit_record
+
+        inv = (
+            db.query(AgentInvocation)
+            .filter(AgentInvocation.id == invocation_id)
+            .first()
+        )
+        if inv is None:
+            return None
+
+        reward = 1.0 if rating > 0 else -1.0
+        components: dict = {"outcome": reward, "total": reward,
+                            "origin": "human_thumbs"}
+        if comment:
+            components["comment"] = comment[:200]
+
+        row = (
+            db.query(TrajectoryReward)
+            .filter(
+                TrajectoryReward.invocation_id == invocation_id,
+                TrajectoryReward.source == "human",
+            )
+            .first()
+        )
+        if row is None:
+            row = TrajectoryReward(
+                invocation_id=invocation_id,
+                agent_name=inv.invocation_type,
+                route=inv.route,
+                reward=reward,
+                components=components,
+                source="human",
+            )
+            db.add(row)
+        else:
+            row.reward = reward
+            row.components = components
+        db.commit()
+        # Human signal steers the bandit (same gate as auto rewards).
+        _bandit_record(inv.route or "", reward)
+        return row.id
+    except Exception as exc:  # noqa: BLE001 — feedback must never 500
+        logger.warning("agent_invocations: human feedback failed (non-fatal): %s", exc)
         try:
             db.rollback()
         except Exception:  # noqa: BLE001

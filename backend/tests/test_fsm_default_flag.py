@@ -35,7 +35,9 @@ def test_runtime_is_fsm_enabled_returns_true_in_default_env():
 def test_comment_documents_rollback_path():
     """The config.py comment must mention the rollback path."""
     from pathlib import Path
-    src = Path("/root/zhanlu/backend/app/config.py").read_text()
+    import app.config as _config_mod
+
+    src = Path(_config_mod.__file__).read_text()
     assert "SYNEXIA_FSM_ENABLED" in src
     # Look for a rollback hint near the flag.
     idx = src.find("SYNEXIA_FSM_ENABLED")
