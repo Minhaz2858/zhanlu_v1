@@ -8,6 +8,8 @@ import KbSetupDialog from '@/components/kb/KbSetupDialog';
 import KbSourceDetail from '@/components/kb/KbSourceDetail';
 import KbCatalogTables from '@/components/kb/KbCatalogTables';
 import KbSemanticStore from '@/components/kb/KbSemanticStore';
+import KbGlossaryEditor from '@/components/kb/KbGlossaryEditor';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Loader2, Trash2, Tag, FileText, Database, Workflow, BarChart3, Bot, Download } from 'lucide-react';
 
 const TYPE_MAP = {
@@ -90,12 +92,28 @@ export default function ResourceDetail() {
             <>
               <KbSourceDetail item={item} t={t} onEdit={() => setKbOpen(true)} onTogglePause={togglePauseKb} />
               {(item.source_kind === 'database' || !!item.db_type) && (
-                <KbCatalogTables kbId={item.id} dbType={item.db_type} kbName={item.name} />
-              )}
-              {(item.source_kind === 'database' || !!item.db_type) && (
-                <div className="mt-5 rounded-xl border border-border bg-card">
-                  <KbSemanticStore kbId={item.id} />
-                </div>
+                <Tabs defaultValue="schema" className="mt-5">
+                  <TabsList>
+                    <TabsTrigger value="schema">Schema</TabsTrigger>
+                    <TabsTrigger value="semantics">Semantic Store</TabsTrigger>
+                    <TabsTrigger value="terms">Terms & Metrics</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="schema">
+                    <div className="rounded-xl border border-border bg-card">
+                      <KbCatalogTables kbId={item.id} dbType={item.db_type} kbName={item.name} />
+                    </div>
+                  </TabsContent>
+                  <TabsContent value="semantics">
+                    <div className="rounded-xl border border-border bg-card">
+                      <KbSemanticStore kbId={item.id} />
+                    </div>
+                  </TabsContent>
+                  <TabsContent value="terms">
+                    <div className="rounded-xl border border-border bg-card">
+                      <KbGlossaryEditor kbId={item.id} />
+                    </div>
+                  </TabsContent>
+                </Tabs>
               )}
             </>
           )}

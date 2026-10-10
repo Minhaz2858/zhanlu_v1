@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   BookOpen, ChevronRight, ChevronDown, Loader2, Table2, Network,
-  Sigma, TrendingUp, Filter, Layers, Search,
+  Sigma, TrendingUp, Filter, Layers, Search, Pencil, Check, X,
 } from 'lucide-react';
 import { appParams } from '@/lib/app-params';
 import authFetch from '@/api/authFetch';
@@ -86,6 +86,8 @@ export default function KbSemanticStore({ kbId }) {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState(null); // {table_meta_id, description_en, description_zh}
+  const [saving, setSaving] = useState(false);
 
   const fetchStore = useCallback(async () => {
     try {
@@ -107,6 +109,33 @@ export default function KbSemanticStore({ kbId }) {
   useEffect(() => {
     fetchStore();
   }, [fetchStore]);
+
+  const saveTableEdit = useCallback(async () => {
+    if (!editing?.table_meta_id) return;
+    setSaving(true);
+    try {
+      const res = await authFetch(
+        `/api/apps/${APP_ID}/knowledge_bases/${kbId}/catalog/tables/${editing.table_meta_id}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            description_en: editing.description_en || null,
+            description_zh: editing.description_zh || null,
+          }),
+        }
+      );
+      if (res.ok) {
+        // refresh the store so the new meaning (and VERIFIED-tier provenance
+        // once the catalog re-reads it) shows immediately
+        setEditing(null);
+        setLoading(true);
+        fetchStore();
+      }
+    } finally {
+      setSaving(false);
+    }
+  }, [editing, kbId, fetchStore]);
 
   const q = query.trim().toLowerCase();
 
@@ -281,11 +310,66 @@ export default function KbSemanticStore({ kbId }) {
                       : '—'}
                   </Td>
                   <Td>
-                    {r.description || '—'}
-                    {(r.aliases || []).length > 0 && (
-                      <span className="block text-[11px] text-stone-400">
-                        aka: {r.aliases.join(', ')}
-                      </span>
+                    {editing?.table_meta_id === r.table_meta_id ? (
+                      <div className="space-y-1 min-w-[240px]">
+                        <input
+                          value={editing.description_en}
+                          onChange={(e) =>
+                            setEditing({ ...editing, description_en: e.target.value })
+                          }
+                          placeholder="English description"
+                          className="w-full text-[12px] border border-stone-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                        />
+                        <input
+                          value={editing.description_zh || ''}
+                          onChange={(e) =>
+                            setEditing({ ...editing, description_zh: e.target.value })
+                          }
+                          placeholder="中文描述"
+                          className="w-full text-[12px] border border-stone-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                        />
+                        <div className="flex gap-1">
+                          <button
+                            onClick={saveTableEdit}
+                            disabled={saving}
+                            className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                          >
+                            <Check size={11} /> {saving ? 'Saving…' : 'Save'}
+                          </button>
+                          <button
+                            onClick={() => setEditing(null)}
+                            className="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded border border-stone-300 text-stone-600 hover:bg-stone-100"
+                          >
+                            <X size={11} /> Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-start gap-1.5">
+                        <span>
+                          {r.description || '—'}
+                          {(r.aliases || []).length > 0 && (
+                            <span className="block text-[11px] text-stone-400">
+                              aka: {r.aliases.join(', ')}
+                            </span>
+                          )}
+                        </span>
+                        {r.table_meta_id && (
+                          <button
+                            onClick={() =>
+                              setEditing({
+                                table_meta_id: r.table_meta_id,
+                                description_en: r.description || '',
+                                description_zh: r.description_alt || '',
+                              })
+                            }
+                            title="Edit meaning — a human edit is the strongest provenance"
+                            className="text-stone-300 hover:text-amber-600 shrink-0"
+                          >
+                            <Pencil size={11} />
+                          </button>
+                        )}
+                      </div>
                     )}
                   </Td>
                   <Td>

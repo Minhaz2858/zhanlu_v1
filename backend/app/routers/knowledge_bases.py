@@ -415,6 +415,17 @@ async def get_semantic_store_view(app_id: str, kb_id: str, db: Session = Depends
     relations = [_dc(r) for r in store.relations()]
     table_names = [r["table_name"] for r in relations]
 
+    # Attach catalog ids so the UI can edit meanings in place (the PATCH
+    # catalog/tables/{id} endpoint keys on KBTableMeta.id).
+    from app.models.knowledge_catalog import KBTableMeta as _KM
+
+    _meta_ids = {
+        t.table_name: str(t.id)
+        for t in db.query(_KM).filter(_KM.kb_id == kb_id).all()
+    }
+    for r in relations:
+        r["table_meta_id"] = _meta_ids.get(r["table_name"])
+
     # Column semantics: only the MEANINGFUL ones (described, typed, unitized,
     # enum-carrying or key columns) — the raw type dump is already in
     # catalog/tables; this view is about business meaning.
