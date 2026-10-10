@@ -7,6 +7,7 @@ import PageHeader from '@/components/PageHeader';
 import KbSetupDialog from '@/components/kb/KbSetupDialog';
 import KbSourceDetail from '@/components/kb/KbSourceDetail';
 import KbCatalogTables from '@/components/kb/KbCatalogTables';
+import KbSemanticStore from '@/components/kb/KbSemanticStore';
 import { Loader2, Trash2, Tag, FileText, Database, Workflow, BarChart3, Bot, Download } from 'lucide-react';
 
 const TYPE_MAP = {
@@ -90,6 +91,11 @@ export default function ResourceDetail() {
               <KbSourceDetail item={item} t={t} onEdit={() => setKbOpen(true)} onTogglePause={togglePauseKb} />
               {(item.source_kind === 'database' || !!item.db_type) && (
                 <KbCatalogTables kbId={item.id} dbType={item.db_type} kbName={item.name} />
+              )}
+              {(item.source_kind === 'database' || !!item.db_type) && (
+                <div className="mt-5 rounded-xl border border-border bg-card">
+                  <KbSemanticStore kbId={item.id} />
+                </div>
               )}
             </>
           )}

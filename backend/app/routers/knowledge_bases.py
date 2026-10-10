@@ -370,6 +370,101 @@ async def catalog_status(app_id: str, kb_id: str, db: Session = Depends(get_db))
     }
 
 
+@router.get("/{kb_id}/semantic-store")
+async def get_semantic_store_view(app_id: str, kb_id: str, db: Session = Depends(get_db)):
+    """Return the unified SEMANTIC LAYER for a database KnowledgeBase.
+
+    This is the OCI 'offline enrichment → semantic store' layer, made visible:
+    relations (tables/views + business meaning + provenance tier), column
+    semantics (semantic_type/unit/enum), join paths, business terms and metric
+    definitions (glossary), workload signals (mined usage), mined frequent
+    joins/filters, and business domains. Every item carries its provenance
+    tier: VERIFIED (human-authored) / DISCOVERED (indexed) /
+    LEARNED_FROM_WORKLOAD (mined) — the same tiers the online NL2SQL pipeline
+    (planning → query-log retrieval → table retrieval → schema linking →
+    SQL generation → rewriting → validation) consumes.
+    """
+    import dataclasses
+
+    from app.config import settings
+    from app.services.db.semantic_store import get_semantic_store
+
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+
+    enabled = bool(getattr(settings, "SEMANTIC_STORE_ENABLED", True))
+    if not enabled:
+        return {"kb_id": kb_id, "enabled": False, "stats": {}, "relations": [],
+                "columns": [], "joins": [], "glossary": [], "workload": [],
+                "mined": {"join_hints": [], "common_filters": []}, "domains": []}
+
+    store = get_semantic_store(db, [kb_id])
+
+    def _dc(obj) -> dict:
+        d = dataclasses.asdict(obj)
+        for k, v in d.items():
+            if hasattr(v, "isoformat"):
+                d[k] = v.isoformat()
+        return d
+
+    relations = [_dc(r) for r in store.relations()]
+    table_names = [r["table_name"] for r in relations]
+
+    # Column semantics: only the MEANINGFUL ones (described, typed, unitized,
+    # enum-carrying or key columns) — the raw type dump is already in
+    # catalog/tables; this view is about business meaning.
+    columns: list[dict] = []
+    _uninteresting = {"unknown", ""}
+    for rel in relations:
+        try:
+            cols = store.columns(rel["table_name"])
+        except Exception:
+            continue
+        for c in cols:
+            cd = _dc(c)
+            if (
+                (cd.get("description") or "").strip()
+                or cd.get("semantic_type") not in _uninteresting
+                or cd.get("unit")
+                or cd.get("enum_values")
+                or cd.get("is_primary_key")
+            ):
+                columns.append(cd)
+        if len(columns) > 2000:
+            break
+
+    glossary = [_dc(t) for t in store.glossary(None, limit=500)]
+    workload = sorted(
+        (_dc(w) for w in store.workload().values()),
+        key=lambda w: -(w.get("uses") or 0),
+    )
+    # Joins can number in the thousands (every FK edge of every indexed
+    # table) — ship the top 200 by confidence; stats.joins keeps the total.
+    all_joins = sorted(store.joins(), key=lambda j: -float(j.confidence or 0))
+    mined_joins = store.join_hints(k=10)
+    mined_filters = store.common_filters(table_names, k=15)
+
+    return {
+        "kb_id": kb_id,
+        "kb_name": kb.name,
+        "enabled": True,
+        "stats": store.stats(),
+        "relations": relations,
+        "columns": columns,
+        "joins": [_dc(j) for j in all_joins[:200]],
+        "joins_total": len(all_joins),
+        "glossary": glossary,
+        "workload": workload,
+        "mined": {"join_hints": mined_joins, "common_filters": mined_filters},
+        "domains": store.domains(),
+    }
+
+
 @router.get("/{kb_id}/catalog/tables")
 async def list_catalog_tables(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     """Return the catalog tables discovered for a database KnowledgeBase.
