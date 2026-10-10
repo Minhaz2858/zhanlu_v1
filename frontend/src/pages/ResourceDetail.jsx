@@ -89,33 +89,7 @@ export default function ResourceDetail() {
           )}
 
           {type === 'kb' && (
-            <>
-              <KbSourceDetail item={item} t={t} onEdit={() => setKbOpen(true)} onTogglePause={togglePauseKb} />
-              {(item.source_kind === 'database' || !!item.db_type) && (
-                <Tabs defaultValue="schema" className="mt-5">
-                  <TabsList>
-                    <TabsTrigger value="schema">Schema</TabsTrigger>
-                    <TabsTrigger value="semantics">Semantic Store</TabsTrigger>
-                    <TabsTrigger value="terms">Terms & Metrics</TabsTrigger>
-                  </TabsList>
-                  <TabsContent value="schema">
-                    <div className="rounded-xl border border-border bg-card">
-                      <KbCatalogTables kbId={item.id} dbType={item.db_type} kbName={item.name} />
-                    </div>
-                  </TabsContent>
-                  <TabsContent value="semantics">
-                    <div className="rounded-xl border border-border bg-card">
-                      <KbSemanticStore kbId={item.id} />
-                    </div>
-                  </TabsContent>
-                  <TabsContent value="terms">
-                    <div className="rounded-xl border border-border bg-card">
-                      <KbGlossaryEditor kbId={item.id} />
-                    </div>
-                  </TabsContent>
-                </Tabs>
-              )}
-            </>
+            <KbSourceDetail item={item} t={t} onEdit={() => setKbOpen(true)} onTogglePause={togglePauseKb} />
           )}
 
           {type === 'file' && (
@@ -152,6 +126,32 @@ export default function ResourceDetail() {
           </Section>
         </div>
       </div>
+      {/* Full-width tabbed workspace for database KBs — the semantic layer
+          needs the whole page width, not the 2/3 info column. */}
+      {type === 'kb' && (item.source_kind === 'database' || !!item.db_type) && (
+        <Tabs defaultValue="schema" className="mt-2">
+          <TabsList>
+            <TabsTrigger value="schema">Schema</TabsTrigger>
+            <TabsTrigger value="semantics">Semantic Store</TabsTrigger>
+            <TabsTrigger value="terms">Terms & Metrics</TabsTrigger>
+          </TabsList>
+          <TabsContent value="schema">
+            <div className="rounded-xl border border-border bg-card">
+              <KbCatalogTables kbId={item.id} dbType={item.db_type} kbName={item.name} />
+            </div>
+          </TabsContent>
+          <TabsContent value="semantics">
+            <div className="rounded-xl border border-border bg-card">
+              <KbSemanticStore kbId={item.id} />
+            </div>
+          </TabsContent>
+          <TabsContent value="terms">
+            <div className="rounded-xl border border-border bg-card">
+              <KbGlossaryEditor kbId={item.id} />
+            </div>
+          </TabsContent>
+        </Tabs>
+      )}
       {type === 'kb' && <KbSetupDialog open={kbOpen} onOpenChange={setKbOpen} editItem={item} onSaved={load} />}
     </div>
   );

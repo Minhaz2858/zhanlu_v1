@@ -206,24 +206,26 @@ export default function KbSemanticStore({ kbId }) {
       </div>
 
       {/* Overview counters */}
-      <div className="mt-3 grid grid-cols-3 sm:grid-cols-6 gap-2">
+      <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
         {[
-          { label: 'Tables/Views', value: s.relations ?? 0, icon: Table2 },
+          { label: 'Tables / Views', value: s.relations ?? 0, icon: Table2 },
           { label: 'Described', value: s.columns_described ?? 0, icon: Sigma },
           { label: 'Join paths', value: s.joins ?? 0, icon: Network },
-          { label: 'Terms/Metrics', value: s.glossary_terms ?? 0, icon: BookOpen },
-          { label: 'Workload tables', value: s.workload_tables ?? 0, icon: TrendingUp },
+          { label: 'Terms', value: s.glossary_terms ?? 0, icon: BookOpen },
+          { label: 'Workload', value: s.workload_tables ?? 0, icon: TrendingUp },
           { label: 'Domains', value: s.domains ?? 0, icon: Layers },
         ].map(({ label, value, icon: Icon }) => (
           <div
             key={label}
-            className="rounded-lg border border-stone-200 bg-stone-50/60 px-3 py-2"
+            title={`${value} ${label}`}
+            className="rounded-lg border border-stone-200 bg-gradient-to-b from-stone-50/80 to-white px-3.5 py-2.5"
           >
-            <div className="flex items-center gap-1.5 text-[11px] text-stone-500">
-              <Icon size={12} /> {label}
+            <div className="flex items-center gap-1.5 text-[11px] text-stone-500 whitespace-nowrap">
+              <Icon size={12} className="text-amber-600 shrink-0" />
+              <span className="truncate">{label}</span>
             </div>
-            <div className="text-lg font-semibold text-stone-800 tabular-nums">
-              {value}
+            <div className="text-xl font-semibold text-stone-800 tabular-nums leading-tight mt-0.5">
+              {Number(value).toLocaleString()}
             </div>
           </div>
         ))}
