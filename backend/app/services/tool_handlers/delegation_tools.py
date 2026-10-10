@@ -548,7 +548,19 @@ async def _ask_data_agent(
     # truncated before every metric is gathered (default 60s cut the
     # delegate mid-collection on a dashboard build). Falls back to the
     # module constant.
-    _budget_s = float(args.get("budget_seconds") or DATA_AGENT_BUDGET_SECONDS)
+    #
+    # 2026-10-10 (timeout-policy removal): when QUERY_TIMEOUT_DISABLED is on
+    # and the caller did NOT explicitly pass budget_seconds, the wall-clock
+    # budget is lifted too — a month-scale aggregation on a very large
+    # warehouse legitimately runs past 60s. An explicit budget_seconds from
+    # the orchestrator is still honoured.
+    if (
+        getattr(settings, "QUERY_TIMEOUT_DISABLED", False)
+        and "budget_seconds" not in (args or {})
+    ):
+        _budget_s = float("inf")
+    else:
+        _budget_s = float(args.get("budget_seconds") or DATA_AGENT_BUDGET_SECONDS)
     # P0: wall-clock + per-phase timing for the delegation.
     _delegation_start = time.monotonic()
     _llm_total_s = 0.0

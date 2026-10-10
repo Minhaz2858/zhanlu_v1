@@ -47,14 +47,25 @@ class MySQLConnector:
         # socket I/O. The per-statement MAX_EXECUTION_TIME hint handles query
         # time, these handle everything else (and MariaDB, which ignores the
         # hint).
+        connect_args: dict[str, Any] = {
+            "connect_timeout": 15,
+        }
+        # Socket read/write timeouts are a transport cap, not a policy: when
+        # QUERY_TIMEOUT_DISABLED removes the statement timeout, these must go
+        # too — a month-scale aggregation legitimately runs past 60s.
+        try:
+            from app.config import settings as _s
+
+            _timeout_disabled = getattr(_s, "QUERY_TIMEOUT_DISABLED", False)
+        except Exception:  # noqa: BLE001
+            _timeout_disabled = False
+        if not _timeout_disabled:
+            connect_args["read_timeout"] = 60
+            connect_args["write_timeout"] = 60
         self._engine = acquire_engine(
             self.dialect,
             self._build_url(),
-            connect_args={
-                "connect_timeout": 15,
-                "read_timeout": 60,
-                "write_timeout": 60,
-            },
+            connect_args=connect_args,
         )
         return self
 

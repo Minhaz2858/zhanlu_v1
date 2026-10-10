@@ -362,6 +362,20 @@ class Settings(BaseSettings):
     # inherits them (tool args, NLAnswerService, FSM nodes, automations).
     MAX_QUERY_ROWS_CAP: int = 5000
     MAX_QUERY_TIMEOUT_S: int = 30
+    # ── Timeout policy + collation self-healing (2026-10-10) ──
+    # QUERY_TIMEOUT_DISABLED=True removes the per-statement timeout entirely
+    # (MAX_EXECUTION_TIME hints, SET statement_timeout, SQLite progress
+    # handler, MSSQL LOCK_TIMEOUT and the tool-level clamp) so very large
+    # warehouses can run unbounded aggregations. Trade-off: a runaway query
+    # holds its connection until the database/DBAPI gives up — only enable
+    # on warehouses where the statements are trusted and resource-bounded
+    # upstream. Connect-level connect_timeout (handshake) still applies.
+    QUERY_TIMEOUT_DISABLED: bool = True
+    # Collation-mismatch self-healing: on ER 1267 / collation errors the
+    # statement's cross-table join predicates are rewritten with
+    # CONVERT(col USING <charset>) and retried once (MySQL family).
+    COLLATION_HEAL_ENABLED: bool = True
+    COLLATION_TARGET_CHARSET: str = "utf8mb4"
 
     # P3: Prompt caching -- apply explicit cache_control markers for providers
     # that support them (Anthropic, OpenRouter). DeepSeek caches automatically.

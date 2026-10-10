@@ -905,7 +905,12 @@ async def _execute_query(
     from app.config import settings as _settings
 
     max_rows = max(1, min(max_rows, int(_settings.MAX_QUERY_ROWS_CAP)))
-    timeout_s = max(1, min(timeout_s, int(_settings.MAX_QUERY_TIMEOUT_S)))
+    if getattr(_settings, "QUERY_TIMEOUT_DISABLED", False):
+        # Timeout policy removed (2026-10-10): very large warehouses run
+        # unbounded aggregations. 0 = connectors skip every timeout guard.
+        timeout_s = 0
+    else:
+        timeout_s = max(1, min(timeout_s, int(_settings.MAX_QUERY_TIMEOUT_S)))
 
     # Source readiness: a source whose structure was never catalogued (or whose
     # preparation failed) must not be executed against — the run would produce
@@ -1047,6 +1052,12 @@ async def _execute_query(
 
     try:
         result = await asyncio.to_thread(_do_work)
+        # Surface the effective timeout policy so the model (and the user)
+        # know the statement ran unbounded vs. bounded.
+        result["timeout_policy"] = (
+            "unlimited" if getattr(_settings, "QUERY_TIMEOUT_DISABLED", False)
+            else f"{timeout_s}s"
+        )
         hints = _build_validation_hints(db, kb_id, result)
         if hints:
             result["validation_hints"] = hints

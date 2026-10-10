@@ -102,6 +102,22 @@ class QueryService:
 
         kb = self._load_kb(kb_id)
 
+        # ── Timeout policy (2026-10-10): QUERY_TIMEOUT_DISABLED removes the
+        # per-statement timeout entirely — connectors treat timeout_s <= 0 as
+        # "run unbounded" (no MAX_EXECUTION_TIME hint, no SET
+        # statement_timeout, no SQLite progress handler, no MSSQL
+        # LOCK_TIMEOUT). For very large warehouses where 30s kills
+        # legitimate aggregations.
+        from app.config import settings as _settings
+
+        if getattr(_settings, "QUERY_TIMEOUT_DISABLED", False):
+            timeout_cap = 0
+        else:
+            try:
+                timeout_cap = max(1, min(int(timeout_s), int(settings.MAX_QUERY_TIMEOUT_S)))
+            except Exception:
+                timeout_cap = DEFAULT_TIMEOUT_S
+
         # ── the execution boundary validates, unconditionally ──────────────
         # Every caller funnels through execute(): the sealed NL path, the agent's
         # execute_query tool, dashboards, report recipes, forecasting probes. The
@@ -122,16 +138,50 @@ class QueryService:
         )
 
         t0 = time.time()
+        collation_healed = False
         with get_connector(kb) as conn:
             # +1 to PROVE truncation (see docstring).
-            fetched = conn.execute(sql, max_rows=row_cap + 1, timeout_s=timeout_cap)
+            try:
+                fetched = conn.execute(sql, max_rows=row_cap + 1, timeout_s=timeout_cap)
+                executed_sql = str(getattr(conn, "last_executed_sql", "") or sql)
+            except Exception as exc:
+                # ── Collation self-healing (2026-10-10) ──
+                # Cross-table joins over columns with mismatched collations
+                # fail at the database (MySQL ER 1267) before returning rows.
+                # Heal the statement's join predicates with CONVERT(col USING
+                # <charset>) and retry ONCE. Anything else re-raises.
+                from app.config import settings as _hs
+                from app.services.db import collation_heal as _ch
+
+                if not (
+                    getattr(_hs, "COLLATION_HEAL_ENABLED", True)
+                    and _ch.is_collation_error(exc)
+                ):
+                    raise
+                healed = _ch.heal_join_collations(
+                    sql, (kb.db_type or "mysql").lower(),
+                    charset=getattr(_hs, "COLLATION_TARGET_CHARSET", "utf8mb4"),
+                )
+                if not healed or healed == sql:
+                    raise
+                logger.warning(
+                    "query_service: collation mismatch on KB %s (%s) — "
+                    "retrying with healed join predicates",
+                    kb_id, exc,
+                )
+                fetched = conn.execute(
+                    healed, max_rows=row_cap + 1, timeout_s=timeout_cap
+                )
+                executed_sql = str(getattr(conn, "last_executed_sql", "") or healed)
+                collation_healed = True
             # The connectors differ in what they hand the driver — MySQL prepends
             # the MAX_EXECUTION_TIME hint, Oracle wraps with ROWNUM, Postgres and
             # the rest execute the authored text verbatim — so the executable
             # statement is read back from the connector rather than assumed.
-            executed_sql = str(getattr(conn, "last_executed_sql", "") or sql)
         elapsed_ms = int((time.time() - t0) * 1000)
         validation = dict(self.last_validation or {})
+        if collation_healed:
+            validation["collation_healed"] = True
         if validation:
             # Provenance: the authored statement was validated above; the statement
             # the driver actually received is read back from the connector.
