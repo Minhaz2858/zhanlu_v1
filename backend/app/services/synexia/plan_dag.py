@@ -164,14 +164,18 @@ def _intent_is_renderable(artifact_type) -> bool:
 
 
 def _strip_sandbox_without_file_intent(steps: list, task_spec: dict) -> list:
-    """Sandbox steps exist to produce a DOWNLOADABLE file.
+    """Strip only ORPHAN sandbox steps — those no data step feeds.
 
     Measured live 2026-09-22: "上周按产品、客户及组织划分的销售报告" (no
     format words) was planned as an XLSX/DOCX file turn fed with TWO rows —
-    the analysis itself never ran. When the task spec carries no file intent
-    (no known artifact_intents, user_signal not export_*), sandbox steps are
-    stripped: an analytical report is answered in chat (multi-query +
-    synthesis), files only when the user explicitly asks for one.
+    the analysis itself never ran. That failure shape is a sandbox step with
+    NO nl2sql/data dependencies: a file built from thin air.
+
+    2026-10-10 goal-based amendment: the old rule stripped EVERY sandbox step
+    whenever the user's message lacked a format keyword, overriding the
+    planner's own deliverable decision. Now a sandbox step that a data step
+    feeds IS the plan's deliberate deliverable and survives (the FINALIZE
+    artifact gate ships it); only orphan sandbox steps are removed.
     """
     try:
         has_file_intent = bool(task_spec.get("artifact_intents")) or str(
@@ -179,13 +183,28 @@ def _strip_sandbox_without_file_intent(steps: list, task_spec: dict) -> list:
         ).startswith("export_")
         if has_file_intent or not isinstance(steps, list):
             return steps
-        kept = [st for st in steps
-                if isinstance(st, dict) and st.get("node_type") != "sandbox"]
-        if len(kept) != len(steps):
+        data_step_indices = {
+            i for i, st in enumerate(steps)
+            if isinstance(st, dict) and st.get("node_type") != "sandbox"
+        }
+        kept = []
+        stripped = 0
+        for i, st in enumerate(steps):
+            if not isinstance(st, dict) or st.get("node_type") != "sandbox":
+                kept.append(st)
+                continue
+            deps = st.get("dependencies") or []
+            if any(d in data_step_indices for d in deps):
+                # A data step feeds this sandbox — the planner deliberately
+                # built a file deliverable on real query results. Keep it.
+                kept.append(st)
+                continue
+            stripped += 1
+        if stripped:
             logger.info(
-                "plan: stripped %d sandbox step(s) — no file intent in the "
-                "task spec (analytical answers run in chat)",
-                len(steps) - len(kept),
+                "plan: stripped %d orphan sandbox step(s) — no data step "
+                "feeds them (file from thin air)",
+                stripped,
             )
         return kept or steps
     except Exception as e:
@@ -599,8 +618,10 @@ Rules:
   comparison — all feeding ONE final synthesize step. A single nl2sql node
   cannot answer a multi-dimension report; a sandbox file built from one
   query is NOT the deliverable unless the user asked for a downloadable file.
-- NO file format requested = NO sandbox step. Analytical reports are
-  answered in chat from the merged nl2sql snapshots.
+- Include a sandbox (file) step ONLY when a file deliverable clearly serves
+  the user's goal, and ONLY after the data steps it depends on — a file must
+  be built from real query results, never from thin air. When the goal is an
+  analytical answer, respond in chat from the merged nl2sql snapshots.
 
 Respond with ONLY a JSON array."""
 

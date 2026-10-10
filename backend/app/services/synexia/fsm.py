@@ -60,10 +60,11 @@ _FILE_INTENT_KEYWORDS = (
     # English — file formats and file-action verbs
     "docx", "pptx", "pdf", "xlsx", "excel", "word",
     "powerpoint", "slide", "deck", "document",
+    "csv", "spreadsheet", "markdown",
     "download", "export", "as a file", "as a doc",
     "as a deck", "save as", "send me the file",
     # Chinese — file-action phrases
-    "做成", "生成", "导出", "下载", "存为", "发我",
+    "做成", "生成", "导出", "下载", "存为", "发我", "表格",
     "做成文件", "生成报告", "导出报表", "下载报告",
 )
 
@@ -98,6 +99,86 @@ def _contains_visual_intent(message: str) -> bool:
         return bool(detect_visual_intent(message))
     except Exception:
         return False
+
+
+def _collect_frontend_tool_calls(observations) -> list[dict]:
+    """Build the frontend-compatible tool_calls list from ALL observation types.
+
+    2026-10-10: the old collector kept ONLY ``observation_type == "tool_call"``.
+    On the FSM path the two observation types that matter most are excluded:
+    ``nl2sql`` (carries source_id/source_name → citation chips never rendered)
+    and ``sandbox`` (carries artifact_id + the run_sandbox_skill result → the
+    chat loop could never collect artifact payloads, so "give me in html file"
+    produced the file but NO inline artifact card). Also emits the canonical
+    ``results`` key (the router's artifact collector reads ``results``, the
+    old entries only had ``result``).
+    """
+    tool_calls: list[dict] = []
+    for obs in (observations or []):
+        otype = (getattr(obs, "observation_type", "") or "").lower()
+        ok = bool(getattr(obs, "success", False))
+        rd = getattr(obs, "result_data", None)
+        rd = rd if isinstance(rd, dict) else {}
+        if otype == "tool_call":
+            tool_calls.append({
+                "name": getattr(obs, "tool_name", None),
+                "args": getattr(obs, "request_args", None),
+                "result": rd,
+                "results": rd,
+                "success": ok,
+            })
+        elif otype == "sandbox":
+            _sb = rd.get("sandbox_result") if isinstance(rd.get("sandbox_result"), dict) else {}
+            tool_calls.append({
+                # Canonical engine name — the router's artifact collector
+                # (_collect_artifact_results) recognises run_sandbox_skill
+                # and extracts {artifact_id, file_url, preview_url, …}.
+                "name": "run_sandbox_skill",
+                "args": getattr(obs, "request_args", None),
+                "results": {
+                    "success": ok,
+                    "artifact_id": rd.get("artifact_id"),
+                    **_sb,
+                },
+                "success": ok,
+            })
+        elif otype == "nl2sql":
+            tool_calls.append({
+                "name": "nl2sql",
+                "args": getattr(obs, "request_args", None),
+                "results": {
+                    "success": ok,
+                    "source_id": rd.get("source_id"),
+                    "source_name": rd.get("source_name"),
+                },
+                "success": ok,
+            })
+    return tool_calls
+
+
+def _plan_deliberate_deliverable(plan, observations) -> bool:
+    """True when the plan ITSELF decided a file deliverable serves the goal.
+
+    A sandbox step that survived plan_dag's no-file-intent strip — or a
+    sandbox observation that actually executed successfully — is the agent's
+    own judgment that the task's goal is best served by a file. The FINALIZE
+    artifact gate must not overrule it with a keyword scan of the user's
+    message: the goal-based rule is "ship what the plan deliberately
+    produced", not "ship only what regexes in the message predict".
+    """
+    try:
+        for n in (getattr(plan, "nodes", None) or []):
+            if (getattr(n, "node_type", "") or "") == "sandbox":
+                return True
+        for obs in (observations or []):
+            if (
+                (getattr(obs, "observation_type", "") or "").lower() == "sandbox"
+                and getattr(obs, "success", False)
+            ):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 class FSMState(str, Enum):
@@ -797,23 +878,16 @@ class SynexiaFSM:
         self.db.commit()
 
         # Collect tool calls for frontend compatibility
-        tool_calls = []
+        observations = list(self.execution.observations or [])
+        tool_calls = _collect_frontend_tool_calls(observations)
         artifact_ids = []
         report_card_payload = None
         file_exports: dict[str, dict] = {}
         export_artifact_id = None
 
-        observations = list(self.execution.observations or [])
         task_spec = self.execution.task_spec or {}
 
         for obs in observations:
-            if obs.observation_type == "tool_call":
-                tool_calls.append({
-                    "name": obs.tool_name,
-                    "args": obs.request_args,
-                    "result": obs.result_data,
-                    "success": obs.success,
-                })
             if obs.artifact_ids:
                 artifact_ids.extend(obs.artifact_ids)
 
@@ -824,13 +898,24 @@ class SynexiaFSM:
         # to SEE the data as a chart, which is a requested artifact with no
         # file format.  Treating only file formats as "requested" silently
         # deleted every rendered chart at this gate.
+        #
+        # Goal-based amendment (2026-10-10): a sandbox step that SURVIVED
+        # plan_dag's no-file-intent strip and executed successfully IS the
+        # plan's own deliberate deliverable — the agent decided the task's
+        # goal is best served by a file. Suppressing it here with a keyword
+        # rule contradicts the plan the agent itself formed (live: the
+        # 03:03 run executed a data_table→xlsx deliverable whose artifact
+        # the gate dropped because the user's message contained no format
+        # word). The user-requested check stays: it is the plan-independent
+        # signal.
         _user_requested_visual = _contains_visual_intent(request.user_message)
         _user_requested_file = bool(
             (task_spec.get("deliverable_format") if task_spec else None)
             or _contains_file_intent(request.user_message)
             or _user_requested_visual
         )
-        if not _user_requested_file and artifact_ids:
+        _plan_ships_deliverable = _plan_deliberate_deliverable(self.plan, observations)
+        if not _user_requested_file and not _plan_ships_deliverable and artifact_ids:
             logger.info(
                 "FINALIZE: suppressing %d artifact(s) — user did not request "
                 "a file (conv=%s, msg=%.60s)",

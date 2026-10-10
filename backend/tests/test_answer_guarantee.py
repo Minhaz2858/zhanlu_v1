@@ -157,39 +157,11 @@ class TestDataRowsFallback:
         assert "qty" in result
 
 
-class TestDegenerateDatasetGuard:
-    """_is_degenerate_dataset catches datasets where measures are all zero."""
-
-    def test_all_zero_measures_is_degenerate(self):
-        from app.routers import agents
-
-        rows = [
-            {"qty": 29839.2, "revenue": 0.0, "margin": 0.0, "line_count": 1085},
-        ]
-        assert agents._is_degenerate_dataset(rows) is True
-
-    def test_non_zero_measures_is_not_degenerate(self):
-        from app.routers import agents
-
-        rows = [
-            {"qty": 100, "revenue": 5000, "margin": 200},
-        ]
-        assert agents._is_degenerate_dataset(rows) is False
-
-    def test_empty_rows_is_degenerate(self):
-        from app.routers import agents
-
-        assert agents._is_degenerate_dataset([]) is True
-        assert agents._is_degenerate_dataset(None) is True
-
-    def test_mixed_zero_and_non_zero(self):
-        from app.routers import agents
-
-        rows = [
-            {"qty": 100, "revenue": 5000, "margin": 0},
-            {"qty": 200, "revenue": 0, "margin": 100},
-        ]
-        assert agents._is_degenerate_dataset(rows) is False
+# 2026-10-10: TestDegenerateDatasetGuard removed with agents._is_degenerate_dataset
+# itself — it judged data by a hardcoded English/finance noun regex and had zero
+# production call sites (dead, fail-closed for other domains). Degenerate-result
+# detection now lives in synexia/verifier._check_degenerate_result (structural:
+# all-NULL / 0 rows / metadata-only), covered by test_goal_based_answer_delivery.
 
 
 if __name__ == "__main__":

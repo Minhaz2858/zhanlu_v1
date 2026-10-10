@@ -54,9 +54,11 @@ def test_next_backoff_honors_retry_after_and_caps(monkeypatch):
     monkeypatch.setattr(lr.random, "uniform", lambda a, b: b)
     assert lr.next_backoff(0, None) == 1.0
     assert lr.next_backoff(1, None) == 2.0
-    assert lr.next_backoff(10, None) == 30.0  # capped
+    # 2026-10-10: ceiling raised 30 → 60 (settings-backed attempt budget 5
+    # rides out sustained provider strain instead of giving up in ~30s)
+    assert lr.next_backoff(10, None) == 60.0  # capped
     assert lr.next_backoff(0, 5.0) == 6.0     # retry-after + <=1s jitter
-    assert lr.next_backoff(0, 100.0) == 30.0  # capped
+    assert lr.next_backoff(0, 100.0) == 60.0  # capped
 
 
 def test_retry_loop_succeeds_after_transients():

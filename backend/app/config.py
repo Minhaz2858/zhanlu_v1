@@ -206,7 +206,13 @@ class Settings(BaseSettings):
     # Per-call LLM timeouts (IBM fault-tolerance: explicit per-call timeout).
     # LLM_TIMEOUT_S covers async chat/stream calls; LLM_SYNC_TIMEOUT_S covers
     # sync JSON + embedding calls.
-    LLM_TIMEOUT_S: float = 120.0
+    # 2026-10-10: the single 120s timeout applied to STREAMING calls too — a
+    # large local-model generation died mid-stream. Split into connect/read:
+    # connect stays tight (unreachable endpoint fails fast), read allows a
+    # full long-form generation (LLM_READ_TIMEOUT_S).
+    LLM_TIMEOUT_S: float = 300.0
+    LLM_CONNECT_TIMEOUT_S: float = 10.0
+    LLM_READ_TIMEOUT_S: float = 300.0
     LLM_SYNC_TIMEOUT_S: float = 30.0
 
     # Models that ignore or reject a caller-supplied ``temperature`` value.
@@ -230,14 +236,45 @@ class Settings(BaseSettings):
     # NOTE: this is a SAFETY NET only. Per-model context-aware clamping
     # (``_clamp_max_tokens_for_context`` in agents.py, driven by
     # ``LlmModel.context_window`` / ``max_output_tokens``) now takes over as the
-    # primary limiter, so this global value can stay at a generous 4096 without
+    # primary limiter, so this global value can stay generous without
     # regressing small vLLM servers (they are clamped per-model instead).
-    LLM_MAX_TOKENS_HARD_CAP: int = 4096
+    # 2026-10-10: 4096 cut long reports mid-sentence on capable models —
+    # raised to 16384; the per-model clamp remains the primary limiter.
+    LLM_MAX_TOKENS_HARD_CAP: int = 16384
 
     # Synthesis (report-building) LLM output-token budget.
     # 1536 is far too small for a full multi-section report; 6144 gives
     # enough headroom for executive summary + markdown tables + analysis.
     LLM_SYNTH_MAX_TOKENS: int = 6144
+
+    # ── Turn / synthesis / planner budgets (2026-10-10 de-hardcoding) ──────
+    # These were PLAIN LITERALS in routers/services; a single slow LLM call
+    # (allowed 120-300s) was killed by a tighter wall clock that nobody could
+    # tune. All env-overridable now.
+    # General-turn wall clock: the main v3 loop cap for turns that are not
+    # dashboard/fusion/report builds. Was a 60s literal — LESS than one
+    # LLM_TIMEOUT_S call — the #1 turn-killer.
+    TURN_WALL_CLOCK_CAP_S: float = 600.0
+    # Report/data/document turns run multi-query pipelines; was 180s literal.
+    REPORT_TURN_WALL_CLOCK_CAP_S: float = 900.0
+    # Forced-synthesis LLM call (empty/weak answer rescue). Was 60s literal.
+    SYNTHESIS_TIMEOUT_S: float = 180.0
+    # NL2SQL planner LLM call: SQL JSON for complex questions was truncated
+    # at max_tokens=700 and aborted at a 45s literal timeout.
+    NL2SQL_PLANNER_TIMEOUT_S: float = 120.0
+    NL2SQL_PLANNER_MAX_TOKENS: int = 2000
+    # Transient LLM error retry budget (429/overload). Was hard-capped at 3
+    # attempts with ≤30s total backoff — sustained provider strain failed
+    # the turn in seconds.
+    LLM_RETRY_MAX_ATTEMPTS: int = 5
+    # Sub-agent iteration clamps (delegate_task / ask_data_agent). Were
+    # literal ≤10 clamps that truncated multi-step subtasks.
+    DELEGATE_ITERATIONS_HARD_CLAMP: int = 25
+    # Image generation API timeout. 60s was tight for DALL·E/FAL.
+    IMAGE_GEN_TIMEOUT_S: int = 180
+    # Rows of a large result the report synthesizer sees. Was 300 — the
+    # synthesis narrated only a prefix of big datasets.
+    REPORT_SYNTHESIS_MAX_ROWS: int = 1000
 
     # ── Document ingestion — audio / image / video ────────────────────────
     # Audio: transcribe uploads via an OpenAI-compatible Whisper endpoint
@@ -304,7 +341,9 @@ class Settings(BaseSettings):
     IMAGE_MODEL: str = "dall-e-3"
 
     # Code Execution Sandbox
-    CODE_EXECUTION_TIMEOUT: int = 30  # seconds
+    # 2026-10-10: 30s killed any pandas-heavy script; real data-munging needs
+    # minutes. 120s default, env-overridable.
+    CODE_EXECUTION_TIMEOUT: int = 120  # seconds
     CODE_EXECUTION_MAX_MEMORY: int = 128  # MB (informational; subprocess enforcement)
 
     # Programmatic tool calling (PTC). When execute_code runs inside an agent
@@ -321,7 +360,9 @@ class Settings(BaseSettings):
 
     # Delegate Task
     DELEGATE_MAX_ITERATIONS: int = 5
-    DELEGATE_TIMEOUT: int = 120  # seconds per sub-conversation
+    # 2026-10-10: DELEGATE_TIMEOUT (120) was DEAD CONFIG — defined but never
+    # referenced by any enforcement path. Removed to stop it misleading
+    # operators into thinking a per-sub-conversation timeout exists.
 
     # Per-conversation total iteration budget across all turns (including
     # resumes). Bounds runaway multi-turn sessions. Per-agent overrides via
@@ -329,7 +370,12 @@ class Settings(BaseSettings):
     AGENT_MAX_ITERATIONS: int = 100
 
     # Tool output limits
-    TOOL_MAX_OUTPUT_CHARS: int = 8000
+    # 2026-10-10: 8000 silently truncated virtually every substantial tool
+    # result (big query results, file reads) BEFORE the persistence layer
+    # could spill with a read pointer — the model then "hallucinated" the
+    # missing content. 50000 chars; Layer-2 persistence (spill + pointer)
+    # remains the real context guard.
+    TOOL_MAX_OUTPUT_CHARS: int = 50000
 
     # Tool result persistence (P0) -- Layer 2/3 of context overflow protection
     TOOL_RESULT_STORAGE_DIR: str = "tool_results"
@@ -452,7 +498,9 @@ class Settings(BaseSettings):
     # Hard cap on gather rounds regardless of depth preset.
     DEEP_RESEARCH_MAX_ROUNDS: int = 3
     # Per-LLM-call timeout inside the research protocol (seconds).
-    DEEP_RESEARCH_TIMEOUT_S: int = 90
+    # 2026-10-10: 90s also capped the WHOLE deep-research turn stream —
+    # raised to 300s so a real research pass completes.
+    DEEP_RESEARCH_TIMEOUT_S: int = 300
 
     # ── P1-5 context economics: per-model tool-output caps ──────────────
     # Each entry caps the *content* of a single tool-role message at the
@@ -873,7 +921,14 @@ class Settings(BaseSettings):
     # (8-15 LLM calls/turn → 3-5). Applied to ALL models now — big cloud
     # models (deepseek, etc.) are equally capable and faster, so the same
     # lean loop produces smoother, faster, high-quality answers.
-    AGENT_FAST_MODE_ENABLED: bool = True
+    # 2026-10-10 goal-based amendment: fast mode ON by default was silently
+    # capping the loop at 10 tool iterations (vs 40) AND disabling the
+    # figure-grounding verify nudges (AGENT_FAST_VERIFY_NUDGE_MAX=0) for
+    # EVERY model and turn — a hard-coded speed-over-quality governor the
+    # user never opted into. Complex multi-query data turns can end early
+    # and ungrounded answers ship uncorrected. Now opt-in (env
+    # AGENT_FAST_MODE_ENABLED=true restores the lean loop).
+    AGENT_FAST_MODE_ENABLED: bool = False
     AGENT_FAST_MAX_TOOL_ITERATIONS: int = 10                 # was 40
     # ONE shared refinement budget per turn (2026-09-20). Every post-answer gate
     # that discards a completed answer and regenerates it now spends from this
@@ -946,7 +1001,12 @@ class Settings(BaseSettings):
     # Phase 1 response grounding: char cap for the findings block injected
     # into the FINALIZE response prompt (spec §3.3). Metadata is preserved
     # over data rows under the cap.
-    SYNEXIA_GROUNDING_MAX_CHARS: int = 2000
+    # 2026-10-10: was 2000 — a 10-row top-N result (Chinese product names +
+    # full-precision revenue figures ≈ 250 chars/row) did not fit, so the
+    # narrator got the aggregates but only ~3 itemized rows and disclosed the
+    # rest as "not included in the returned extract". 8000 chars ≈ a 60-row
+    # extract; the per-row guard (_TOP_ROWS=50) still bounds pathological dumps.
+    SYNEXIA_GROUNDING_MAX_CHARS: int = 8000
 
     # Phase 3a: opt-in LLM-driven plan generation (default off — the curated
     # default plan is the proven path; the LLM planner is gated for staging
@@ -1798,7 +1858,9 @@ class Settings(BaseSettings):
     SANDBOX_IMAGE_OFFICE: str = "zhanlu-sandbox-office:latest"
     SANDBOX_IMAGE_WEBAPP: str = "zhanlu-sandbox-webapp:latest"
     SANDBOX_DEFAULT_NETWORK: str = "none"
-    SANDBOX_DEFAULT_TIMEOUT_SECONDS: int = 120
+    # 2026-10-10: 120s killed real data-munging scripts ("timed out after
+    # 120s"); 300s aligns with the SANDBOX env var default (300).
+    SANDBOX_DEFAULT_TIMEOUT_SECONDS: int = 300
     SANDBOX_DEFAULT_MEMORY_MB: int = 1024
     SANDBOX_DEFAULT_CPUS: float = 1.0
     SANDBOX_DEFAULT_PIDS_LIMIT: int = 128

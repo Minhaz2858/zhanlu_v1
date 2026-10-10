@@ -283,6 +283,14 @@ class PostgresConnector:
                     logger.debug("postgres: session guard %r skipped: %s", _guard, e)
             if timeout_s > 0:
                 conn.execute(text(f"SET LOCAL statement_timeout = {int(timeout_s * 1000)}"))
+            else:
+                # 2026-10-10 (timeout policy round 2): timeout DISABLED —
+                # explicitly zero the limit. Skipping the SET let a server-
+                # global statement_timeout inherit into the session, killing
+                # heavy aggregations despite QUERY_TIMEOUT_DISABLED=True
+                # (the MySQL 3024 equivalent: "canceling statement due to
+                # statement timeout").
+                conn.execute(text("SET LOCAL statement_timeout = 0"))
             # Stream ONLY a SELECT-shaped statement. `stream_results` must never
             # be set on the connection itself: SQLAlchemy then wraps EVERY
             # statement in `DECLARE <name> CURSOR WITHOUT HOLD FOR ...`, and

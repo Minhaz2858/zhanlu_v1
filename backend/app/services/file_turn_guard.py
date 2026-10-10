@@ -57,12 +57,15 @@ from app.services.synexia.intent_router import (
 )
 
 # Formats covered by this guard (excludes pptx — handled by pptx_turn_guard).
-_FILE_FORMATS = frozenset({"html", "docx", "pdf", "xlsx", "md"})
+# csv added 2026-10-10: three independent format vocabularies omitted it, so
+# "export as csv" produced no file intent anywhere (the sandbox normalizes
+# csv → xlsx, so detection is the only missing link).
+_FILE_FORMATS = frozenset({"html", "docx", "pdf", "xlsx", "md", "csv"})
 
 # Formats this guard can re-prompt for on the give-up path — includes pptx
 # (usually pptx_turn_guard's job, but a graceful-fallback close must not
 # go unanswered when that guard is silent or disabled).
-_ALL_FILE_FORMATS = frozenset({"html", "docx", "pdf", "xlsx", "md", "pptx"})
+_ALL_FILE_FORMATS = frozenset({"html", "docx", "pdf", "xlsx", "md", "csv", "pptx"})
 
 # Phrases that indicate the agent gave up on producing the deliverable
 # instead of ending the turn with it.  Matched case-insensitively against

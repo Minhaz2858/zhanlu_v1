@@ -21,7 +21,6 @@ from app.services.agent_loop.fallbacks import (
     _GENERIC_EMPTY_CONTENT_FALLBACK,
     _artifact_aware_fallback,
     _data_summary_fallback,
-    _is_degenerate_dataset,
 )
 
 # Router copies must stay in lockstep with the extracted module.
@@ -101,11 +100,7 @@ def test_data_summary_fallback_names_titles():
     assert isinstance(_data_summary_fallback([]), str)
 
 
-def test_is_degenerate_dataset_detects_all_zero():
-    rows = [{"qty": 0, "total": 0}, {"qty": 0, "total": 0}]
-    assert _is_degenerate_dataset(rows) is True
-    rows2 = [{"qty": 0, "total": 0}, {"qty": 5, "total": 100}]
-    assert _is_degenerate_dataset(rows2) is False
-    # Empty / missing input is treated as degenerate by the caller guard.
-    assert _is_degenerate_dataset(None) is True
-    assert _is_degenerate_dataset([]) is True
+# 2026-10-10: test_is_degenerate_dataset_detects_all_zero removed with the
+# function itself — it judged data by a hardcoded English/finance noun regex
+# (dead code, fail-closed for other domains). Degenerate-result detection now
+# lives in synexia/verifier._check_degenerate_result (structural).

@@ -671,7 +671,18 @@ async def call_llm(
         from app.services.llm_retry import call_with_transient_retry
 
         async def _attempt() -> "httpx.Response":
-            async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_S) as client:
+            # 2026-10-10: split timeout — connect stays tight (unreachable endpoint
+            # fails fast), read allows a full long-form/streaming generation
+            # (the single 120s timeout killed large local-model streams
+            # mid-generation).
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=getattr(settings, 'LLM_CONNECT_TIMEOUT_S', 10.0),
+                    read=getattr(settings, 'LLM_READ_TIMEOUT_S', 300.0),
+                    write=60.0,
+                    pool=10.0,
+                )
+            ) as client:
                 resp = await client.post(
                     _provider_chat_url(provider),
                     headers=_provider_headers(provider),
@@ -1042,7 +1053,18 @@ async def stream_chat_completion(
         request_payload["model"] = provider.model
         started = False
         try:
-            async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_S) as client:
+            # 2026-10-10: split timeout — connect stays tight (unreachable endpoint
+            # fails fast), read allows a full long-form/streaming generation
+            # (the single 120s timeout killed large local-model streams
+            # mid-generation).
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=getattr(settings, 'LLM_CONNECT_TIMEOUT_S', 10.0),
+                    read=getattr(settings, 'LLM_READ_TIMEOUT_S', 300.0),
+                    write=60.0,
+                    pool=10.0,
+                )
+            ) as client:
                 async with client.stream(
                     "POST",
                     _provider_chat_url(provider),

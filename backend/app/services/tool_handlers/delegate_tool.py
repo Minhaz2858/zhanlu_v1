@@ -154,7 +154,10 @@ async def _delegate_task(
 ) -> dict:
     task = args.get("task", "").strip()
     agent_name = args.get("agent_name", "general_assistant")
-    max_iterations = min(args.get("max_iterations", settings.DELEGATE_MAX_ITERATIONS), 10)
+    # 2026-10-10: the ≤10 clamp was a literal that truncated multi-step
+    # subtasks ("iteration budget exhausted"). Settings-backed now.
+    _delegate_clamp = int(getattr(settings, "DELEGATE_ITERATIONS_HARD_CLAMP", 25))
+    max_iterations = min(args.get("max_iterations", settings.DELEGATE_MAX_ITERATIONS), _delegate_clamp)
     endpoint: LLMEndpoint | None = (context or {}).get("endpoint")
 
     if not task:

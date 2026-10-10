@@ -120,11 +120,19 @@ def test_detect_file_intent_convert_returns_target(msg, expected):
     "msg",
     [
         "convert this docx to something weird",
-        "turn this into csv",
     ],
 )
 def test_detect_convert_target_unknown_returns_none(msg):
     assert detect_convert_target(msg) is None
+
+
+# 2026-10-10: "turn this into csv" moved out of the unknown-target test — csv
+# is now a supported convert target (FileFormat "csv"; the sandbox normalizes
+# it to xlsx), so detect_convert_target returns "csv" instead of None.
+
+
+def test_detect_convert_target_csv_supported():
+    assert detect_convert_target("turn this into csv") == "csv"
 
 
 # ── detect_soft_intent guard ────────────────────────────────────────────

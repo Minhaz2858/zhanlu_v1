@@ -64,7 +64,7 @@ async def _generate_openai(prompt: str, size: str, quality: str) -> dict:
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=int(getattr(settings, "IMAGE_GEN_TIMEOUT_S", 180))) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
@@ -93,7 +93,7 @@ async def _generate_fal(prompt: str, size: str, quality: str) -> dict:
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=int(getattr(settings, "IMAGE_GEN_TIMEOUT_S", 180))) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()

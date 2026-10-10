@@ -189,3 +189,173 @@ def test_query_service_reraises_non_collation_errors(db, monkeypatch):
 
     with pytest.raises(RuntimeError, match="connection refused"):
         svc.execute("kb-heal2", JOIN_SQL, max_rows=100, timeout_s=10)
+
+
+# ── Timeout policy round 2: server-side limits zeroed when disabled ──────
+
+
+class _FakeMySQLConn:
+    """Records exec_driver_sql statements; execute() is configurable."""
+
+    def __init__(self, fail_times=0):
+        self.stmts = []
+        self._fail_times = fail_times
+
+    def exec_driver_sql(self, s):
+        self.stmts.append(s)
+
+    def execution_options(self, **kw):
+        return self
+
+    # engine.connect() is used as a context manager in execute()
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, q, params=None):
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise RuntimeError(
+                "(3024, 'Query execution was interrupted, maximum statement "
+                "execution time exceeded')"
+            )
+
+        class _R:
+            def returns_rows(self):
+                return True
+
+            def keys(self):
+                return ["a"]
+
+            def fetchmany(self, n):
+                return [(1,)]
+
+            def close(self):
+                pass
+
+        return _R()
+
+
+class _FakeEngine:
+    """Returns ONE connection object per connect() (pooled-conn simulation)."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def connect(self):
+        return self._conn
+
+
+def _mysql_connector(db_type="mysql", conn=None):
+    from types import SimpleNamespace
+
+    from app.services.db.mysql import MySQLConnector
+
+    kb = SimpleNamespace(
+        id="kb-timeout", name="w", db_type=db_type, source_kind="database",
+        username="u", password="p", host="h", port=3306, database_name="d",
+    )
+    c = MySQLConnector(kb)
+    c._engine = _FakeEngine(conn or _FakeMySQLConn())
+    return c
+
+
+def test_mysql_disabled_policy_zeroes_session_limit():
+    """timeout_s=0 must SET SESSION MAX_EXECUTION_TIME = 0 — skipping the SET
+    let the MySQL server's GLOBAL max_execution_time inherit into the session
+    and kill heavy aggregations with error 3024 despite
+    QUERY_TIMEOUT_DISABLED=True (live: June-August customer comparison)."""
+    conn = _FakeMySQLConn()
+    c = _mysql_connector(conn=conn)
+    c.execute("SELECT 1", max_rows=10, timeout_s=0)
+    assert "SET SESSION MAX_EXECUTION_TIME = 0" in conn.stmts
+    # and no per-statement hint prepended
+    assert not any("MAX_EXECUTION_TIME(" in s for s in conn.stmts)
+
+
+def test_mysql_mariadb_disabled_policy_zeroes_max_statement_time():
+    conn = _FakeMySQLConn()
+    c = _mysql_connector(db_type="mariadb", conn=conn)
+    c.execute("SELECT 1", max_rows=10, timeout_s=0)
+    assert "SET SESSION max_statement_time = 0" in conn.stmts
+
+
+def test_mysql_enabled_policy_still_sets_limit():
+    conn = _FakeMySQLConn()
+    c = _mysql_connector(conn=conn)
+    c.execute("SELECT 1", max_rows=10, timeout_s=5)
+    assert "SET SESSION MAX_EXECUTION_TIME = 5000" in conn.stmts
+    # the per-statement hint rides on the executed SQL
+    assert c.last_executed_sql.startswith("/*+ MAX_EXECUTION_TIME(5000) */")
+
+
+def test_mysql_3024_self_heal_retries_once():
+    """First attempt dies on the server's 3024; the self-heal retries once on
+    a fresh checkout with the session limit explicitly zeroed."""
+    conn = _FakeMySQLConn(fail_times=1)
+    c = _mysql_connector(conn=conn)
+    rows = c.execute("SELECT 1", max_rows=10, timeout_s=0)
+    assert rows == [{"a": 1}]
+    # the heal ran: a second SET SESSION MAX_EXECUTION_TIME = 0 was issued
+    # before the retried statement
+    zeros = [s for s in conn.stmts if s == "SET SESSION MAX_EXECUTION_TIME = 0"]
+    assert len(zeros) >= 2
+
+
+def test_mysql_no_retry_when_timeout_policy_configured():
+    """timeout_s > 0 means the timeout is INTENTIONAL — 3024 must propagate."""
+    conn = _FakeMySQLConn(fail_times=99)
+    c = _mysql_connector(conn=conn)
+    with pytest.raises(RuntimeError, match="3024"):
+        c.execute("SELECT 1", max_rows=10, timeout_s=5)
+
+
+def test_postgres_disabled_policy_zeroes_statement_timeout():
+    from types import SimpleNamespace
+
+    from app.services.db.postgres import PostgresConnector
+
+    executed = []
+
+    class _PgConn:
+        def exec_driver_sql(self, s):
+            executed.append(s)
+
+        def execute(self, q, params=None):
+            executed.append(str(q))
+
+            class _R:
+                def returns_rows(self):
+                    return True
+
+                def keys(self):
+                    return ["a"]
+
+                def fetchmany(self, n):
+                    return [(1,)]
+
+                def close(self):
+                    pass
+
+            return _R()
+
+        def execution_options(self, **kw):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _PgEngine:
+        def connect(self):
+            return _PgConn()
+
+    kb = SimpleNamespace(id="kb", name="w", db_type="postgres", source_kind="database")
+    c = PostgresConnector(kb)
+    c._engine = _PgEngine()
+    c.execute("SELECT 1", max_rows=10, timeout_s=0)
+    assert "SET LOCAL statement_timeout = 0" in executed

@@ -204,6 +204,14 @@ class MySQLConnector:
 
         Both statements are best-effort: an older server that rejects one must
         not break the query.
+
+        2026-10-10 (timeout policy round 2): when the timeout policy is
+        DISABLED (timeout_s <= 0) we now EXPLICITLY zero the session limit.
+        The old behavior — skipping the SET — let the MySQL server's GLOBAL
+        ``max_execution_time`` inherit into the session, so heavy aggregations
+        still died with error 3024 ("maximum statement execution time
+        exceeded") even with QUERY_TIMEOUT_DISABLED=True. Live: the
+        June–August customer comparison query died on exactly that.
         """
         stmts = ["SET SESSION TRANSACTION READ ONLY"]
         if timeout_s > 0:
@@ -211,6 +219,11 @@ class MySQLConnector:
                 stmts.append(f"SET SESSION max_statement_time = {int(timeout_s)}")
             else:
                 stmts.append(f"SET SESSION MAX_EXECUTION_TIME = {int(timeout_s * 1000)}")
+        else:
+            if (getattr(self.kb, "db_type", "") or "").lower() == "mariadb":
+                stmts.append("SET SESSION max_statement_time = 0")
+            else:
+                stmts.append("SET SESSION MAX_EXECUTION_TIME = 0")
         for stmt in stmts:
             try:
                 conn.exec_driver_sql(stmt)
@@ -239,6 +252,51 @@ class MySQLConnector:
         # (`COUNT(*)` stays a valid call; the hint is not part of the question).
         self.last_executed_sql = sql
         # Guards first, on the plain connection.
+        try:
+            return self._execute_with_guards(sql, params, max_rows, timeout_s, _is_select)
+        except Exception as e:
+            # 2026-10-10 self-heal: error 3024 = the SERVER's statement timeout
+            # fired despite our session zeroing (e.g. a global resource limit a
+            # pooled connection inherited mid-flight, or a proxy in the path).
+            # Retry ONCE on a fresh checkout with the limit explicitly zeroed
+            # before the statement. Never retries when a timeout policy is
+            # actually configured (timeout_s > 0) — that timeout is intentional.
+            _msg = str(e).lower()
+            if (
+                timeout_s <= 0
+                and ("3024" in _msg or "maximum statement execution time" in _msg)
+            ):
+                logger.warning(
+                    "mysql: server-side statement timeout (3024) despite "
+                    "disabled policy — zeroing session limit and retrying once"
+                )
+                with self._engine.connect() as conn:
+                    _zero = (
+                        "SET SESSION max_statement_time = 0"
+                        if (getattr(self.kb, "db_type", "") or "").lower() == "mariadb"
+                        else "SET SESSION MAX_EXECUTION_TIME = 0"
+                    )
+                    try:
+                        conn.exec_driver_sql(_zero)
+                    except Exception as guard_err:
+                        logger.debug("mysql: 3024 heal guard skipped: %s", guard_err)
+                    self.last_executed_sql = sql
+                    _q = (
+                        conn.execution_options(stream_results=True)
+                        if _is_select
+                        else conn
+                    )
+                    result = _q.execute(text(sql), params or {})
+                    if result.returns_rows:
+                        columns = list(result.keys())
+                        rows = result.fetchmany(max_rows)
+                        out = [row_to_dict(columns, tuple(r)) for r in rows]
+                        result.close()
+                        return out
+                    return [{"affected_rows": result.rowcount}]
+            raise
+
+    def _execute_with_guards(self, sql: str, params: dict | None, max_rows: int, timeout_s: int, _is_select: bool) -> list[dict]:
         with self._engine.connect() as conn:
             self._apply_session_guards(conn, timeout_s)
             # Stream ONLY a SELECT-shaped data statement — never set

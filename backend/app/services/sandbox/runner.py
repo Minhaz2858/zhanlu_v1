@@ -161,8 +161,14 @@ async def _run_docker(
             # Collect output files
             outputs = collect_outputs(output_dir)
 
-            stdout = truncate_output(result.get("stdout", ""), 8000)
-            stderr = truncate_output(result.get("stderr", ""), 4000)
+            # 2026-10-10: were hardcoded 8000/4000 — silent truncation of
+            # sandbox output before the persistence layer could spill with a
+            # pointer. Settings-backed (TOOL_MAX_OUTPUT_CHARS).
+            from app.config import settings as _s
+
+            _out_cap = int(getattr(_s, "TOOL_MAX_OUTPUT_CHARS", 50000))
+            stdout = truncate_output(result.get("stdout", ""), _out_cap)
+            stderr = truncate_output(result.get("stderr", ""), max(4000, _out_cap // 8))
 
             # Redact secrets
             stdout = redact_secrets(stdout)

@@ -112,6 +112,12 @@ class MSSQLConnector:
                 # MSSQL per-statement timeout (seconds) — applies to read
                 # locks but is a reasonable safety net.
                 conn.execute(text(f"SET LOCK_TIMEOUT {int(timeout_s * 1000)}"))
+            else:
+                # 2026-10-10 (timeout policy round 2): timeout DISABLED —
+                # explicitly set LOCK_TIMEOUT -1 (wait forever). Skipping the
+                # SET let a server-global lock_timeout inherit into the
+                # session despite QUERY_TIMEOUT_DISABLED=True.
+                conn.execute(text("SET LOCK_TIMEOUT -1"))
             result = conn.execute(text(sql), params or {})
             if result.returns_rows:
                 columns = list(result.keys())

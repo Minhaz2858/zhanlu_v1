@@ -866,41 +866,6 @@ def _choose_fallback(
 _SYS_COL_PREFIXES = ("FENTRYID", "FID", "FCUSTMATID", "FCUSTMATNAME")
 
 
-def _is_degenerate_dataset(rows: list[dict] | None) -> bool:
-    """True when every row has zero / None / "" in all apparent measure columns.
-
-    A 'measure' column is any key that looks monetary (revenue, margin, amount,
-    price, total, sales) but NOT a count/quantity column (line_count, qty,
-    quantity, count, orders) which may legitimately be non-zero while the money
-    columns are broken.  Used to prevent building a report card around a query
-    that mapped the wrong column (e.g. revenue = 0 for every row).
-    """
-    rows = rows or []
-    if not rows:
-        return True
-    _measure_re = re.compile(
-        r"^(revenue|margin|amount|price|total|sales|income|profit|cost)$",
-        re.IGNORECASE,
-    )
-    _count_re = re.compile(r"^(line_count|qty|quantity|count|orders|num)$", re.IGNORECASE)
-    measure_cols: set[str] = set()
-    for row in rows:
-        if isinstance(row, dict):
-            for k in row:
-                if _measure_re.search(k) and not _count_re.search(k):
-                    measure_cols.add(k)
-    if not measure_cols:
-        return False  # no measure columns to judge by
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        for col in measure_cols:
-            v = row.get(col)
-            if v not in (None, "", 0, 0.0):
-                return False
-    return True
-
-
 def _resolve_regenerate_turn(
     messages: list[dict],
     user_role: str,
@@ -1297,11 +1262,22 @@ def _data_rows_fallback(
                     f"for transaction-level data, not a `COUNT(*)` over the whole table."
                 )
                 return "\n".join(out_lines)
-            # Hide system columns
-            hide_cols = {
-                k for k in dict_rows[0]
-                if k.startswith(_SYS_COL_PREFIXES) or k in _SYS_COL_PREFIXES
-            }
+            # Hide system columns. 2026-10-10: structural ID detection replaces
+            # the blind `startswith(("FENTRYID","FID",…))` prefix match, which
+            # also hid legitimate business columns that merely begin with those
+            # letters (FIDELITY_SCORE, FIDUCIARY_FEE). A column is "system"
+            # when it is an internal ID by shape: exact ERP F-ID convention
+            # (F-prefixed and ending in ID), a generic id name, or *_id.
+            def _is_system_col(k: str) -> bool:
+                ku = k.upper()
+                return (
+                    k in _SYS_COL_PREFIXES
+                    or (len(k) > 2 and k[0] == "F" and k[1].isupper() and ku.endswith("ID"))
+                    or ku in ("ID", "ROWID", "UID", "UUID", "PK")
+                    or ku.endswith("_ID")
+                )
+
+            hide_cols = {k for k in dict_rows[0] if _is_system_col(k)}
             # Hide all-empty columns
             for k in dict_rows[0]:
                 if all(
@@ -2523,10 +2499,11 @@ async def _force_llm_synthesis(
 
         try:
             # Wrap synthesis LLM call in a timeout so a hung endpoint
-            # doesn't make the user wait forever. 60s gives big models
-            # (qwen3.6-27b local vLLM, deepseek, etc.) room to produce a
-            # full CEO-grade 5-section report (30-50s typical).
-            _SYNTH_TIMEOUT_S = 60.0
+            # doesn't make the user wait forever. 2026-10-10: was a 60s
+            # LITERAL — big models producing a full multi-section report
+            # (30-120s typical) were killed mid-generation and the user got
+            # the error fallback. Settings-backed 180s now.
+            _SYNTH_TIMEOUT_S = float(getattr(settings, "SYNTHESIS_TIMEOUT_S", 180.0))
             result = await asyncio.wait_for(
                 synth_call_fn(prompt, conversation_history),
                 timeout=_SYNTH_TIMEOUT_S,
@@ -3636,14 +3613,22 @@ def _should_trigger_fallback(synthesis_text: str, data_rows: list) -> bool:
     Fires when:
     - synthesis_text is empty AND data_rows is non-empty
     - synthesis_text matches an apology pattern AND data_rows is non-empty
-    - synthesis_text is <100 chars AND data_rows is non-empty
+    - synthesis_text is very short AND carries no figure AND data_rows is
+      non-empty ("Done." / "Here you go.")
     Does NOT fire when data_rows is empty (no data to show).
+
+    2026-10-10 goal-based amendment: the old "<100 chars" branch REPLACED
+    correct concise answers ("¥165.03M, up 5.7%") with a canned auto-generated
+    table. A short answer that contains a digit is a real data answer — a
+    goal-based agent delivers it; only figure-free short filler falls back.
     """
     if not data_rows:
         return False
     if not synthesis_text or not synthesis_text.strip():
         return True
-    if len(synthesis_text.strip()) < 100:
+    if len(synthesis_text.strip()) < 100 and not any(
+        ch.isdigit() for ch in synthesis_text
+    ):
         return True
     lower = synthesis_text.lower()
     for pattern in _APOLOGY_PATTERNS:
@@ -3695,10 +3680,13 @@ def _build_deterministic_fallback(
             avg = total / len(vals)
             mn = min(vals)
             mx = max(vals)
-            lines.append(f"- Total {c}: ¥{total:,.2f}")
-            lines.append(f"- Average {c}: ¥{avg:,.2f}")
-            lines.append(f"- Min {c}: ¥{mn:,.2f}")
-            lines.append(f"- Max {c}: ¥{mx:,.2f}")
+            # Currency-agnostic (2026-10-10): the platform is generic — the
+            # data's unit is whatever the source holds; a hardcoded ¥ symbol
+            # mislabels every non-CNY warehouse.
+            lines.append(f"- Total {c}: {total:,.2f}")
+            lines.append(f"- Average {c}: {avg:,.2f}")
+            lines.append(f"- Min {c}: {mn:,.2f}")
+            lines.append(f"- Max {c}: {mx:,.2f}")
 
     # Categorical top-3
     for c in categorical_cols[:3]:
@@ -4612,7 +4600,10 @@ _MAX_OUTPUT_CHARS = _HARNESS_POLICY.budgets().max_output_chars
 _SQL_HINT_PATTERN = re.compile(
     r"\[Schema:[^\]]*\]"            # [Schema: ...] blocks
     r"|\bF[A-Z][A-Z0-9_]+\b",      # F-prefixed internal IDs (common in ERP systems)
-    re.IGNORECASE,
+    # 2026-10-10: IGNORECASE removed — it made [A-Z] match lowercase, so
+    # ordinary words like "Ford", "File", "Fiscal" were deleted from the
+    # displayed query ("Show Ford F-150 sales" → "Show  -150 sales"). The
+    # uppercase-only pattern still matches the ERP F-ID convention.
 )
 
 
@@ -12321,6 +12312,21 @@ async def add_message_stream(
                     ),
                     "sources": _fsm_citations,
                 }
+                # Inline artifact cards (2026-10-10): the FSM path previously
+                # attached only BARE artifact_ids — the frontend renders
+                # ArtifactPreviewCard from FULL artifact objects
+                # (message.artifacts) and live `artifact_created` events,
+                # neither of which this path provided. Live: "give me in html
+                # file" created the HTML artifact, the answer even quoted its
+                # id, but no card ever rendered in the bubble. Collect the
+                # canonical payloads from the FSM tool calls (the FINALIZE
+                # collector now includes sandbox observations) and attach +
+                # emit them.
+                _fsm_artifacts = _collect_artifact_results(
+                    fsm_result.tool_calls or [], None, conversation_id, db,
+                )
+                if _fsm_artifacts:
+                    _assistant_msg["artifacts"] = _fsm_artifacts
                 # On regenerate the old assistant reply was popped at
                 # the top of the handler, so appending yields exactly
                 # one assistant message per user turn (Kimi/GPT parity).
@@ -12430,6 +12436,17 @@ async def add_message_stream(
                     "fsm_plan_summary": fsm_result.plan_summary,
                     "sources": _fsm_citations,
                 }
+                # Live artifact cards (2026-10-10): the frontend's done
+                # handler reads artifact objects from the conversation's last
+                # assistant message, but the request-scoped `conv` here can be
+                # stale (the fresh-session persist above wrote to a different
+                # instance). Emit `artifact_created` per artifact — the
+                # handler at ~line 2404 merges them into the live bubble.
+                for _art in (_fsm_artifacts or []):
+                    try:
+                        yield f'data: {json.dumps({"type": "artifact_created", "artifact": _art})}\n\n'
+                    except Exception as _art_emit_err:
+                        logger.debug("artifact_created SSE emit failed: %s", _art_emit_err)
                 _push_live("finalize_done", "finalize_done")
                 yield f'data: {json.dumps(done_payload)}\n\n'
                 # IBM routing feedback: FSM-routed turns previously never
@@ -13739,9 +13756,13 @@ async def add_message_stream(
                 settings.FUSION_BUILD_WALL_CLOCK_CAP_S
                 if _is_fusion_agent
                 else (
-                    180.0
+                    # 2026-10-10: were 180/60s PLAIN LITERALS — the 60s
+                    # general-turn cap was LESS than a single LLM_TIMEOUT_S
+                    # call, so one slow model call killed the whole turn.
+                    # Now settings-backed defaults.
+                    settings.REPORT_TURN_WALL_CLOCK_CAP_S
                     if (_orch_doc_format or _is_plan_report_or_data)
-                    else 60.0
+                    else settings.TURN_WALL_CLOCK_CAP_S
                 )
             )
         )
@@ -16201,11 +16222,15 @@ async def add_message_stream(
                     nonlocal _fusion_clear_count  # loop-scope counter; += below would otherwise shadow it locally
                     nonlocal _fusion_readonly_streak
                     if _is_dashboard_build and tool_name == "ask_data_agent":
-                        # Dashboard builds collect metrics across many tables;
-                        # give the data-agent delegate the dashboard budget
-                        # (10 min) instead of the default 60s truncation so
-                        # every metric is gathered before the build starts.
-                        args = {**(args or {}), "budget_seconds": settings.DASHBOARD_DELEGATE_BUDGET_SECONDS}
+                        # Dashboard builds collect metrics across many tables.
+                        # 2026-10-10: this used to pass budget_seconds=600
+                        # explicitly, which BYPASSED the QUERY_TIMEOUT_DISABLED
+                        # inf-lift in delegation_tools (an explicit budget
+                        # always wins) and re-imposed a 10-minute cut on data
+                        # gathering. When the timeout policy is disabled the
+                        # data agent is unbounded — do not override it.
+                        if not getattr(settings, "QUERY_TIMEOUT_DISABLED", False):
+                            args = {**(args or {}), "budget_seconds": settings.DASHBOARD_DELEGATE_BUDGET_SECONDS}
                     # CAD destructive-reclear guard (2026-08-27, hardened
                     # 2026-08-28): a modeling tool already succeeded THIS turn,
                     # so `fusion360_clear` would wipe the model mid-build (the

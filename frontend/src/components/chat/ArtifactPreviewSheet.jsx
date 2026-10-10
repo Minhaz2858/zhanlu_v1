@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { FileText, Presentation, Code, Download, FileType, AlertTriangle, Loader2, BookOpen, ExternalLink } from 'lucide-react';
+import { needsPreviewToken, mintPreviewTokenUrl } from '@/lib/previewToken';
 import {
   Sheet,
   SheetContent,
@@ -36,6 +37,22 @@ export default function ArtifactPreviewSheet({ artifact, open, onOpenChange }) {
   const [viewMode, setViewMode] = useState('document');
   const _artifactIdForReset = artifact?.id || artifact?.artifact_id;
   useEffect(() => { setViewMode('document'); }, [_artifactIdForReset]);
+
+  // 2026-10-10: /api/artifacts/{id}/preview is Bearer-authenticated (router-
+  // level dependency) — an iframe cannot send the header. Mint a signed
+  // ?token= URL via the shared helper, mirroring ArtifactPreviewPane.
+  const _sheetPreviewUrl = artifact?.preview_url;
+  const _sheetNeedsToken = needsPreviewToken(_sheetPreviewUrl) && !!_sheetPreviewUrl;
+  const [sheetSignedUrl, setSheetSignedUrl] = useState(null);
+  useEffect(() => {
+    if (!_sheetNeedsToken || !_sheetPreviewUrl) return undefined;
+    let cancelled = false;
+    setSheetSignedUrl(null);
+    mintPreviewTokenUrl(_sheetPreviewUrl)
+      .then((url) => { if (!cancelled) setSheetSignedUrl(url || null); })
+      .catch(() => { if (!cancelled) setSheetSignedUrl(null); });
+    return () => { cancelled = true; };
+  }, [_sheetNeedsToken, _sheetPreviewUrl]);
 
   if (!artifact) return null;
 
@@ -168,7 +185,7 @@ export default function ArtifactPreviewSheet({ artifact, open, onOpenChange }) {
             )
           ) : hasPreview ? (
             <iframe
-              src={previewUrl}
+              src={sheetSignedUrl || previewUrl}
               title={title}
               className="h-full w-full border-0"
               sandbox={

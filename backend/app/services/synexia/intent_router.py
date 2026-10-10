@@ -50,7 +50,7 @@ from app.services.harness.rule_events import observe_rule
 # order, so we put the more specific multi-letter tokens first ("docx"
 # before "doc", "pptx" before "ppt").  This avoids "docx" matching as
 # "doc" first and returning the wrong format.
-FileFormat = Literal["docx", "pptx", "xlsx", "pdf", "md", "html", "dashboard"]
+FileFormat = Literal["docx", "pptx", "xlsx", "csv", "pdf", "md", "html", "dashboard"]
 
 # Prefix patterns.  We use a word-boundary + case-insensitive match on
 # the *first 3+ letters* of each keyword so the helper still picks up
@@ -64,6 +64,7 @@ _FORMAT_PATTERNS: tuple[tuple[FileFormat, str], ...] = (
     ("docx", r"\b(?:docx|word\s*document)\b|\.docx?\b|公文|报告文档"),
     ("pptx", r"(?<![a-zA-Z])(?:pptx|ppt|powerpoint)(?![a-zA-Z])|\.ppt\b|presentation\s*deck|slide\s*deck|pitch\s*deck|project\s*deck|演示文稿|幻灯片"),
     ("xlsx", r"\b(?:xlsx|excel\s*workbook|spreadsheet)\b|\.xls\b"),
+    ("csv",  r"(?<![a-zA-Z])csv(?![a-zA-Z])|\.csv\b"),
     ("pdf",  r"\b(?:pdf)\b"),
     ("md",   r"\bmarkdown\b|\.md\b"),
     ("html", r"\b(?:html|\.html?|web\s*page|webpage)\b"),
@@ -151,6 +152,7 @@ _TARGET_TOKEN_MAP: dict[str, FileFormat] = {
     "docx": "docx", "doc": "docx", "word": "docx", "worddocument": "docx",
     "pptx": "pptx", "ppt": "pptx", "powerpoint": "pptx",
     "xlsx": "xlsx", "xls": "xlsx", "excel": "xlsx",
+    "csv": "csv",
     "pdf": "pdf",
     "md": "md", "markdown": "md",
     "html": "html", "htm": "html", "webpage": "html",

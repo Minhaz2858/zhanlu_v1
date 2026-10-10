@@ -21,8 +21,15 @@ from typing import Any, Iterable
 # Per-contribution caps applied before the global cap.
 _SQL_MAX_CHARS = 400
 _TOOL_RESULT_MAX_CHARS = 500
-_TOP_ROWS = 3
-_ROW_LINE_MAX_CHARS = 200
+# 2026-10-10: was 3 — the FINALIZE narrator received sum/min/max aggregates over
+# ALL rows but only the FIRST 3 itemized rows, so "top 10 products" answers
+# itemized the top 3 and hedged about "ranks 4-10 not included in the returned
+# extract". A goal-based agent must hand the narrator the complete result it
+# actually retrieved; the global SYNEXIA_GROUNDING_MAX_CHARS cap (8000) is the
+# real budget guard, not this per-row constant. 50 covers any reasonable top-N
+# question while still bounding pathological SELECT * dumps.
+_TOP_ROWS = 50
+_ROW_LINE_MAX_CHARS = 400
 
 
 def extract_grounding(

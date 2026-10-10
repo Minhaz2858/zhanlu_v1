@@ -3,7 +3,7 @@ import { FileText, Presentation, Code, Download, FileType, AlertTriangle, Loader
 import DOMPurify from 'dompurify';
 import { authFetch } from '@/api/authFetch';
 import { getDashboard } from '@/api/dashboards';
-import { needsPreviewToken } from '@/lib/previewToken';
+import { needsPreviewToken, mintPreviewTokenUrl } from '@/lib/previewToken';
 import DashboardViewer from '@/components/dashboard/DashboardViewer';
 import FullStackDashboardViewer from '@/components/dashboard/FullStackDashboardViewer';
 import DocxArtifactPreview from './DocxArtifactPreview';
@@ -262,23 +262,23 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
   const [signedIframeUrl, setSignedIframeUrl] = useState(null);
   const [iframeTokenFailed, setIframeTokenFailed] = useState(false);
   useEffect(() => {
-    if (!_tokenRequired || !_artifactId) return undefined;
+    if (!_tokenRequired || !_previewUrl) return undefined;
     let cancelled = false;
     setIframeTokenFailed(false);
     setSignedIframeUrl(null);
-    authFetch(`/api/automations/files/${_artifactId}/preview-token`, { method: 'POST' })
-      .then((res) => {
-        if (!res || !res.ok) throw new Error(`mint failed: ${res && res.status}`);
-        return res.json();
-      })
-      .then((data) => {
+    // 2026-10-10: mint via the shared helper — it picks the right endpoint
+    // per URL family (/api/automations/files/{id}/preview-token for
+    // automation files, /api/artifacts/{id}/preview-token for chat
+    // artifacts, which are NOT unauthenticated despite the old comment).
+    mintPreviewTokenUrl(_previewUrl)
+      .then((url) => {
         if (cancelled) return;
-        if (data?.url) setSignedIframeUrl(data.url);
+        if (url) setSignedIframeUrl(url);
         else setIframeTokenFailed(true);
       })
       .catch(() => { if (!cancelled) setIframeTokenFailed(true); });
     return () => { cancelled = true; };
-  }, [_tokenRequired, _artifactId]);
+  }, [_tokenRequired, _previewUrl]);
 
   if (!artifact) return null;
 

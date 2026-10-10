@@ -124,7 +124,8 @@ def test_sandbox_defaults():
     assert s.SANDBOX_IMAGE_OFFICE == "zhanlu-sandbox-office:latest"
     assert s.SANDBOX_IMAGE_WEBAPP == "zhanlu-sandbox-webapp:latest"
     assert s.SANDBOX_DEFAULT_NETWORK == "none"
-    assert s.SANDBOX_DEFAULT_TIMEOUT_SECONDS == 120
+    # 2026-10-10: raised 120 → 300 (120s killed real data-munging scripts)
+    assert s.SANDBOX_DEFAULT_TIMEOUT_SECONDS == 300
     assert s.SANDBOX_DEFAULT_MEMORY_MB == 1024
     assert s.SANDBOX_DEFAULT_CPUS == 1.0
     assert s.SANDBOX_DEFAULT_PIDS_LIMIT == 128

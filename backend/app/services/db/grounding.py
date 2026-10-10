@@ -216,6 +216,22 @@ _CATALOG_TERM_PATTERNS = (
                re.IGNORECASE),
 )
 
+#: Temporal / ordinal / ranking qualifiers: they SCOPE or ORDER a question
+#: ("last month", "top 10", "previous quarter") — they never name a
+#: measurement. BM25 happily matches them to catalog columns by shared-bigram
+#: accident, and the short-word rule below then classified any ≤6-char match
+#: as a metric: live 2026-10-10, "last" (from "last month by revenue") became
+#: a fake unsupported metric slot even though the SQL had correctly filtered
+#: September, forcing complete=False and a false disclosure into the answer.
+_TEMPORAL_QUALIFIER_RE = re.compile(
+    r"^(last|next|previous|prior|past|latest|recent|current|this|that|"
+    r"first|second|third|top|bottom|nth|best|worst|highest|lowest|"
+    r"day|week|month|quarter|year|today|yesterday|tomorrow|"
+    r"ytd|mtd|qtd|"
+    r"年|月|日|周|季度|上月|上个月|本月|下个月|最近|去年|今年|上|下)$",
+    re.IGNORECASE,
+)
+
 #: Natural-language scaffolding: no measurement is named, so nothing can be
 #: missing. Deliberately generic wording — never a business noun.
 _SCAFFOLDING_PATTERNS = (
@@ -320,6 +336,8 @@ def classify_unit(
     2. "how many rows" is a count request with a canonical answer;
     3. a table/entity the source holds is not a measurement;
     4. scaffolding (总览, 请列出) names nothing;
+    4b. a temporal/ordinal qualifier (last, top, month) scopes or orders the
+        question — it never names a measurement;
     5. a catalog phrase CONTAINED IN the unit names a measurement
        (``实际发货数量`` contains ``发货数量``) — that is a metric;
     6. the unit appearing only INSIDE the catalog's own phrases is the entity
@@ -334,12 +352,28 @@ def classify_unit(
         return "catalog_term"
     if requests_row_count(text):
         return "generic_count"
+    if _TEMPORAL_QUALIFIER_RE.match(text):
+        return "temporal"
     known_tables = {str(t).lower() for t in table_names if t}
     lowered = text.lower()
+    # An ENTITY word the source's own table names are built from ("product"
+    # inside report_product_catalog, "customer" inside crm_customer_master)
+    # names the entity those tables hold, not a measurement. Live 2026-10-10
+    # (second occurrence of the same bug class): "product" from "top 10
+    # product for last month" matched a catalog column by BM25 accident,
+    # became a fake metric slot, and forced complete=False — AFTER the
+    # temporal-qualifier fix had removed "last". The match is derived from
+    # the runtime source's table names, never a hardcoded noun list.
+    _table_tokens: set[str] = set()
+    for _t in known_tables:
+        for _part in re.split(r"[^a-z0-9\u4e00-\u9fff]+", _t.split(".")[-1]):
+            if len(_part) >= 3:
+                _table_tokens.add(_part)
     if known_tables and (
         lowered in known_tables
         or any(lowered == t.split(".")[-1] for t in known_tables)
         or any(lowered == c.split(".")[-1].lower() for c in columns if c)
+        or lowered in _table_tokens
     ):
         return "table"
     if is_scaffolding(text):

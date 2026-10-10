@@ -30,7 +30,6 @@ from .fallbacks import (
     _artifact_aware_fallback,
     _collect_artifact_titles,
     _data_summary_fallback,
-    _is_degenerate_dataset,
 )
 from .guardrails import (
     apply_guardrails,
@@ -114,5 +113,4 @@ __all__ = [
     "_artifact_aware_fallback",
     "_data_summary_fallback",
     "_SYS_COL_PREFIXES",
-    "_is_degenerate_dataset",
 ]

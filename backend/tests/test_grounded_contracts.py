@@ -1249,7 +1249,7 @@ def test_the_four_way_slot_distinction_is_preserved():
     # the vocabulary itself is closed and engine-generic
     assert set(SLOT_KINDS) == {
         "metric", "generic_count", "table", "catalog_term",
-        "grouping", "scaffolding", "unknown",
+        "grouping", "scaffolding", "temporal", "unknown",
     }
     for token in METADATA_OBJECTS:
         assert (

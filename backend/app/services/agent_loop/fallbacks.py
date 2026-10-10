@@ -194,43 +194,15 @@ def _data_summary_fallback(titles: list[str], user_content: str = "") -> str:
 # kept free of redundant copies.
 
 
+# 2026-10-10: `_is_degenerate_dataset` removed — it judged datasets by a
+# hardcoded English/finance noun regex ("revenue|margin|amount|…"), a
+# fail-closed veto that convicted legitimate all-zero data from any domain
+# outside the list. It had ZERO production call sites (dead since the
+# _BUSINESS_COL_FRAGMENTS fix); degenerate-result detection now lives in
+# synexia/verifier._check_degenerate_result, which is structural
+# (all-NULL / 0 rows / metadata-only), not noun-based.
+
 _SYS_COL_PREFIXES = ("FENTRYID", "FID", "FCUSTMATID", "FCUSTMATNAME")
-
-
-def _is_degenerate_dataset(rows: list[dict] | None) -> bool:
-    """True when every row has zero / None / "" in all apparent measure columns.
-
-    A 'measure' column is any key that looks monetary (revenue, margin, amount,
-    price, total, sales) but NOT a count/quantity column (line_count, qty,
-    quantity, count, orders) which may legitimately be non-zero while the money
-    columns are broken.  Used to prevent building a report card around a query
-    that mapped the wrong column (e.g. revenue = 0 for every row).
-    """
-    rows = rows or []
-    if not rows:
-        return True
-    _measure_re = re.compile(
-        r"^(revenue|margin|amount|price|total|sales|income|profit|cost)$",
-        re.IGNORECASE,
-    )
-    _count_re = re.compile(r"^(line_count|qty|quantity|count|orders|num)$", re.IGNORECASE)
-    measure_cols: set[str] = set()
-    for row in rows:
-        if isinstance(row, dict):
-            for k in row:
-                if _measure_re.search(k) and not _count_re.search(k):
-                    measure_cols.add(k)
-    if not measure_cols:
-        return False  # no measure columns to judge by
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        for col in measure_cols:
-            v = row.get(col)
-            if v not in (None, "", 0, 0.0):
-                return False
-    return True
-
 
 __all__ = [
     "_EMPTY_CONTENT_FALLBACK",

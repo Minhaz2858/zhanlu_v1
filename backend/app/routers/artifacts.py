@@ -11,12 +11,12 @@ import re
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query, Response, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, Request, Response, Depends, UploadFile, File
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.deps import get_current_user_required
+from app.deps import get_current_user_required, get_current_user_optional
 from app.services.artifacts.artifact_service import ArtifactService
 from app.services.artifacts.exporters import SUPPORTED_FORMATS
 from app.services.artifacts.exporters._theme import list_themes
@@ -52,7 +52,38 @@ def _log_deck_download(artifact, user_id: Optional[str], fmt: str) -> None:
         logger.warning("deck download event log failed: %s", exc)
 
 
-router = APIRouter(tags=["artifacts"], dependencies=[Depends(get_current_user_required)])
+def _auth_user_or_preview_token(
+    request: Request,
+    token: Optional[str] = Query(None),
+    user=Depends(get_current_user_optional),
+):
+    """Every artifact route requires auth EXCEPT iframe navigation.
+
+    Iframes / <img> tags cannot send the Authorization header. The preview
+    pane mounts ``/api/artifacts/{id}/preview?token=`` with a short-lived
+    signed token minted by ``POST /artifacts/{id}/preview-token`` (same
+    pattern as automation files). The token is bound to (artifact_id,
+    user_id); the artifact id is taken from the request path so a token
+    minted for one artifact can never serve another.
+
+    2026-10-10 bug: the frontend's needsPreviewToken() still believed this
+    router was unauthenticated ("served UNAUTHENTICATED by design") — but the
+    router-level ``get_current_user_required`` dependency made every route
+    Bearer-only, so iframe previews rendered ``401 {"detail":"Authentication
+    required"}`` as JSON inside the pane.
+    """
+    if user is not None:
+        return user
+    if token:
+        from app.services.preview_tokens import verify_preview_token
+
+        m = re.search(r"/artifacts/([^/?]+)/(preview|download|thumbnail)", str(request.url.path))
+        if m and verify_preview_token(token, m.group(1)):
+            return None
+    raise HTTPException(status_code=401, detail="Authentication required")
+
+
+router = APIRouter(tags=["artifacts"], dependencies=[Depends(_auth_user_or_preview_token)])
 
 
 # Characters disallowed in the legacy ``filename=`` parameter of
@@ -89,6 +120,28 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+@router.post("/artifacts/{artifact_id}/preview-token")
+def mint_artifact_preview_token(
+    artifact_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Mint a short-lived signed token so iframe previews (which cannot send
+    Authorization headers) can load the preview/download endpoints via
+    ``?token=``. Same pattern as ``POST /api/automations/files/{id}/preview-token``.
+    """
+    from app.services.preview_tokens import mint_preview_token
+
+    artifact = ArtifactService(db).get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    token = mint_preview_token(file_id=artifact_id, user_id=str(getattr(user, "id", "")))
+    return {
+        "token": token,
+        "url": f"/api/artifacts/{artifact_id}/preview?token={token}",
+    }
 
 
 # --- Request/Response schemas ---

@@ -111,8 +111,18 @@ the provided terms."""
 async def _chat(
     messages: list[dict],
     endpoint: LLMEndpoint | None = None,
-    max_tokens: int = 700,
+    max_tokens: int | None = None,
 ) -> str:
+    """Same single-turn chat contract as nl_answer_service._chat (kept local to
+    avoid a circular import; the planner must be importable from anywhere).
+
+    2026-10-10: default max_tokens 700 truncated the SQL JSON on complex
+    questions (invalid SQL → retry churn), and the 45s literal timeout
+    aborted slow planners. Both settings-backed now."""
+    if max_tokens is None:
+        from app.config import settings as _s
+
+        max_tokens = getattr(_s, "NL2SQL_PLANNER_MAX_TOKENS", 2000)
     """Same single-turn chat contract as nl_answer_service._chat (kept local to
     avoid a circular import; the planner must be importable from anywhere)."""
     if endpoint is not None:
@@ -138,7 +148,10 @@ async def _chat(
     # response_format={"type":"json_object"}; providers that reject it are
     # retried once without it (fail-soft — regex parse stays as fallback).
     payload["response_format"] = {"type": "json_object"}
-    async with httpx.AsyncClient(timeout=45.0) as client:
+    from app.config import settings as _s
+
+    _planner_timeout = float(getattr(_s, "NL2SQL_PLANNER_TIMEOUT_S", 120.0))
+    async with httpx.AsyncClient(timeout=_planner_timeout) as client:
         resp = await client.post(_url, headers=_headers, json=payload)
         if resp.status_code >= 400:
             # Some providers reject response_format — retry once without it.

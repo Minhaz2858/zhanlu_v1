@@ -36,12 +36,24 @@ def compute_confidence(execution, plan) -> tuple[float, dict]:
     if plan and plan.nodes:
         completed = sum(1 for n in plan.nodes if n.status == "completed")
         failed = sum(1 for n in plan.nodes if n.status == "failed")
-        total = len(plan.nodes)
-        plan_score = (completed / total) if total > 0 else 0.0
+        # 2026-10-10: `skipped` nodes (legitimately not run — conditional steps,
+        # superseded by a re-plan) previously stayed in the DENOMINATOR, so two
+        # skipped nodes on a perfect 4-node run scored 0.5 plan_completion and
+        # could hold back the quality gate (0.6) — the user was told to retry
+        # a run that had actually succeeded. Skipped ≠ failed: exclude them.
+        total = sum(1 for n in plan.nodes if (n.status or "") != "skipped")
+        plan_score = (completed / total) if total > 0 else 1.0
         factors["plan_completion"] = {
             "score": plan_score,
             "weight": weights["plan_completion"],
-            "detail": f"{completed}/{total} nodes completed, {failed} failed",
+            "detail": (
+                f"{completed}/{total} nodes completed, {failed} failed"
+                + (
+                    f", {len(plan.nodes) - total} skipped (excluded)"
+                    if len(plan.nodes) > total
+                    else ""
+                )
+            ),
         }
     else:
         plan_score = 0.5  # No plan = moderate confidence

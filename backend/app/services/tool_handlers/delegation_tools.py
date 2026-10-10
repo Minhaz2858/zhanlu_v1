@@ -114,7 +114,15 @@ _BUSINESS_COL_FRAGMENTS = frozenset({
 
 def _is_trivial_probe(sql: str | None) -> bool:
     """Return True if the SQL looks like a schema probe (LIMIT N without
-    aggregation, WHERE, or GROUP BY) rather than a real business query."""
+    aggregation, WHERE, or GROUP BY) rather than a real business query.
+
+    2026-10-10 goal-based amendment: the previous version ALSO convicted any
+    unbounded ``SELECT * FROM t`` — a legitimate "show me everything in the
+    departments table" question. A full dump is an honest answer; the row
+    caps (ASK_DATA_MAX_RETURN_ROWS, persistence spill) bound the context.
+    Only the LIMIT-N-without-filters shape stays a probe: it samples a table
+    to learn its columns, it does not answer a question.
+    """
     if not sql:
         return False
     s = sql.strip().lower()
@@ -122,16 +130,21 @@ def _is_trivial_probe(sql: str | None) -> bool:
     if _TRIVIAL_PROBE_RE.search(s):
         if "where" not in s and "group by" not in s:
             return True
-    # Any SELECT * without aggregation on a large table
-    if re.search(r"\bselect\s+\*\s+from\b", s) and "group by" not in s and "where" not in s and "limit" not in s:
-        return True
     return False
 
 
 def _is_garbage_business_data(rows: list | None) -> bool:
-    """Return True when the rows contain ONLY internal ID columns and no
-    business-meaningful columns. This catches the case where the sub-agent
-    ran `SELECT * FROM table LIMIT 1` and got back FENTRYID/FID garbage."""
+    """Return True when the rows contain ONLY internal ID columns.
+
+    This catches the case where the sub-agent ran `SELECT * FROM table
+    LIMIT 1` and got back FENTRYID/FID garbage.
+
+    2026-10-10 goal-based amendment: the previous version ALSO declared rows
+    garbage when no column matched the hardcoded ``_BUSINESS_COL_FRAGMENTS``
+    noun list — a fail-closed veto that convicted legitimate data from any
+    domain outside the list (healthcare, education, IoT, non-English
+    schemas). Now garbage means "all-ID columns", determined structurally;
+    an unknown domain's data is DATA until proven otherwise."""
     if not rows:
         return False  # empty is not garbage, just empty
     if not isinstance(rows, list) or len(rows) == 0:
@@ -140,26 +153,25 @@ def _is_garbage_business_data(rows: list | None) -> bool:
     if not first:
         return False
     cols = set(first.keys())
-    # If ALL columns are internal IDs, it's garbage
-    # Use _is_internal_id_column() for dynamic F-prefix + _id detection
-    if cols and all(
+    # Garbage = every column is an internal ID (dynamic F-prefix + _id detection)
+    return bool(cols) and all(
         c in _INTERNAL_ID_PATTERNS or
         (len(c) > 2 and c[0] == "F" and c[1].isupper() and c.endswith("ID")) or
         c.endswith("_id") or c.endswith("_ID")
         for c in cols
-    ):
-        return True
-    # If no column contains any business fragment, it's likely garbage
-    has_business = any(
-        any(frag in col.lower() for frag in _BUSINESS_COL_FRAGMENTS)
-        for col in cols
     )
-    return not has_business
 
 
 def _rows_have_business_data(rows: list | None) -> bool:
-    """Return True when rows contain at least one business-meaningful column
-    AND at least one row has non-null values in business columns."""
+    """Return True when rows carry at least one real (non-ID) value.
+
+    2026-10-10 goal-based amendment: business columns were previously decided
+    by the hardcoded ``_BUSINESS_COL_FRAGMENTS`` noun list; a schema outside
+    the list (healthcare, education, IoT, CJK-only names) returned False and
+    triggered garbage/fallback handling for perfectly good data. Fail-open
+    now: columns matching the fragments count, and so does every column that
+    is not an internal ID. Only all-ID rows count as having no business data.
+    """
     if not rows or not isinstance(rows, list) or len(rows) == 0:
         return False
     first = rows[0] if isinstance(rows[0], dict) else {}
@@ -169,6 +181,13 @@ def _rows_have_business_data(rows: list | None) -> bool:
     business_cols = {
         c for c in cols
         if any(frag in c.lower() for frag in _BUSINESS_COL_FRAGMENTS)
+    } or {
+        c for c in cols
+        if not (
+            c in _INTERNAL_ID_PATTERNS or
+            (len(c) > 2 and c[0] == "F" and c[1].isupper() and c.endswith("ID")) or
+            c.endswith("_id") or c.endswith("_ID")
+        )
     }
     if not business_cols:
         return False
@@ -424,7 +443,13 @@ async def _ask_data_agent(
             _swarm_result = await _run_swarm_data_agent(
                 question, bound_kb_ids, preferred_kb, db, user_id,
                 context or {}, endpoint,
-                max_iterations=max(1, min(int(args.get("max_iterations") or 6), 10)),
+                max_iterations=max(
+                    1,
+                    min(
+                        int(args.get("max_iterations") or 6),
+                        int(getattr(settings, "DELEGATE_ITERATIONS_HARD_CLAMP", 25)),
+                    ),
+                ),
             )
         except Exception as _swarm_err:
             logger.warning(
@@ -541,7 +566,9 @@ async def _ask_data_agent(
         _max_iter = int(args.get("max_iterations") or 4)
     except (TypeError, ValueError):
         _max_iter = 4
-    max_iterations = max(1, min(_max_iter, 10))
+    # 2026-10-10: the ≤10 clamp was a literal; settings-backed now (the
+    # wall-clock budget still bounds total time).
+    max_iterations = max(1, min(_max_iter, int(getattr(settings, "DELEGATE_ITERATIONS_HARD_CLAMP", 25))))
     final_text = ""
     # Per-call wall-clock override (2026-08-27): the orchestrator injects
     # `budget_seconds` for dashboard turns so data collection is NOT
@@ -1398,10 +1425,15 @@ def _is_metadata_query(sql: str | None) -> bool:
 _SKIP_COLS = frozenset({"FID", "fid", "id", "ID", "rowid", "ROWID"})
 
 # How many rows go into the condensed summary inside the `answer` field.
-_CONDENSED_MAX_ROWS = 5
+# 2026-10-10: was 5 rows / 500 chars — a 10-row top-N result with Chinese
+# product names and full-precision figures fit ~3 rows, so the calling model
+# saw the aggregates but only a prefix of the itemization. Goal-based rule:
+# the caller gets the rows the query actually returned; only the char budget
+# (sized for a small-model context) bounds the block.
+_CONDENSED_MAX_ROWS = 40
 
 
-def _condensed_row_text(rows: list, max_rows: int = _CONDENSED_MAX_ROWS, max_chars: int = 500) -> str:
+def _condensed_row_text(rows: list, max_rows: int = _CONDENSED_MAX_ROWS, max_chars: int = 4000) -> str:
     """First N rows as compact key=value pairs.
 
     This is what the calling model actually sees in the `answer` field —

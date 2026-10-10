@@ -33,8 +33,11 @@ TRANSIENT_REASONS: frozenset = frozenset({
     FailoverReason.connection_error,
 })
 
-_MAX_ATTEMPTS_CAP = 3
-_MAX_DELAY_SECONDS = 30.0
+# 2026-10-10: was a hard cap of 3 attempts (≤~30s of backoff) — sustained
+# 429/overload on a provider failed the turn in seconds. 5 attempts with a
+# 60s backoff ceiling rides out transient strain; env-overridable.
+_MAX_ATTEMPTS_CAP = 5
+_MAX_DELAY_SECONDS = 60.0
 
 
 def is_transient(ce: ClassifiedError) -> bool:
@@ -71,8 +74,12 @@ def retry_after_seconds(exc: BaseException) -> Optional[float]:
 
 
 def max_attempts_for(ce: ClassifiedError) -> int:
-    """Attempt budget: the classifier's per-error max_retries, capped at 3."""
-    return max(1, min(_MAX_ATTEMPTS_CAP, ce.max_retries or 1))
+    """Attempt budget: the classifier's per-error max_retries, capped at the
+    configured budget (5; was a literal 3)."""
+    from app.config import settings as _s
+
+    cap = int(getattr(_s, "LLM_RETRY_MAX_ATTEMPTS", _MAX_ATTEMPTS_CAP))
+    return max(1, min(cap, ce.max_retries or 1))
 
 
 def next_backoff(attempt: int, retry_after: Optional[float] = None) -> float:

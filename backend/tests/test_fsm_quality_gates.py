@@ -29,7 +29,10 @@ from app.services.synexia.quality_eval import _heuristic_verdict, _BOUNCE_BACK_M
 class _FakePlanNode:
     id: str = "node-1"
     optional: bool = False
-    produces_data: bool = True
+    # 2026-10-10: `produces_data` is no longer read — no writer ever set it
+    # (phantom attribute). Coverage now derives the expectation from
+    # node_type: only nl2sql/tool nodes are data-producing.
+    node_type: str = "nl2sql"
     expected_grain: Optional[str] = None
 
 
@@ -170,13 +173,15 @@ class TestCoverage(unittest.TestCase):
         self.assertTrue(result["critical"])
 
     def test_optional_node_not_required(self):
-        """Optional plan nodes don't need coverage."""
+        """Non-data nodes (synthesize/sandbox) don't need row coverage.
+        2026-10-10: the old `optional` flag was a phantom attribute no writer
+        ever set; the expectation is now derived from node_type."""
         obs = _FakeObservation(
             node_id="node-1",
             result_data={"rows": [{"a": 1}]},
         )
-        optional_node = _FakePlanNode(id="node-2", optional=True)
-        result = _check_coverage([obs], [_FakePlanNode(id="node-1"), optional_node])
+        non_data_node = _FakePlanNode(id="node-2", node_type="synthesize")
+        result = _check_coverage([obs], [_FakePlanNode(id="node-1"), non_data_node])
         self.assertTrue(result["ok"])
 
     def test_no_plan_returns_ok(self):

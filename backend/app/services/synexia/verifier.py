@@ -111,7 +111,21 @@ def _check_data_integrity(observations: list) -> dict:
     }
 
 
-def _check_degenerate_result(observations: list) -> dict:
+def _obs_rows(rd: dict) -> list | None:
+    """Rows of a result dict, under EITHER writer key.
+
+    The delegation/data-agent path stores rows under ``rows`` while the FSM's
+    nl2sql executor (capability_router) stores them under ``data``. Reading
+    only ``rows`` made every row-based VERIFY check silently skip ALL nl2sql
+    observations — the main data path (live 2026-10-10 audit).
+    """
+    rows = rd.get("rows")
+    if rows is None:
+        rows = rd.get("data")
+    return rows if isinstance(rows, list) else None
+
+
+def _check_degenerate_result(observations: list, question: str = "") -> dict:
     """Detect degenerate data-agent results: all-NULL dimensions, 0 rows,
     or metadata-only rows (MIN_DATE/MAX_DATE/ENTRY_COUNT with no
     actual business data).
@@ -129,17 +143,20 @@ def _check_degenerate_result(observations: list) -> dict:
         if not isinstance(rd, dict):
             continue
         # Only check observations that produced rows (data-agent shape)
-        if "rows" not in rd:
+        rows = _obs_rows(rd)
+        if rows is None:
             continue
-        rows = rd.get("rows", [])
         if isinstance(rows, (list, tuple)) and len(rows) == 0:
             degenerate.append(obs.id)
         elif isinstance(rows, list) and len(rows) > 0:
             if is_effective_empty(rows):
                 degenerate.append(obs.id)
-            elif is_metadata_only_rows(rows):
+            elif is_metadata_only_rows(rows, question=question or None):
                 # Metadata-only results (e.g. 1 row of MIN_DATE/MAX_DATE/ENTRY_COUNT)
                 # are degenerate — the query returned schema info, not business data.
+                # The question is passed so a genuine count-intent answer
+                # ({"total_lot_count": 16143} for "how many lots...") is NOT
+                # flagged — the aliased-COUNT exemption needs the intent.
                 degenerate.append(obs.id)
     return {
         "check": "degenerate_result",
@@ -149,28 +166,38 @@ def _check_degenerate_result(observations: list) -> dict:
     }
 
 
-def _check_wrong_grain(observations: list) -> dict:
+def _check_wrong_grain(observations: list, plan_nodes: list | None = None) -> dict:
     """Detect wrong-grain results: plan expected aggregate but got raw rows.
 
     ``critical=False``: wrong grain degrades quality but the data is still
     usable — the LLM can summarize it. Flagged as a soft warning.
     """
     wrong_grain = []
+    # ObservationRecord carries plan_node_id (a string), NOT a plan_node
+    # object — reading obs.plan_node raised AttributeError on every run
+    # (live 2026-10-10: "wrong_grain check raised: 'ObservationRecord'
+    # object has no attribute 'plan_node'"), so the check never evaluated.
+    node_by_id = {
+        getattr(n, "id", None): n for n in (plan_nodes or []) if getattr(n, "id", None)
+    }
     for obs in observations:
         if obs.success is False:
             continue
         rd = obs.result_data
         if not isinstance(rd, dict):
             continue
-        rows = rd.get("rows", [])
-        if not isinstance(rows, list):
+        rows = _obs_rows(rd)
+        if rows is None:
             continue
         # Heuristic: if a data-agent observation returned >50 rows and the
         # plan node's expected_grain was "aggregate" (1-5 rows), it's likely
         # wrong grain.
         expected_grain = None
-        if obs.plan_node is not None:
-            expected_grain = getattr(obs.plan_node, "expected_grain", None)
+        _node = node_by_id.get(getattr(obs, "plan_node_id", None)) or getattr(
+            obs, "plan_node", None
+        )
+        if _node is not None:
+            expected_grain = getattr(_node, "expected_grain", None)
         if expected_grain == "aggregate" and len(rows) > 50:
             wrong_grain.append(obs.id)
         # Also flag if >200 raw rows without pagination — likely unaggregated
@@ -193,11 +220,21 @@ def _check_coverage(observations: list, plan_nodes: list | None = None) -> dict:
     if not plan_nodes:
         return {"check": "coverage", "ok": True, "detail": "no_plan", "critical": True}
 
-    # Build set of plan node IDs that were expected to produce data
+    # Build set of plan node IDs that were expected to produce data.
+    # 2026-10-10: `produces_data`/`optional` were read via getattr defaults —
+    # NO writer ever sets them (PlanNode model has neither column), so every
+    # node counted as "expected to produce rows" and even a synthesize/sandbox
+    # node without rows failed coverage. Derive the expectation from the
+    # node_type: only nl2sql nodes are data-producing on the FSM path.
+    _DATA_NODE_TYPES = {"nl2sql", "tool"}
     expected_node_ids = set()
     for node in plan_nodes:
-        if getattr(node, "produces_data", True) and not getattr(node, "optional", False):
-            expected_node_ids.add(getattr(node, "id", id(node)))
+        node_type = (getattr(node, "node_type", "") or "").lower()
+        if node_type not in _DATA_NODE_TYPES:
+            continue
+        node_id = getattr(node, "id", None) or getattr(node, "node_id", None)
+        if node_id:
+            expected_node_ids.add(node_id)
 
     # Build set of node IDs that actually produced data
     observed_node_ids = set()
@@ -207,7 +244,14 @@ def _check_coverage(observations: list, plan_nodes: list | None = None) -> dict:
         node_id = getattr(obs, "plan_node_id", None) or getattr(obs, "node_id", None)
         if node_id:
             rd = obs.result_data
-            if isinstance(rd, dict) and rd.get("rows"):
+            if not isinstance(rd, dict):
+                continue
+            # Rows OR a produced artifact both count as "covered" — a
+            # sandbox/tool node legitimately ends with a file, not rows.
+            # Live 2026-10-10: the html-deliverable run executed nl2sql +
+            # a sandbox-producing tool node, and the tool node was counted
+            # 'uncovered' because it had artifact_id but no rows.
+            if _obs_rows(rd) or rd.get("artifact_id") or getattr(obs, "artifact_ids", None):
                 observed_node_ids.add(node_id)
 
     uncovered = expected_node_ids - observed_node_ids
@@ -472,6 +516,7 @@ def verify_execution(
             observations = [o for o in observations if o.plan_node_id in valid_node_ids]
 
     checks: list[dict] = []
+    plan_nodes = list(getattr(plan, "nodes", None) or []) if plan else None
     try:
         checks.append(_check_artifact_exists(db, observations))
     except Exception as e:
@@ -488,17 +533,19 @@ def verify_execution(
         logger.warning("VERIFY: data_integrity check raised: %s", e)
         checks.append({"check": "data_integrity", "ok": False, "detail": f"error: {e}", "critical": False})
     try:
-        checks.append(_check_degenerate_result(observations))
+        checks.append(_check_degenerate_result(
+            observations,
+            question=str(getattr(execution, "user_message", "") or ""),
+        ))
     except Exception as e:
         logger.warning("VERIFY: degenerate_result check raised: %s", e)
         checks.append({"check": "degenerate_result", "ok": False, "detail": f"error: {e}", "critical": True})
     try:
-        checks.append(_check_wrong_grain(observations))
+        checks.append(_check_wrong_grain(observations, plan_nodes))
     except Exception as e:
         logger.warning("VERIFY: wrong_grain check raised: %s", e)
         checks.append({"check": "wrong_grain", "ok": False, "detail": f"error: {e}", "critical": False})
     try:
-        plan_nodes = list(getattr(plan, "nodes", None) or []) if plan else None
         checks.append(_check_coverage(observations, plan_nodes))
     except Exception as e:
         logger.warning("VERIFY: coverage check raised: %s", e)

@@ -38,8 +38,11 @@ class TestNl2sqlExtraction:
         assert "#2" in out and "nl2sql" in out
         assert "SELECT material, revenue" in out           # SQL present
         assert "rows: 4" in out                            # row count
-        assert "Steel" in out and "Aluminium" in out       # top-3 rows
-        assert "Zinc" not in out                           # 4th row dropped (top-3)
+        # 2026-10-10 goal-based contract: the narrator receives EVERY row the
+        # query returned (was: top-3 only, which made "top 10 product" answers
+        # itemize 3 rows and hedge about the rest).
+        assert "Steel" in out and "Aluminium" in out
+        assert "Copper" in out and "Zinc" in out
         # aggregate stats on the numeric column
         assert "revenue: sum=219" in out
         assert "min=9" in out and "max=120" in out

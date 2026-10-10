@@ -127,7 +127,16 @@ async def call_llm_with_reliability(
     maybe_enable_parallel_tool_calls(payload, _model)
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        # 2026-10-10: was a 120s LITERAL that killed sub-agent LLM calls
+        # (deepseek data answers routinely run 60-150s). Settings-backed
+        # read timeout, same split as the main client.
+        _sub_timeout = httpx.Timeout(
+            connect=getattr(settings, "LLM_CONNECT_TIMEOUT_S", 10.0),
+            read=getattr(settings, "LLM_READ_TIMEOUT_S", 300.0),
+            write=60.0,
+            pool=10.0,
+        )
+        async with httpx.AsyncClient(timeout=_sub_timeout) as client:
             resp = await client.post(_url, headers=_headers, json=payload)
             _sc = getattr(resp, "status_code", 0)
             if isinstance(_sc, int) and _sc >= 400:

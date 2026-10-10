@@ -95,6 +95,10 @@ SLOT_KINDS = {
     "grouping": "a dimension or entity the question groups by",
     # natural-language scaffolding (总览, 情况, 请列出, please show)
     "scaffolding": "natural-language filler that names no measurement",
+    # temporal/ordinal qualifier (last, top 10, 上个月) — scopes or orders the
+    # question, never names a measurement (live 2026-10-10: "last" from
+    # "last month by revenue" became a fake unsupported metric slot)
+    "temporal": "a temporal, ordinal or ranking qualifier, not a measurement",
     # nothing in the catalog names this
     "unknown": "no catalog concept names this",
 }

@@ -223,11 +223,16 @@ _APOLOGY_MARKERS = (
 # Bounce-back markers: the agent dumped raw data and invited the user to
 # "ask for a summary" instead of actually answering. This is a non-answer
 # and must be flagged for revision.
+# 2026-10-10: "i retrieved" removed — stating WHAT was retrieved ("I
+# retrieved 42 rows and the top driver was X") is the OPPOSITE of a
+# bounce-back; the substring match flagged correct answers for revision.
+# "would you like me to" / "let me know if you" also removed: a closing
+# offer after a substantive answer is normal politeness, not a non-answer.
 _BOUNCE_BACK_MARKERS = (
-    "i retrieved", "retrieved 1 rows", "retrieved 1 records",
+    "retrieved 1 rows", "retrieved 1 records",
     "you can ask me", "ask me for a summary", "ask me for a breakdown",
-    "ask me for a chart", "would you like me to",
-    "feel free to ask", "let me know if you",
+    "ask me for a chart",
+    "feel free to ask",
     # Chinese
     "你可以让我", "需要我提供", "是否需要我", "我可以提供",
 )

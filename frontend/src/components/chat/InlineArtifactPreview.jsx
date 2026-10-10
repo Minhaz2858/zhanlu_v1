@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import PropTypes from 'prop-types';
 import { authFetch } from '@/api/authFetch';
+import { mintPreviewTokenUrl } from '@/lib/previewToken';
 import {
   FileText, Presentation, FileSpreadsheet, FileCode, Image, Download, Eye,
   AlertTriangle, ExternalLink,
@@ -122,26 +123,27 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
   // iframes cannot send Authorization headers — mint a short-lived signed
   // token and point the iframe at the returned ?token= url, so the backend
   // CSP sandbox headers still apply (a blob: iframe would drop them).
+  // 2026-10-10: mint via the shared helper — this component renders BOTH
+  // automation files (/api/automations/files/…) AND chat artifacts
+  // (/api/artifacts/{id}/preview, Bearer-authenticated since the artifacts
+  // router gained its router-level auth dependency). The old hardcoded
+  // automation mint endpoint 404'd for chat artifacts.
   useEffect(() => {
-    if (!needsSignedToken || !artifactId) return undefined;
+    if (!needsSignedToken || !artifactPreviewUrl) return undefined;
     let cancelled = false;
     setPreviewFailed(false);
     setSignedPreviewUrl(null);
-    authFetch(`/api/automations/files/${artifactId}/preview-token`, { method: 'POST' })
-      .then((res) => {
-        if (!res || !res.ok) throw new Error(`mint failed: ${res && res.status}`);
-        return res.json();
-      })
-      .then((data) => {
+    mintPreviewTokenUrl(artifactPreviewUrl)
+      .then((url) => {
         if (cancelled) return;
-        if (data?.url) setSignedPreviewUrl(data.url);
+        if (url) setSignedPreviewUrl(url);
         else setPreviewFailed(true);
       })
       .catch(() => {
         if (!cancelled) setPreviewFailed(true);
       });
     return () => { cancelled = true; };
-  }, [needsSignedToken, artifactId]);
+  }, [needsSignedToken, artifactPreviewUrl]);
 
   if (!artifact) return null;
   const type = pickType(artifact);

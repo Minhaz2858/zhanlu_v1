@@ -928,7 +928,11 @@ async def synthesize_report(
     # We now ALSO ship a pre-computed aggregate summary (computed from ALL
     # rows), so the synthesizer interprets exact numbers instead of doing
     # mental arithmetic over a raw sample.
-    MAX_ROWS_FOR_LLM = 300
+    # 2026-10-10: was a 300-row literal — the synthesis narrated only a
+    # prefix of big datasets. Settings-backed (default 1000); the
+    # pre-computed aggregates over ALL rows still ride along.
+    from app.config import settings as _s
+    MAX_ROWS_FOR_LLM = int(getattr(_s, "REPORT_SYNTHESIS_MAX_ROWS", 1000))
     rows_for_llm = rows[:MAX_ROWS_FOR_LLM]
     if len(rows) > MAX_ROWS_FOR_LLM:
         warnings.append(
