@@ -168,14 +168,13 @@ def test_sanitize_plan_step_normalises_known_alias():
 
 
 def test_sandbox_steps_stripped_without_file_intent():
-    """2026-10-10 goal-based contract: a sandbox step that a DATA step feeds
-    is the planner's deliberate deliverable and SURVIVES even without format
-    keywords in the task spec (the FINALIZE artifact gate ships it). Only
-    ORPHAN sandbox steps — no data dependency, the live-measured "file built
-    from 2 rows of thin air" shape — are stripped."""
+    """2026-10-10 (round 3): the user's file signal is authoritative. The
+    planner habitually over-produces sandbox steps — live: 'show last week
+    sales data' (TaskSpec artifacts=[]) got an unrequested xlsx from a
+    data-fed format step. WITHOUT artifact_intents/export signal, ALL
+    sandbox steps are stripped; WITH them, all are kept."""
     from app.services.synexia.plan_dag import _strip_sandbox_without_file_intent
 
-    # Data-fed sandbox: kept (planner's deliberate deliverable).
     steps = [
         {"node_type": "nl2sql", "name": "Retrieve data", "dependencies": [], "inputs": {}},
         {"node_type": "sandbox", "name": "Generate sales_report",
@@ -184,18 +183,7 @@ def test_sandbox_steps_stripped_without_file_intent():
     out = _strip_sandbox_without_file_intent(
         steps, {"artifact_intents": [], "user_signal": "default"}
     )
-    assert [s["node_type"] for s in out] == ["nl2sql", "sandbox"]
-
-    # Orphan sandbox (no data deps): stripped — the original live failure.
-    orphan = [
-        {"node_type": "nl2sql", "name": "Retrieve data", "dependencies": [], "inputs": {}},
-        {"node_type": "sandbox", "name": "Generate from nothing",
-         "dependencies": [], "inputs": {"format": "docx"}},
-    ]
-    out2 = _strip_sandbox_without_file_intent(
-        orphan, {"artifact_intents": [], "user_signal": "default"}
-    )
-    assert [s["node_type"] for s in out2] == ["nl2sql"]
+    assert [s["node_type"] for s in out] == ["nl2sql"]
 
 
 def test_sandbox_steps_kept_with_file_intent():

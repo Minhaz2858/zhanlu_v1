@@ -276,13 +276,15 @@ def test_deterministic_fallback_has_no_hardcoded_currency():
     assert "300.00" in text  # total still computed
 
 
-# ── 7. Plan-deliberate sandbox steps survive the file-intent strip ────────
+# ── 7. No user file signal → no file deliverable (user goal is authoritative)
 
 
-def test_data_fed_sandbox_step_survives_strip():
-    """A sandbox step that a data step feeds is the planner's deliberate
-    deliverable — the old rule stripped it because the user's message had
-    no format keyword."""
+def test_sandbox_stripped_without_file_intent():
+    """2026-10-10 round 2 trusted data-fed sandbox steps as 'the planner's
+    deliberate deliverable' — the SAME DAY 'show last week sales data'
+    (TaskSpec artifacts=[], zero file intent) got an unrequested xlsx because
+    the LLM planner habitually over-produces format steps. The USER's file
+    signal is the goal: no file intent → ALL sandbox steps stripped."""
     from app.services.synexia.plan_dag import _strip_sandbox_without_file_intent
 
     steps = [
@@ -290,31 +292,36 @@ def test_data_fed_sandbox_step_survives_strip():
         {"node_type": "sandbox", "name": "xlsx", "dependencies": [0]},
     ]
     out = _strip_sandbox_without_file_intent(steps, {})
-    assert len(out) == 2
-    assert out[1]["node_type"] == "sandbox"
+    assert [s["node_type"] for s in out] == ["nl2sql"]
 
 
-def test_orphan_sandbox_step_still_stripped():
-    """The live-measured broken shape (file built from thin air, 2 rows):
-    a sandbox step with NO data dependencies must still be stripped."""
+def test_explicit_file_intent_keeps_sandbox():
     from app.services.synexia.plan_dag import _strip_sandbox_without_file_intent
 
     steps = [
         {"node_type": "nl2sql", "name": "q", "dependencies": []},
-        {"node_type": "sandbox", "name": "xlsx", "dependencies": []},
+        {"node_type": "sandbox", "name": "xlsx", "dependencies": [0]},
     ]
-    out = _strip_sandbox_without_file_intent(steps, {})
-    assert len(out) == 1
-    assert out[0]["node_type"] == "nl2sql"
-
-
-def test_explicit_file_intent_keeps_everything():
-    from app.services.synexia.plan_dag import _strip_sandbox_without_file_intent
-
-    steps = [{"node_type": "sandbox", "name": "xlsx", "dependencies": []}]
-    assert _strip_sandbox_without_file_intent(
+    out = _strip_sandbox_without_file_intent(
         steps, {"artifact_intents": ["xlsx"]}
-    ) == steps
+    )
+    assert [s["node_type"] for s in out] == ["nl2sql", "sandbox"]
+
+
+def test_generate_plan_creates_nodes_after_strip():
+    """CRITICAL ordering bug (live: 'show last week sales data' logged
+    'stripped 1 sandbox' yet the xlsx was still generated): PlanNode records
+    were created BEFORE the sanitize/strip/decomposition ran, so the DB held
+    the stripped steps anyway. The strip call must precede PlanNode creation
+    in generate_plan's source."""
+    import inspect
+
+    from app.services.synexia import plan_dag
+
+    src = inspect.getsource(plan_dag.generate_plan)
+    assert src.index("_strip_sandbox_without_file_intent(plan_steps") < src.index(
+        "for i, step in enumerate(plan_steps):"
+    ), "PlanNode creation must run AFTER the sandbox strip"
 
 
 # ── 8. Garbage classifier is fail-open for unknown domains ────────────────
@@ -648,3 +655,62 @@ def test_dead_delegate_timeout_config_removed():
 
     # the dead constant itself is gone (a comment mentioning the removal is fine)
     assert not hasattr(settings, "DELEGATE_TIMEOUT")
+
+
+# ── 18. Export without a synthesize node still delivers the file ──────────
+
+
+class _FakeObservation:
+    def __init__(self, otype, rd):
+        self.observation_type = otype
+        self.success = True
+        self.result_data = rd
+
+
+def test_export_without_synthesize_node_builds_from_data_rows(monkeypatch):
+    """Live: 'give me in html file' planned nl2sql only — no synthesize
+    observation — and fsm_finalize_into_artifact returned None, so the user's
+    EXPLICIT file request produced nothing while the log claimed success."""
+    from app.services.synexia import finalize as fin
+
+    captured = {}
+
+    def _fake_finalize(db, **kwargs):
+        captured["payload"] = kwargs.get("payload")
+        return (types.SimpleNamespace(id="art-1"), {"html": {"artifact_id": "art-1"}})
+
+    monkeypatch.setattr(fin, "finalize_into_artifact", _fake_finalize)
+
+    obs = [_FakeObservation("nl2sql", {
+        "data": [{"product": "A", "revenue": 100}],
+        "sql": "SELECT 1",
+        "source_name": "ERP",
+    })]
+    result = fin.fsm_finalize_into_artifact(
+        db=None,
+        conversation_id="conv",
+        agent_name="general_assistant",
+        user_message="show top 5 product and give me in html file",
+        observations=obs,
+        task_spec={"user_signal": "export_html", "entities": {}},
+    )
+    assert result is not None
+    artifact, fe, payload = result
+    assert artifact.id == "art-1"
+    assert fe["html"]["artifact_id"] == "art-1"
+    assert payload.title  # built from the user message
+
+
+def test_export_with_no_data_at_all_returns_none():
+    from app.services.synexia import finalize as fin
+
+    obs = [_FakeObservation("tool_call", {"result": "nothing"})]
+    result = fin.fsm_finalize_into_artifact(
+        db=None,
+        conversation_id="conv",
+        agent_name="general_assistant",
+        user_message="export",
+        observations=obs,
+        task_spec={"user_signal": "export_html"},
+    )
+    assert result is None  # honest: nothing to build from

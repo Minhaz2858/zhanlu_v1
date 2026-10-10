@@ -60,7 +60,7 @@ _FILE_INTENT_KEYWORDS = (
     # English — file formats and file-action verbs
     "docx", "pptx", "pdf", "xlsx", "excel", "word",
     "powerpoint", "slide", "deck", "document",
-    "csv", "spreadsheet", "markdown",
+    "csv", "spreadsheet", "markdown", "html", "webpage", "网页",
     "download", "export", "as a file", "as a doc",
     "as a deck", "save as", "send me the file",
     # Chinese — file-action phrases

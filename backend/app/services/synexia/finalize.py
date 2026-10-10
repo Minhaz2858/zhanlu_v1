@@ -611,8 +611,60 @@ def fsm_finalize_into_artifact(
             sandbox_obs = obs
 
     if not synth_obs:
-        logger.debug("fsm_finalize_into_artifact: no synthesize observation found — skipping")
-        return None
+        # 2026-10-10: an export turn whose plan carries no synthesize node
+        # (live: "…give me in html file" planned nl2sql only) used to bail
+        # out here — the user EXPLICITLY asked for a file and got none, while
+        # the finalize log still claimed "artifact produced". Build a minimal
+        # payload from the data observations (nl2sql rows) instead of giving
+        # up; finalize_into_artifact still applies the format auto-export.
+        data_rows: list = []
+        sql_used = None
+        source_used = ""
+        for obs in observations:
+            if not getattr(obs, "success", False):
+                continue
+            rd = obs.result_data if isinstance(obs.result_data, dict) else {}
+            rows = rd.get("rows") or rd.get("data")
+            if isinstance(rows, list) and rows and not data_rows:
+                data_rows = rows
+                sql_used = rd.get("sql")
+                source_used = rd.get("source_name") or ""
+        if not data_rows:
+            logger.debug(
+                "fsm_finalize_into_artifact: no synthesize observation and no "
+                "data rows — nothing to build an artifact from"
+            )
+            return None
+        logger.info(
+            "fsm_finalize_into_artifact: no synthesize observation — building "
+            "export payload from %d data row(s)",
+            len(data_rows),
+        )
+        _title = (
+            (task_spec.get("entities", {}) or {}).get("report_title")
+            or (user_message or "Data export").strip()[:80]
+        )
+        payload = ReportCardPayload(
+            title=_title,
+            source=source_used,
+            generated_at=datetime.now(timezone.utc).isoformat() + "Z",
+            summary=f"Export of {len(data_rows)} rows for: {(user_message or '').strip()[:200]}",
+            kpis=[],
+            chart=None,
+            insights=[InsightSpec(icon="table", text=f"{len(data_rows)} rows exported.")],
+            user_signal=task_spec.get("user_signal", "default"),
+        )
+        artifact, file_exports = finalize_into_artifact(
+            db,
+            conversation_id=conversation_id,
+            agent_name=agent_name,
+            user_message=user_message,
+            source=source_used or None,
+            sql=sql_used,
+            payload=payload,
+            message_id=message_id,
+        )
+        return artifact, file_exports, payload
 
     synth_data = {}
     if synth_obs.result_data and isinstance(synth_obs.result_data, dict):

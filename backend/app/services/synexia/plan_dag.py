@@ -164,18 +164,23 @@ def _intent_is_renderable(artifact_type) -> bool:
 
 
 def _strip_sandbox_without_file_intent(steps: list, task_spec: dict) -> list:
-    """Strip only ORPHAN sandbox steps — those no data step feeds.
+    """Strip EVERY sandbox step when the user gave no file signal.
 
     Measured live 2026-09-22: "上周按产品、客户及组织划分的销售报告" (no
     format words) was planned as an XLSX/DOCX file turn fed with TWO rows —
-    the analysis itself never ran. That failure shape is a sandbox step with
-    NO nl2sql/data dependencies: a file built from thin air.
+    the analysis itself never ran.
 
-    2026-10-10 goal-based amendment: the old rule stripped EVERY sandbox step
-    whenever the user's message lacked a format keyword, overriding the
-    planner's own deliverable decision. Now a sandbox step that a data step
-    feeds IS the plan's deliberate deliverable and survives (the FINALIZE
-    artifact gate ships it); only orphan sandbox steps are removed.
+    2026-10-10 round 2 trusted data-fed sandbox steps as "the planner's
+    deliberate deliverable". The SAME DAY produced the counter-example:
+    "show last week sales data" — TaskSpec artifacts=[], user_signal=default,
+    zero file intent — and the planner STILL authored a format step
+    ("Execute and format last week sales results"), which ran and produced an
+    unrequested workbook. The LLM planner habitually over-produces file
+    steps; the USER's file signal is the goal, and the task-spec parser
+    (detect_file_intent → artifact_intents) already captures it reliably —
+    explicit requests ("give me in html file", "导出") set artifact_intents
+    and keep their sandbox steps. Without that signal, analytical questions
+    are answered in chat.
     """
     try:
         has_file_intent = bool(task_spec.get("artifact_intents")) or str(
@@ -183,28 +188,13 @@ def _strip_sandbox_without_file_intent(steps: list, task_spec: dict) -> list:
         ).startswith("export_")
         if has_file_intent or not isinstance(steps, list):
             return steps
-        data_step_indices = {
-            i for i, st in enumerate(steps)
-            if isinstance(st, dict) and st.get("node_type") != "sandbox"
-        }
-        kept = []
-        stripped = 0
-        for i, st in enumerate(steps):
-            if not isinstance(st, dict) or st.get("node_type") != "sandbox":
-                kept.append(st)
-                continue
-            deps = st.get("dependencies") or []
-            if any(d in data_step_indices for d in deps):
-                # A data step feeds this sandbox — the planner deliberately
-                # built a file deliverable on real query results. Keep it.
-                kept.append(st)
-                continue
-            stripped += 1
-        if stripped:
+        kept = [st for st in steps
+                if isinstance(st, dict) and st.get("node_type") != "sandbox"]
+        if len(kept) != len(steps):
             logger.info(
-                "plan: stripped %d orphan sandbox step(s) — no data step "
-                "feeds them (file from thin air)",
-                stripped,
+                "plan: stripped %d sandbox step(s) — no file intent in the "
+                "task spec (analytical answers run in chat)",
+                len(steps) - len(kept),
             )
         return kept or steps
     except Exception as e:
@@ -714,27 +704,15 @@ Respond with ONLY a JSON array."""
     db.add(plan)
     db.flush()  # Get plan ID
 
-    # Create PlanNode records
-    for i, step in enumerate(plan_steps):
-        _out_type, _step_inputs = _sanitize_plan_step(step)
-        node = PlanNode(
-            id=str(uuid4()),
-            plan_id=plan.id,
-            seq=i,
-            node_type=step.get("node_type", "tool"),
-            name=step.get("name", f"Step {i+1}"),
-            description=step.get("description", ""),
-            dependencies=step.get("dependencies", []),
-            inputs=_step_inputs,
-            expected_output=step.get("expected_output"),
-            output_artifact_type=_out_type,
-            status="pending",
-        )
-        db.add(node)
-
-    # Validate acyclicity. A cycle is SANITIZED (back-edges dropped), not
-    # marked-invalid — the executor refuses cyclic graphs and the whole turn
-    # died on a salvageable defect (measured live 2026-09-22).
+    # ── Sanitize + strip + decompose BEFORE PlanNode records exist ──────
+    # 2026-10-10 CRITICAL ordering bug: this block ran AFTER db.add(node),
+    # so the dependency sanitization, the no-file-intent sandbox strip and
+    # the report decomposition only mutated the LOCAL list — the already-
+    # added PlanNode rows were committed verbatim and the executor ran the
+    # stripped/decomposed-over steps anyway. Live: 'show last week sales
+    # data' (TaskSpec artifacts=[], no file intent) logged "stripped 1
+    # orphan sandbox step" yet the xlsx was still generated — the sandbox
+    # node survived in the DB.
     plan_steps, _dropped_deps = _sanitize_plan_dependencies(plan_steps)
     if _dropped_deps:
         logger.warning(
@@ -770,6 +748,31 @@ Respond with ONLY a JSON array."""
                 )
                 plan_steps = _dec
     plan.is_acyclic = _validate_acyclic(plan_steps)
+
+    # Create PlanNode records — AFTER sanitization/strip/decomposition, so
+    # the DB holds exactly the executable plan. Column limits are clamped:
+    # 2026-10-10 live failure — the planner authored a step name longer than
+    # PlanNode.name's VARCHAR(200) and the INSERT crashed the WHOLE turn
+    # (psycopg2 StringDataRightTruncation) on a purely cosmetic field.
+    for i, step in enumerate(plan_steps):
+        _out_type, _step_inputs = _sanitize_plan_step(step)
+        node = PlanNode(
+            id=str(uuid4()),
+            plan_id=plan.id,
+            seq=i,
+            node_type=str(step.get("node_type", "tool"))[:30],
+            name=str(step.get("name") or f"Step {i+1}")[:200],
+            description=str(step.get("description", "") or ""),
+            dependencies=step.get("dependencies", []),
+            inputs=_step_inputs,
+            expected_output=(
+                str(step.get("expected_output"))[:200]
+                if step.get("expected_output") else None
+            ),
+            output_artifact_type=str(_out_type)[:50] if _out_type else None,
+            status="pending",
+        )
+        db.add(node)
 
     db.commit()
     db.refresh(plan)
