@@ -291,6 +291,78 @@ class NLAnswerService:
             except Exception as e:
                 logger.warning("NLAnswer: freshness short-circuit skipped: %s", e)
 
+        # 0b. Definitional lookup short-circuit (OCI agentic mixed-mode):
+        # "what is net revenue" / "发泡剂是什么" is NOT an analytics request —
+        # it asks for a DEFINITION, which the VERIFIED glossary answers
+        # deterministically without any SQL. Mixed-mode planning in its
+        # simplest, highest-value form: semantic lookup instead of execution.
+        if getattr(settings, "NL2SQL_DEFINITIONAL_LOOKUP_ENABLED", True):
+            try:
+                import re as _dl_re
+
+                _dl_q = (question or "").strip()
+                _dl_m = (
+                    _dl_re.match(
+                        r"^(?:what(?:'s| is| are)|define|explain|meaning of|"
+                        r"description of)\s+(.+?)[?.!\s]*$",
+                        _dl_q,
+                        _dl_re.IGNORECASE,
+                    )
+                    or _dl_re.match(r"^(.+?)\s*(?:是什么|是什么意思)(?:吗)?[?？。]*$", _dl_q)
+                    or _dl_re.match(r"^什么是(.+?)[?？。]*$", _dl_q)
+                )
+                _dl_non_def = ("trend", "compare", "by ", "per ", "last",
+                               "this month", "top", "list", "show", "how many",
+                               "how much")
+                if _dl_m and not any(w in _dl_q.lower() for w in _dl_non_def):
+                    from app.services.db.semantic_store import get_semantic_store
+
+                    _dl_store = get_semantic_store(
+                        self._db, [kb_id], project_id=project_id,
+                    )
+                    _dl_terms = [
+                        t for t in _dl_store.glossary(_dl_q, limit=3)
+                        if (t.definition or "").strip()
+                    ]
+                    if _dl_terms:
+                        _dl_t = _dl_terms[0]
+                        _dl_answer = (
+                            f"**{_dl_t.term}** — {_dl_t.definition}"
+                        )
+                        if _dl_t.sql_expression:
+                            _dl_answer += (
+                                f"\n\nDefinition in this database: "
+                                f"`{_dl_t.sql_expression}`"
+                            )
+                        if _dl_t.unit:
+                            _dl_answer += f"\n\nUnit: {_dl_t.unit}."
+                        _dl_answer += (
+                            "\n\n(Answered from the VERIFIED semantic layer — "
+                            "no query was needed. Ask for a breakdown or trend "
+                            "to run the numbers.)"
+                        )
+                        logger.info(
+                            "NLAnswer: definitional lookup hit (term=%s) — "
+                            "answering from the glossary without SQL",
+                            _dl_t.term,
+                        )
+                        return {
+                            "success": True,
+                            "answer": _dl_answer,
+                            "rows": [],
+                            "columns": [],
+                            "sql": None,
+                            "source_id": kb_id,
+                            "source_name": None,
+                            "citations": [],
+                            "iterations": 0,
+                            "mixed_mode": "semantic_lookup",
+                            "glossary_term": _dl_t.term,
+                            "short_circuit": "definitional",
+                        }
+            except Exception as _dl_err:
+                logger.debug("NLAnswer: definitional lookup skipped: %s", _dl_err)
+
         schema_svc = SchemaService(self._db)
         query_svc = QueryService(self._db)
         # Enforcement context (never a switch): the gate runs on every execution
@@ -890,6 +962,18 @@ class NLAnswerService:
                             "tables=%d)",
                             len(_wl_text), len(_wl_tables),
                         )
+                # 1b-gl (OCI organizational enrichment): authored business
+                # rules — fiscal calendar, default filters, territory maps,
+                # exceptions. These constrain the SQL generation the same way
+                # workload hints guide it, but they are AUTHORED (VERIFIED),
+                # not mined.
+                _gl_text = _wl_store.format_guidelines_block()
+                if _gl_text:
+                    schema_text = (schema_text or "") + "\n\n" + _gl_text
+                    logger.info(
+                        "NLAnswer: business rules injected (%d chars)",
+                        len(_gl_text),
+                    )
         except Exception as _wl_err:
             logger.debug("NLAnswer: workload hints skipped: %s", _wl_err)
 
@@ -1707,6 +1791,26 @@ class NLAnswerService:
                 from app.services.db.chart_suggestor import suggest_chart
 
                 _visualization = suggest_chart(_na_rows, _na_cols)
+                # 4c-bis (OCI stage 8 "Visualization", P2): ASSEMBLE the chart
+                # data, not just the type hint — {x_key, y_keys, data} derived
+                # deterministically from the result rows so the frontend can
+                # render the chart directly. Capped at 60 points.
+                if _visualization and isinstance(_visualization, dict):
+                    _x = _visualization.get("x_key") or (_na_cols[0] if _na_cols else None)
+                    _y = _visualization.get("y_keys") or [
+                        c for c in _na_cols
+                        if c != _x and isinstance(_na_rows[0].get(c), (int, float))
+                    ][:3]
+                    if _x and _y:
+                        _visualization["chart_data"] = {
+                            "x_key": _x,
+                            "y_keys": _y,
+                            "points": [
+                                {k: r.get(k) for k in ([_x] + _y)}
+                                for r in _na_rows[:60]
+                            ],
+                            "truncated": len(_na_rows) > 60,
+                        }
             except Exception as e:
                 logger.debug("NLAnswer: chart suggestion skipped: %s", e)
 

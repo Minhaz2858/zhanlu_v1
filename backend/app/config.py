@@ -275,6 +275,10 @@ class Settings(BaseSettings):
     # Rows of a large result the report synthesizer sees. Was 300 — the
     # synthesis narrated only a prefix of big datasets.
     REPORT_SYNTHESIS_MAX_ROWS: int = 1000
+    # Mixed-mode planning (OCI agentic mode): definitional questions
+    # ("what is net revenue" / 发泡剂是什么) are answered from the VERIFIED
+    # glossary without any SQL — semantic lookup instead of execution.
+    NL2SQL_DEFINITIONAL_LOOKUP_ENABLED: bool = True
 
     # ── Document ingestion — audio / image / video ────────────────────────
     # Audio: transcribe uploads via an OpenAI-compatible Whisper endpoint

@@ -90,6 +90,87 @@ def _has_row_bound(sql: str) -> bool:
     return bool(_LIMIT_RE.search(sql) or _TOP_RE.search(sql) or _FETCH_RE.search(sql))
 
 
+def _apply_having_pushdown(sql: str, res: RewriteResult) -> str:
+    """Aggregation restructuring (OCI stage 5, deterministic subset): move a
+    HAVING conjunct that references NO aggregate and ONLY grouped columns
+    into the WHERE clause, so the database filters rows BEFORE grouping
+    instead of aggregating everything and throwing rows away afterwards.
+
+    Semantics-preserving by construction: the conjunct is evaluated per-row
+    on grouped columns only, which is identical before and after grouping.
+    Anything that fails the test (aggregates, SELECT aliases of aggregates,
+    columns outside the GROUP BY, subqueries) stays in HAVING.
+
+    2026-10-11: the blog's optimization stage lists "aggregation
+    restructuring"; this is the deterministic, provably-safe subset.
+    sqlglot-based (same engine as the collation healer); fail-soft.
+    """
+    if not _SELECT_START_RE.match(sql or ""):
+        return sql
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(sql)
+        having = tree.args.get("having")
+        group = tree.args.get("group")
+        if having is None or group is None:
+            return sql
+
+        group_names = {
+            c.name.lower() for c in group.find_all(exp.Column)
+        }
+        conjuncts = list(having.this.flatten()) if isinstance(
+            having.this, exp.And
+        ) else [having.this]
+
+        movable, kept = [], []
+        for cond in conjuncts:
+            has_agg = cond.find(exp.AggFunc) is not None
+            has_subquery = cond.find(exp.Select) is not None
+            cols = [c for c in cond.find_all(exp.Column)]
+            ok = (
+                not has_agg
+                and not has_subquery
+                and cols
+                and all(c.name.lower() in group_names for c in cols)
+            )
+            (movable if ok else kept).append(cond)
+
+        if not movable:
+            return sql
+
+        for cond in movable:
+            existing_where = tree.args.get("where")
+            if existing_where is not None:
+                existing_where.this = exp.and_(existing_where.this, cond, copy=False)
+            else:
+                tree.set("where", exp.Where(this=cond))
+        if kept:
+            rebuilt = kept[0]
+            for c in kept[1:]:
+                rebuilt = exp.and_(rebuilt, c, copy=False)
+            tree.set("having", exp.Having(this=rebuilt))
+        else:
+            tree.set("having", None)
+
+        new_sql = tree.sql()
+        if not new_sql or not new_sql.strip().upper().startswith(("SELECT", "WITH")):
+            return sql
+        res.notes.append(
+            f"having_pushdown: moved {len(movable)} non-aggregate HAVING "
+            "conjunct(s) into WHERE (filter before grouping)"
+        )
+        logger.info(
+            "sql_rewriter: having_pushdown applied (%d conjunct(s) moved)",
+            len(movable),
+        )
+        return new_sql
+    except Exception as e:  # a failed optimization must never break a query
+        res.notes.append(f"having_pushdown skipped: {e}")
+        return sql
+
+
 def _apply_limit(sql: str, max_rows: int, res: RewriteResult) -> str:
     if max_rows is None or max_rows <= 0 or _has_row_bound(sql):
         return sql
@@ -257,6 +338,7 @@ def rewrite_sql(
     try:
         res.sql = _apply_join_elimination(res.sql, unique_columns, res)
         res.sql = _apply_pushdown(res.sql, res)
+        res.sql = _apply_having_pushdown(res.sql, res)
         res.sql = _apply_limit(res.sql, max_rows, res)
         _collect_notes(res.sql, res)
     except Exception as e:  # a failed optimization must never break a query

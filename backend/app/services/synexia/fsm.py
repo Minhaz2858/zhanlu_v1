@@ -1352,6 +1352,34 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
         """
         from app.services.llm_service import stream_chat_completion, call_llm
 
+        # Mixed-mode pass-through (OCI agentic mode, 2026-10-11): when the
+        # executed plan produced a semantic_lookup answer (a definitional
+        # question served from the VERIFIED glossary), that curated text IS
+        # the answer — re-narrating it through the LLM pads it with generic
+        # outside knowledge (live: a 200-char curated definition became
+        # 4,300 chars of generic accounting prose). Yield it verbatim.
+        try:
+            for obs in (self.execution.observations or []):
+                _rd = getattr(obs, "result_data", None)
+                if (
+                    getattr(obs, "success", False)
+                    and isinstance(_rd, dict)
+                    and _rd.get("mixed_mode") == "semantic_lookup"
+                    and str(_rd.get("answer") or "").strip()
+                ):
+                    _curated = str(_rd["answer"]).strip()
+                    self.execution.assistant_content = _curated
+                    logger.info(
+                        "FSM: mixed-mode semantic_lookup — yielding the "
+                        "curated definition verbatim (%d chars)",
+                        len(_curated),
+                    )
+                    yield ("delta", _curated)
+                    yield ("done", _curated)
+                    return
+        except Exception as e:
+            logger.debug("FSM mixed-mode pass-through skipped: %s", e)
+
         prompt = getattr(self, "_deferred_response_prompt", None)
         if prompt is None:
             prompt = self._build_response_prompt(request)

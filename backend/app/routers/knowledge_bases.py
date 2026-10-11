@@ -470,6 +470,7 @@ async def get_semantic_store_view(app_id: str, kb_id: str, db: Session = Depends
         "joins": [_dc(j) for j in all_joins[:200]],
         "joins_total": len(all_joins),
         "glossary": glossary,
+        "guidelines": store.guidelines(),
         "workload": workload,
         "mined": {"join_hints": mined_joins, "common_filters": mined_filters},
         "domains": store.domains(),
@@ -612,6 +613,122 @@ async def delete_kb_metric(
     )
     if row is None:
         raise HTTPException(status_code=404, detail="Metric not found")
+    row.is_deleted = True
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/{kb_id}/guidelines")
+async def list_kb_guidelines(app_id: str, kb_id: str, db: Session = Depends(get_db)):
+    """Authored organizational rules (fiscal calendar, default filters,
+    territory maps, exceptions, policies) for this datasource."""
+    from app.models.semantic_guideline import SemanticGuideline
+
+    rows = (
+        db.query(SemanticGuideline)
+        .filter(
+            SemanticGuideline.datasource_id == kb_id,
+            SemanticGuideline.is_deleted == False,  # noqa: E712
+        )
+        .order_by(SemanticGuideline.kind.asc(), SemanticGuideline.title.asc())
+        .all()
+    )
+    return [
+        {
+            "id": str(r.id),
+            "kind": r.kind,
+            "title": r.title,
+            "content": r.content,
+            "is_enabled": bool(r.is_enabled),
+        }
+        for r in rows
+    ]
+
+
+@router.post("/{kb_id}/guidelines")
+async def create_kb_guideline(app_id: str, kb_id: str, body: dict, db: Session = Depends(get_db)):
+    """Author an organizational rule — becomes a BUSINESS RULES constraint
+    injected into every NL2SQL generation for this datasource."""
+    import uuid as _uuid
+
+    from app.models.semantic_guideline import (
+        GUIDELINE_KINDS,
+        SemanticGuideline,
+    )
+
+    title = str((body or {}).get("title") or "").strip()
+    content = str((body or {}).get("content") or "").strip()
+    kind = str((body or {}).get("kind") or "other").strip()
+    if not title or not content:
+        raise HTTPException(status_code=400, detail="title and content are required")
+    if kind not in GUIDELINE_KINDS:
+        kind = "other"
+    row = SemanticGuideline(
+        id=str(_uuid.uuid4()),
+        datasource_id=kb_id,
+        kind=kind,
+        title=title,
+        content=content,
+        is_enabled=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "id": str(row.id), "kind": row.kind,
+        "title": row.title, "content": row.content,
+        "is_enabled": bool(row.is_enabled),
+    }
+
+
+@router.patch("/{kb_id}/guidelines/{guideline_id}")
+async def update_kb_guideline(
+    app_id: str, kb_id: str, guideline_id: str, body: dict, db: Session = Depends(get_db)
+):
+    from app.models.semantic_guideline import (
+        GUIDELINE_KINDS,
+        SemanticGuideline,
+    )
+
+    row = (
+        db.query(SemanticGuideline)
+        .filter(
+            SemanticGuideline.id == guideline_id,
+            SemanticGuideline.datasource_id == kb_id,
+            SemanticGuideline.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Guideline not found")
+    if "title" in (body or {}):
+        row.title = str(body["title"]).strip() or row.title
+    if "content" in (body or {}):
+        row.content = str(body["content"]).strip() or row.content
+    if "kind" in (body or {}) and body["kind"] in GUIDELINE_KINDS:
+        row.kind = body["kind"]
+    if "is_enabled" in (body or {}):
+        row.is_enabled = bool(body["is_enabled"])
+    db.commit()
+    return {"id": str(row.id), "ok": True}
+
+
+@router.delete("/{kb_id}/guidelines/{guideline_id}")
+async def delete_kb_guideline(
+    app_id: str, kb_id: str, guideline_id: str, db: Session = Depends(get_db)
+):
+    from app.models.semantic_guideline import SemanticGuideline
+
+    row = (
+        db.query(SemanticGuideline)
+        .filter(
+            SemanticGuideline.id == guideline_id,
+            SemanticGuideline.datasource_id == kb_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Guideline not found")
     row.is_deleted = True
     db.commit()
     return {"ok": True}

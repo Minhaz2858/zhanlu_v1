@@ -763,6 +763,11 @@ def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None, endpoint=Non
                     "source_id": result.get("source_id") if isinstance(result, dict) else None,
                     "source_name": result.get("source_name") if isinstance(result, dict) else None,
                     "answer": answer,
+                    # Mixed-mode marker (2026-10-11): a semantic_lookup result
+                    # (definitional question answered from the VERIFIED
+                    # glossary) must pass through the finalize narrator
+                    # verbatim — see fsm.stream_final_response.
+                    "mixed_mode": result.get("mixed_mode") if isinstance(result, dict) else None,
                     "citations": result.get("citations") if isinstance(result, dict) else None,
                     # P3: the recorded observation is a whitelist, so the
                     # grounding envelope travels explicitly. Without this the

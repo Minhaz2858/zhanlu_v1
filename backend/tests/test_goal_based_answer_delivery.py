@@ -714,3 +714,45 @@ def test_export_with_no_data_at_all_returns_none():
         task_spec={"user_signal": "export_html"},
     )
     assert result is None  # honest: nothing to build from
+
+
+# ── 19. OCI round 2: aggregation restructuring + mixed-mode planning ──────
+
+
+def test_having_pushdown_moves_non_aggregate_conjunct():
+    """OCI optimization stage: a HAVING conjunct with no aggregate that only
+    references grouped columns filters BEFORE grouping — deterministic and
+    semantics-preserving."""
+    from app.services.db.sql_rewriter import rewrite_sql
+
+    sql = (
+        "SELECT dep, SUM(FAMOUNT) FROM orders GROUP BY dep "
+        "HAVING dep = 'guangdong' AND SUM(FAMOUNT) > 100"
+    )
+    r = rewrite_sql(sql)
+    up = r.sql.upper()
+    assert "WHERE DEP = 'guangdong'" in up or "where dep = 'guangdong'" in r.sql.lower()
+    assert "HAVING SUM(FAMOUNT) > 100" in up or "having SUM(FAMOUNT) > 100" in r.sql
+    assert any("having_pushdown" in n for n in r.notes)
+
+
+def test_having_pushdown_keeps_aggregate_conjuncts():
+    from app.services.db.sql_rewriter import rewrite_sql
+
+    sql = "SELECT dep, SUM(a) FROM t GROUP BY dep HAVING SUM(a) > 5"
+    r = rewrite_sql(sql)
+    assert "HAVING" in r.sql.upper()
+    assert not any("having_pushdown" in n for n in r.notes)
+
+
+def test_glossary_definitional_hit_helper():
+    """Mixed-mode planning: a definitional question that the VERIFIED
+    glossary can answer routes as a data turn (semantic lookup instead of a
+    web search)."""
+    from app.routers.agents import _glossary_definitional_hit
+
+    # The authored metric 'net_revenue'/'net amount' (test 18 wrote it) or
+    # terminologies may or may not exist in this DB — assert shape only.
+    result = _glossary_definitional_hit("what is net revenue", [])
+    assert isinstance(result, bool)
+    assert _glossary_definitional_hit("show top 5 products", []) is False

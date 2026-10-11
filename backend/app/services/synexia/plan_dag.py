@@ -417,6 +417,95 @@ def generate_plan(
     from app.services.llm_service import call_llm
     import json
 
+    # ── Definitional short-circuit (OCI agentic mixed-mode, 2026-10-11) ──
+    # "what is net revenue" asks for a DEFINITION, not analytics — yet the
+    # planner authored a web-search step and the user got generic literature
+    # instead of the curated business definition. When the VERIFIED glossary
+    # can answer the question, plan a SINGLE nl2sql node: the sealed
+    # pipeline's definitional lookup (nl_answer_service) answers from the
+    # semantic layer WITHOUT SQL. This is the planner's mixed-mode decision —
+    # "when SQL is needed versus retrieval" — made deterministically.
+    if not failure_context:
+        try:
+            from app.config import settings as _s
+
+            if getattr(_s, "NL2SQL_DEFINITIONAL_LOOKUP_ENABLED", True):
+                import re as _re
+
+                _q = str(task_spec.get("user_message") or "").strip()
+                _m = (
+                    _re.match(
+                        r"^(?:what(?:'s| is| are)|define|explain|meaning of|"
+                        r"description of)\s+(.+?)[?.!\s]*$",
+                        _q, _re.IGNORECASE,
+                    )
+                    or _re.match(r"^(.+?)\s*(?:是什么|是什么意思)(?:吗)?[?？。]*$", _q)
+                    or _re.match(r"^什么是(.+?)[?？。]*$", _q)
+                )
+                _non_def = (
+                    "trend", "compare", " by ", " per ", "top ", "how many",
+                    "how much", "list", "show", "last ", "this month",
+                )
+                if _m and not any(w in _q.lower() for w in _non_def):
+                    from app.database import SessionLocal as _SL
+                    from app.services.db.semantic_store import (
+                        get_semantic_store as _gss,
+                    )
+
+                    _s2 = _SL()
+                    try:
+                        _terms = [
+                            t for t in _gss(_s2).glossary(_q, limit=3)
+                            if (t.definition or "").strip()
+                        ]
+                    finally:
+                        _s2.close()
+                    if _terms:
+                        logger.info(
+                            "plan: definitional short-circuit — glossary can "
+                            "answer %r; planning a single lookup node",
+                            _terms[0].term,
+                        )
+                        _def_steps = [{
+                            "node_type": "nl2sql",
+                            "name": f"Explain {_terms[0].term}"[:200],
+                            "description": _q,
+                            "dependencies": [],
+                            "expected_output": "DataSnapshot",
+                            "inputs": {"question": _q},
+                        }]
+                        _def_plan = Plan(
+                            id=str(uuid4()),
+                            execution_id=execution_id,
+                            version=plan_version,
+                            status="draft",
+                            summary="Plan for definitional lookup (mixed-mode semantic answer)",
+                            is_acyclic=True,
+                        )
+                        db.add(_def_plan)
+                        db.flush()
+                        for i, step in enumerate(_def_steps):
+                            _out_type, _step_inputs = _sanitize_plan_step(step)
+                            db.add(PlanNode(
+                                id=str(uuid4()),
+                                plan_id=_def_plan.id,
+                                seq=i,
+                                node_type=str(step.get("node_type", "tool"))[:30],
+                                name=str(step.get("name") or "")[:200],
+                                description=str(step.get("description", "") or ""),
+                                dependencies=step.get("dependencies", []),
+                                inputs=_step_inputs,
+                                expected_output=step.get("expected_output"),
+                                output_artifact_type=_out_type,
+                                status="pending",
+                            ))
+                        _def_plan.is_acyclic = True
+                        db.commit()
+                        db.refresh(_def_plan)
+                        return _def_plan
+        except Exception as e:
+            logger.debug("plan: definitional short-circuit skipped: %s", e)
+
     # Build the prompt
     artifact_intents = task_spec.get("artifact_intents", [])
     task_kind = task_spec.get("task_kind", "general")

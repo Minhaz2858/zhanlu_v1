@@ -1105,6 +1105,51 @@ class SemanticStore:
         return out
 
     # -- introspection -----------------------------------------------------
+    def guidelines(self) -> list[dict[str, Any]]:
+        """Authored organizational rules (fiscal calendar, default filters,
+        territory maps, exceptions, policies) — the organizational level of
+        the OCI offline enrichment. Injected into SQL generation as a
+        BUSINESS RULES block; served to the UI for editing."""
+        try:
+            from app.models.semantic_guideline import SemanticGuideline
+
+            rows = (
+                self.db.query(SemanticGuideline)
+                .filter(
+                    SemanticGuideline.is_deleted == False,  # noqa: E712
+                    SemanticGuideline.is_enabled.is_(True),
+                )
+                .order_by(SemanticGuideline.kind.asc(), SemanticGuideline.title.asc())
+                .all()
+            )
+            out = []
+            for r in rows:
+                if self.kb_ids and r.datasource_id not in self.kb_ids:
+                    continue
+                out.append(
+                    {
+                        "id": str(r.id),
+                        "kind": r.kind,
+                        "title": r.title,
+                        "content": r.content,
+                        "tier": TIER_VERIFIED,
+                    }
+                )
+            return out
+        except Exception as e:  # pragma: no cover
+            logger.debug("semantic_store: guidelines unavailable: %s", e)
+            return []
+
+    def format_guidelines_block(self) -> str:
+        """Render authored rules as ONE prompt block (empty when none)."""
+        rules = self.guidelines()
+        if not rules:
+            return ""
+        lines = ["[BUSINESS RULES — authored by the data team; MUST be respected]"]
+        for g in rules:
+            lines.append(f"- ({g['kind']}) {g['title']}: {g['content']}")
+        return "\n".join(lines)
+
     def stats(self) -> dict[str, Any]:
         """Counts for telemetry and tests (no side effects)."""
         rels = self.relations()
@@ -1118,6 +1163,7 @@ class SemanticStore:
             "domains": len(self.domains()),
             "joins": len(self.joins()),
             "glossary_terms": len(self.glossary()),
+            "guidelines": len(self.guidelines()),
             "workload_tables": len(self.workload()) if self._workload_enabled() else 0,
             "tiers": [TIER_VERIFIED, TIER_DISCOVERED, TIER_LEARNED, TIER_RUNTIME],
         }

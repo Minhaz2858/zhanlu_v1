@@ -11,6 +11,7 @@ from app.models.chat_session import ChatSession
 from app.models.chat_message import ChatMessage
 from app.models.agent_app import AgentApp
 from app.models.knowledge_base import KnowledgeBase
+from app.models.semantic_guideline import SemanticGuideline
 from app.models.automation_task import AutomationTask
 from app.models.automation_execution import AutomationExecution
 from app.models.automation_file import AutomationFile
