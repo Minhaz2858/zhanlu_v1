@@ -756,3 +756,64 @@ def test_glossary_definitional_hit_helper():
     result = _glossary_definitional_hit("what is net revenue", [])
     assert isinstance(result, bool)
     assert _glossary_definitional_hit("show top 5 products", []) is False
+
+
+# ── 20. Schema-agnostic platform (works with ANY database) ────────────────
+
+
+def test_workflow_prompt_has_no_erp_naming_convention():
+    """The NL2SQL translation prompt named the Escisco/Kingdee convention
+    ('names like *_v_* / erp_v_*') — on any other database it biased the
+    model into fabricating erp_v_* table names."""
+    import inspect
+
+    from app.services import workflow_runtime
+
+    src = inspect.getsource(workflow_runtime)
+    assert "erp_v_" not in src
+    assert "denormalized business views" in src  # generic guidance remains
+
+
+def test_demo_forecast_seeding_is_opt_in():
+    """The default domain config carries THIS deployment's Escisco warehouse
+    conventions — seeding it on every fresh boot wrote forecast targets bound
+    to tables that do not exist on other databases."""
+    import inspect
+
+    src = inspect.getsource(__import__("seed"))
+    assert "SEED_DEMO_FORECAST_TARGETS" in src
+
+
+def test_no_fabricated_erp_table_names_in_forecasting():
+    """`sale_erp_v_{id}_data` was fabricated as a fallback table name in the
+    forecasting loaders — on other databases it queried invented tables and
+    failed silently (graceful empty = feature silently off)."""
+    import inspect
+
+    from app.services.forecasting import accuracy_tracker
+    from app.services.forecasting import ops
+    from app.services.forecasting.features import exogenous_loaders
+
+    for mod in (accuracy_tracker, exogenous_loaders):
+        src = inspect.getsource(mod)
+        assert 'f"sale_erp_v_' not in src, mod.__name__
+    import pathlib
+
+    for f in ("realization_spread.py", "decision_loop.py"):
+        src = (pathlib.Path(ops.__file__).parent / f).read_text()
+        assert 'f"sale_erp_v_' not in src, f
+
+
+def test_multilingual_scaffolding_not_classified_as_metric():
+    """German/French/Spanish structural words fell through to the short-word
+    rule and were classified as METRICS → false 'unsupported' disclosures.
+    The platform serves any user language."""
+    from app.services.db.grounding import classify_unit
+
+    tables = {"verkaufsdaten", "produkte"}
+    assert classify_unit("Zeilen", table_names=tables) == "generic_count"
+    assert classify_unit("wie viele", table_names=tables) == "generic_count"
+    assert classify_unit("montre", table_names=tables) == "scaffolding"
+    assert classify_unit("letzter", table_names=tables) == "temporal"
+    assert classify_unit("mes", table_names=tables) == "temporal"
+    assert classify_unit("tablas", table_names=tables) == "catalog_term"

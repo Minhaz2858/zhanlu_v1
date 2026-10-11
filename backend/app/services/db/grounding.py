@@ -200,6 +200,14 @@ _COUNT_REQUEST_PATTERNS = (
     re.compile(r"\bnumber\s+of\s+(rows|records|entries|items)\b", re.IGNORECASE),
     re.compile(r"\b(row|record|entry)\s*count\b", re.IGNORECASE),
     re.compile(r"\bcount\s+of\s+(rows|records|entries|items)\b", re.IGNORECASE),
+    # 2026-10-11 schema-agnostic languages: the platform serves any database
+    # and any user language — structural vocabulary must not assume CJK+English
+    # (a German "wie viele Zeilen" fell through to the short-word rule and was
+    # classified as a METRIC → false "unsupported" disclosure).
+    re.compile(r"\b(wie\s+viele|quant[oi]|cu[áa]nt[oa]s?|quanti|combien)\b",
+               re.IGNORECASE),
+    re.compile(r"\b(zeilen|datens[äa]tze|filas|registros|righe|lignes)\b",
+               re.IGNORECASE),
 )
 
 #: Vocabulary that asks about STRUCTURE rather than data. A structure/listing
@@ -214,6 +222,10 @@ _CATALOG_TERM_PATTERNS = (
     re.compile(r"\b(information_schema|pg_catalog|pg_namespace|pg_class|pg_attribute|"
                r"sqlite_master|performance_schema|metadata|data dictionary)\b",
                re.IGNORECASE),
+    # Structural vocabulary in French/German/Spanish/Italian (schema-agnostic)
+    re.compile(r"\b(tabellen?|spalten?|sichten?|schemata?|tablas?|columnas?|vistas?|"
+               r"tables?|colonnes?|vues?|tabelle|colonne|viste|schema)\b",
+               re.IGNORECASE),
 )
 
 #: Temporal / ordinal / ranking qualifiers: they SCOPE or ORDER a question
@@ -227,6 +239,12 @@ _TEMPORAL_QUALIFIER_RE = re.compile(
     r"^(last|next|previous|prior|past|latest|recent|current|this|that|"
     r"first|second|third|top|bottom|nth|best|worst|highest|lowest|"
     r"day|week|month|quarter|year|today|yesterday|tomorrow|"
+    # French / German / Spanish / Italian temporal words (schema-agnostic)
+    r"dernier|derni[eè]re|mois|semaine|jour|ann[ée]e|pr[ée]c[ée]dent|"
+    r"meilleur|pire|letzte[rns]?|vorige[rns]?|monat(e|es|s)?|woche[n]?|"
+    r"jahr(es)?|tag(e|es)?|heute|gestern|"
+    r"aktuell|j[áa]n?uario|febrero|mes|semana|d[íi]a|a[ñn]o|ayer|pasad[oa]|"
+    r"mese|settimana|giorno|anno|ieri|scors|"
     r"ytd|mtd|qtd|"
     r"年|月|日|周|季度|上月|上个月|本月|下个月|最近|去年|今年|上|下)$",
     re.IGNORECASE,
@@ -243,7 +261,14 @@ _SCAFFOLDING_PATTERNS = (
         r"what|which|related|all|every|how|many|much|"
         r"is|are|was|were|be|the|this|that|these|those|"
         r"of|in|for|and|or|with|from|to|by|on|at|as|"
-        r"row|rows|record|records|entry|entries|item|items|value|values)\b",
+        r"row|rows|record|records|entry|entries|item|items|value|values|"
+        # French / German / Spanish / Italian scaffolding (schema-agnostic)
+        r"montre|affiche|donne|liste|tous|toutes|quoi|quels|quelle|"
+        r"r[ée]sum[ée]|rapport|describe|zeig|liste|[üu]bersicht|alle|"
+        r"was|welche|der|die|das|und|oder|von|f[üu]r|"
+        r"muestra|lista|tod[oa]s|qu[ée]|cuales|resumen|informe|"
+        r"mostra|elenca|tutt|qual|riepilogo|relazione|"
+        r"von|je|nach)\b",
         re.IGNORECASE,
     ),
 )

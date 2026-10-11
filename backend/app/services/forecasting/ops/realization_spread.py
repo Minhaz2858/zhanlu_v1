@@ -36,7 +36,16 @@ def compute_realization_spread(
 
     Returns None if insufficient data (fewer than 10 overlapping days).
     """
-    table = _ERP_TABLE_MAP.get(product_id, f"sale_erp_v_{product_id}_data")
+    # 2026-10-11 schema-agnostic: require the explicit warehouse_table_map
+    # entry — no fabricated sale_erp_v_* names (silent failure on other DBs).
+    table = _ERP_TABLE_MAP.get(product_id)
+    if not table:
+        logger.warning(
+            "realization_spread: no warehouse_table_map entry for product "
+            "%r — returning None",
+            product_id,
+        )
+        return None
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=window_days)
 

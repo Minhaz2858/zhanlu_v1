@@ -321,10 +321,26 @@ def seed():
     # ── Enterprise BI forecast targets ──────────────────────────
     # Ensure the 12 dashboard product targets exist so the nightly
     # forecast scheduler has something to compute against.
-    from app.services.forecasting.seed_targets import seed_forecast_targets
-    new_targets = seed_forecast_targets(db)
-    if new_targets:
-        print(f"  Seeded {new_targets} new enterprise BI forecast targets")
+    #
+    # 2026-10-11 schema-agnostic gate: the default domain config
+    # (domain_configs/default.json) carries THIS deployment's Escisco/Kingdee
+    # warehouse conventions (md_market_price, sale_erp_v_*_data tables,
+    # FDATE/FTAXPRICE/PLANDATE columns). Seeding it on every fresh boot
+    # silently wrote forecast targets bound to those tables into ANY new
+    # deployment's platform DB — the nightly scheduler then ran forecasts
+    # against tables that do not exist there. Demo seeding is now OPT-IN:
+    # set SEED_DEMO_FORECAST_TARGETS=true (this deployment does, in .env).
+    import os as _os
+
+    if _os.getenv("SEED_DEMO_FORECAST_TARGETS", "").strip().lower() in (
+        "1", "true", "yes",
+    ):
+        from app.services.forecasting.seed_targets import seed_forecast_targets
+        new_targets = seed_forecast_targets(db)
+        if new_targets:
+            print(f"  Seeded {new_targets} new enterprise BI forecast targets")
+    else:
+        print("  Skipping demo forecast-target seeding (SEED_DEMO_FORECAST_TARGETS not set)")
 
     db.close()
     print("Seed complete!")

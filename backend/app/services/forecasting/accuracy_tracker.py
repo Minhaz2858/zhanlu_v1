@@ -220,7 +220,16 @@ def score_pending_decisions(db) -> dict:
             target_date = log.as_of_date + datetime.timedelta(days=log.horizon_day)
             # Extract product_id from the full product_key (e.g. "<product>")
             product_id = log.product_id.split(".")[-1] if "." in log.product_id else log.product_id
-            table = _ERP_TABLE_MAP.get(product_id, f"sale_erp_v_{product_id}_data")
+            # 2026-10-11 schema-agnostic: no fabricated sale_erp_v_* names —
+            # require the explicit warehouse_table_map entry.
+            table = _ERP_TABLE_MAP.get(product_id)
+            if not table:
+                logger.warning(
+                    "accuracy_tracker: no warehouse_table_map entry for "
+                    "product %r — skipping realization lookup",
+                    product_id,
+                )
+                continue
 
             with engine.connect() as conn:
                 row = conn.execute(

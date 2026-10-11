@@ -709,9 +709,16 @@ class WorkflowExecutionContext:
             "You translate natural-language questions into READ-ONLY SQL "
             f"for this database schema:\n{schema}\n\n"
             f"Question: {question}\n\n"
-            "Prefer denormalized business views (names like *_v_* / erp_v_*) "
-            "for aggregations when the schema offers them. Return ONLY the SQL "
-            "statement (no markdown fences, no explanation). "
+            # 2026-10-11 schema-agnostic: the old instruction named this
+            # deployment's table-naming convention (erp-v-prefixed views) and
+            # biased the model into fabricating those names on ANY other
+            # database. Base the choice on the schema actually shown above —
+            # never on a naming convention from another deployment.
+            "For aggregations, prefer whatever denormalized business views "
+            "or summary tables the schema above actually offers (deduce "
+            "this from table/column names and their semantics), falling "
+            "back to base tables with explicit joins when none exist. "
+            "Return ONLY the SQL statement (no markdown fences, no explanation). "
             "Use LIMIT 100. Never write UPDATE/INSERT/DELETE/DDL."
         )
         sql = self.llm_complete(prompt).strip()

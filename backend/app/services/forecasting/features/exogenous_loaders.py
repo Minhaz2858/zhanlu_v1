@@ -408,7 +408,19 @@ class ErpVolumeLoader:
         if self.engine is None:
             return pd.DataFrame(columns=["date", "volume"])
 
-        table = _ERP_TABLE_MAP.get(self.product_id, f"sale_erp_v_{self.product_id}_data")
+        # 2026-10-11 schema-agnostic: the fabricated ``sale_erp_v_{id}_data``
+        # fallback is THIS deployment's Escisco naming convention — on any
+        # other database it issued queries against invented tables and the
+        # loaders failed silently (graceful empty → feature silently off).
+        # Require an explicit mapping; skip with a warning when absent.
+        table = _ERP_TABLE_MAP.get(self.product_id)
+        if not table:
+            logger.warning(
+                "ErpVolumeLoader: no warehouse_table_map entry for product "
+                "%r — skipping (configure it in the domain config)",
+                self.product_id,
+            )
+            return pd.DataFrame(columns=["date", "volume"])
         cutoff = date.today() - timedelta(days=self.lookback_days)
 
         sql = text(

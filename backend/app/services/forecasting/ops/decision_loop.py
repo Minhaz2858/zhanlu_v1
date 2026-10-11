@@ -69,7 +69,15 @@ def _backfill_actual_price_t(db: Session) -> int:
     count = 0
     for row in null_rows:
         try:
-            table = f"sale_erp_v_{row.product_id}_data"
+            # 2026-10-11 schema-agnostic: require the explicit mapping — the
+            # fabricated sale_erp_v_* name queried invented tables elsewhere.
+            from app.services.forecasting.features.exogenous_loaders import (
+                _ERP_TABLE_MAP,
+            )
+
+            table = _ERP_TABLE_MAP.get(row.product_id)
+            if not table:
+                continue
             stmt = sa_text(
                 f"SELECT date, price FROM {table} "
                 f"WHERE date = :dt AND price IS NOT NULL "
