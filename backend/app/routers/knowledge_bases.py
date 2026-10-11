@@ -476,6 +476,147 @@ async def get_semantic_store_view(app_id: str, kb_id: str, db: Session = Depends
     }
 
 
+@router.get("/{kb_id}/metrics")
+async def list_kb_metrics(app_id: str, kb_id: str, db: Session = Depends(get_db)):
+    """Metric definitions authored for this datasource — the "did = revenue vs
+    margin" layer. MetricDefinition rows are datasource-scoped and consumed by
+    SemanticStore.glossary as VERIFIED-tier vocabulary, so an authored metric
+    immediately resolves ambiguous business words in NL2SQL."""
+    from app.models.metric_definition import MetricDefinition
+
+    rows = (
+        db.query(MetricDefinition)
+        .filter(
+            MetricDefinition.datasource_id == kb_id,
+            MetricDefinition.is_deleted == False,  # noqa: E712
+        )
+        .order_by(MetricDefinition.name.asc())
+        .all()
+    )
+    return [
+        {
+            "id": str(r.id),
+            "name": r.name,
+            "display_name": r.display_name,
+            "description": r.description,
+            "base_table": r.base_table,
+            "base_column": r.base_column,
+            "aggregation": r.aggregation,
+            "unit": r.unit,
+            "synonyms": r.synonyms or [],
+            "is_enabled": bool(r.is_enabled),
+        }
+        for r in rows
+    ]
+
+
+@router.post("/{kb_id}/metrics")
+async def create_kb_metric(app_id: str, kb_id: str, body: dict, db: Session = Depends(get_db)):
+    """Author a metric definition for this datasource (VERIFIED on save)."""
+    import uuid as _uuid
+
+    from app.models.metric_definition import MetricDefinition
+
+    name = str((body or {}).get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    dup = (
+        db.query(MetricDefinition)
+        .filter(
+            MetricDefinition.datasource_id == kb_id,
+            MetricDefinition.name == name,
+            MetricDefinition.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if dup:
+        raise HTTPException(status_code=409, detail=f"Metric '{name}' already exists")
+    synonyms = body.get("synonyms") or []
+    if isinstance(synonyms, str):
+        synonyms = [s.strip() for s in synonyms.split(",") if s.strip()]
+    row = MetricDefinition(
+        id=str(_uuid.uuid4()),
+        datasource_id=kb_id,
+        name=name,
+        display_name=str(body.get("display_name") or name),
+        description=str(body.get("description") or "").strip() or None,
+        base_table=str(body.get("base_table") or "").strip() or None,
+        base_column=str(body.get("base_column") or "").strip() or None,
+        aggregation=str(body.get("aggregation") or "").strip() or None,
+        unit=str(body.get("unit") or "").strip() or None,
+        synonyms=synonyms,
+        is_enabled=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": str(row.id), "name": row.name}
+
+
+@router.patch("/{kb_id}/metrics/{metric_id}")
+async def update_kb_metric(
+    app_id: str, kb_id: str, metric_id: str, body: dict, db: Session = Depends(get_db)
+):
+    """Edit a metric definition (fix a wrong definition/unit/synonyms)."""
+    from app.models.metric_definition import MetricDefinition
+
+    row = (
+        db.query(MetricDefinition)
+        .filter(
+            MetricDefinition.id == metric_id,
+            MetricDefinition.datasource_id == kb_id,
+            MetricDefinition.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Metric not found")
+    fields = {
+        "description": str,
+        "base_table": str,
+        "base_column": str,
+        "aggregation": str,
+        "unit": str,
+        "display_name": str,
+    }
+    for field, cast in fields.items():
+        if field in (body or {}):
+            val = body[field]
+            setattr(row, field, (str(val).strip() or None) if val is not None else None)
+    if "synonyms" in (body or {}):
+        syn = body["synonyms"]
+        row.synonyms = (
+            [s.strip() for s in str(syn).split(",") if s.strip()]
+            if isinstance(syn, str)
+            else list(syn or [])
+        )
+    if "is_enabled" in (body or {}):
+        row.is_enabled = bool(body["is_enabled"])
+    db.commit()
+    return {"id": str(row.id), "ok": True}
+
+
+@router.delete("/{kb_id}/metrics/{metric_id}")
+async def delete_kb_metric(
+    app_id: str, kb_id: str, metric_id: str, db: Session = Depends(get_db)
+):
+    from app.models.metric_definition import MetricDefinition
+
+    row = (
+        db.query(MetricDefinition)
+        .filter(
+            MetricDefinition.id == metric_id,
+            MetricDefinition.datasource_id == kb_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Metric not found")
+    row.is_deleted = True
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/{kb_id}/catalog/tables")
 async def list_catalog_tables(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     """Return the catalog tables discovered for a database KnowledgeBase.

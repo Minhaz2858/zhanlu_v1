@@ -187,6 +187,29 @@ class QueryService:
             # the driver actually received is read back from the connector.
             validation["executed_sql"] = executed_sql
 
+        # ── OCI optimization stage: execution feedback (2026-10-11 wiring) ──
+        # The module existed but had NO caller. Two bounded, read-only
+        # feedback writes after every successful execution (both flag-gated,
+        # both fail-soft): a plan-row estimate attached to the result, and a
+        # rewrite-outcome history row so future rewrite decisions can learn.
+        try:
+            from app.services.db import execution_feedback as _ef
+
+            _assessment = _ef.assess_scan(
+                getattr(conn, "_engine", None), executed_sql
+            )
+            if _assessment:
+                validation["plan_estimate"] = _assessment
+            _ef.persist_rewrite_outcome(
+                kb_id,
+                executed_sql,
+                estimated_rows=(_assessment or {}).get("estimated_rows"),
+                elapsed_ms=elapsed_ms,
+                row_count=min(len(fetched), row_cap),
+            )
+        except Exception:  # noqa: BLE001 — feedback never breaks serving
+            pass
+
         truncated = len(fetched) > row_cap
         rows = fetched[:row_cap] if truncated else fetched
         return {

@@ -2842,7 +2842,14 @@ def _shadow_validate_and_log(
                     policy_decision=(
                         "allowed" if res.get("policy_allowed", True) else "denied"
                     ),
-                    outcome="shadow",
+                    # 2026-10-11: was unconditional "shadow" — this is the
+                    # ONLY writer of nl2sql_query_logs on the live path, and
+                    # both behavioral-enrichment consumers (workload_miner,
+                    # query_log_retrieval) filter outcome=='success', so they
+                    # found NOTHING forever despite hundreds of executions.
+                    # Record the real execution outcome; the shadow
+                    # classification stays in `explanation` (auditable).
+                    outcome=("success" if live_success else "failed"),
                     explanation=(
                         f"shadow_class={cls}; live_success={live_success}; "
                         f"live_error={live_error[:200]}"

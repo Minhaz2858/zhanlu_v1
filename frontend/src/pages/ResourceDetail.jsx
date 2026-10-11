@@ -9,6 +9,7 @@ import KbSourceDetail from '@/components/kb/KbSourceDetail';
 import KbCatalogTables from '@/components/kb/KbCatalogTables';
 import KbSemanticStore from '@/components/kb/KbSemanticStore';
 import KbGlossaryEditor from '@/components/kb/KbGlossaryEditor';
+import KbMetricsEditor from '@/components/kb/KbMetricsEditor';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Loader2, Trash2, Tag, FileText, Database, Workflow, BarChart3, Bot, Download } from 'lucide-react';
 
@@ -148,6 +149,7 @@ export default function ResourceDetail() {
           <TabsContent value="terms">
             <div className="rounded-xl border border-border bg-card">
               <KbGlossaryEditor kbId={item.id} />
+              <KbMetricsEditor kbId={item.id} />
             </div>
           </TabsContent>
         </Tabs>

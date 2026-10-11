@@ -53,20 +53,21 @@ def _dialect_of(engine) -> str:
         return ""
 
 
-def assess_scan(db, sql: str) -> dict | None:
+def assess_scan(engine, sql: str) -> dict | None:
     """Estimated rows for ``sql`` via EXPLAIN, when the dialect supports it.
 
-    Returns ``{"dialect": str, "estimated_rows": int}`` or ``None``.
-    Bounded to 5s; read-only; never raises.
+    ``engine`` is the DATASOURCE engine (the statement's own database) — the
+    2026-10-11 wiring note: the old signature took the app session and used
+    ``db.get_bind()``, which EXPLAINs the wrong database. Bounded to 5s;
+    read-only; never raises.
     """
     try:
         from app.config import settings
 
         if not getattr(settings, "NL2SQL_EXPLAIN_FEEDBACK_ENABLED", False):
             return None
-        if not (sql or "").strip():
+        if not (sql or "").strip() or engine is None:
             return None
-        engine = db.get_bind()
         dialect = _dialect_of(engine)
         if dialect not in ("postgresql", "mysql", "mariadb"):
             return None  # sqlite EXPLAIN has no row estimates; oracle/mssql later
@@ -76,7 +77,12 @@ def assess_scan(db, sql: str) -> dict | None:
         else:  # mysql / mariadb
             stmt = f"EXPLAIN {sql}"
 
-        raw = db.execute(stmt).mappings().all()
+        from sqlalchemy import text as _text
+
+        with engine.connect() as conn:
+            raw = conn.execution_options(
+                **({} if dialect == "postgresql" else {})
+            ).execute(_text(stmt)).mappings().all()
         estimated = _parse_estimate(dialect, raw)
         if estimated is None:
             return None
@@ -120,24 +126,33 @@ def _parse_estimate(dialect: str, raw) -> int | None:
 
 
 def persist_rewrite_outcome(
-    db,
     kb_id: str,
     sql: str,
     *,
     rules_applied: list[str] | None = None,
     estimated_rows: int | None = None,
+    elapsed_ms: int | None = None,
+    row_count: int | None = None,
 ) -> bool:
-    """Record one rewrite decision as workload history. Best-effort."""
+    """Record one rewrite decision as workload history. Best-effort.
+
+    2026-10-11: opens its OWN short session (the caller's session may hold an
+    open transaction mid-serving; committing it here would commit the caller's
+    work). Also records elapsed_ms/row_count so future rewrite decisions can
+    compare outcomes, not just shapes."""
     try:
         from app.config import settings
 
         if not getattr(settings, "NL2SQL_EXPLAIN_FEEDBACK_ENABLED", False):
             return False
+        from app.database import SessionLocal
         from app.models.query_workload_stat import QueryWorkloadStat
 
         detail = {
             "rules": list(rules_applied or []),
             "estimated_rows": estimated_rows,
+            "elapsed_ms": elapsed_ms,
+            "row_count": row_count,
         }
         primary = ""
         import re as _re
@@ -148,24 +163,27 @@ def persist_rewrite_outcome(
         )
         if m:
             primary = m.group(1).split(".")[-1].strip("`\"[]").lower()
-        db.add(QueryWorkloadStat(
-            kb_id=kb_id or "",
-            stat_kind="rewrite_outcome",
-            table_name=primary,
-            peer=None,
-            detail=detail,
-            occurrences=1,
-            stat_key=_stat_key("rewrite_outcome", primary, None, _sql_hash(sql)),
-            note="execution_feedback",
-        ))
-        db.commit()
+        session = SessionLocal()
+        try:
+            session.add(QueryWorkloadStat(
+                kb_id=kb_id or "",
+                stat_kind="rewrite_outcome",
+                table_name=primary,
+                peer=None,
+                detail=detail,
+                occurrences=1,
+                stat_key=_stat_key(
+                    "rewrite_outcome", primary, None,
+                    _sql_hash(sql) + f"|{elapsed_ms or 0}",
+                ),
+                note="execution_feedback",
+            ))
+            session.commit()
+        finally:
+            session.close()
         return True
     except Exception as e:  # noqa: BLE001 — history is best-effort
         logger.debug("execution_feedback: persist failed: %s", e)
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
         return False
 
 
