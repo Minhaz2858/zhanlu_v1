@@ -10,6 +10,7 @@ import ChatInput from '@/components/chat/ChatInput';
 import MessageBubble from '@/components/chat/MessageBubble';
 import { postMessageFeedback, postRoleFeedback } from '@/api/agentFeedback';
 import RelatedContent from '@/components/chat/RelatedContent';
+import StarterPrompts from '@/components/chat/StarterPrompts';
 import ArtifactPanel from '@/components/chat/ArtifactPanel';
 import ArtifactPreviewPane from '@/components/chat/ArtifactPreviewPane';
 import FilePreviewPane from '@/components/chat/FilePreviewPane';
@@ -3283,7 +3284,10 @@ export default function Chat() {
                   <Bot className="h-6 w-6 text-primary" />
                 </div>
                 <h1 className="break-words px-4 text-center font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
-                <div className="mt-8 w-full max-w-4xl">
+                <div className="mt-6 flex w-full max-w-2xl justify-center">
+                  <StarterPrompts onPick={(q) => setInputValue(q)} />
+                </div>
+                <div className="mt-4 w-full max-w-4xl">
                   <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={handleStopStreaming} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name, id) => setPendingProject(name, id)} centered inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
                   {chips.length > 0 && (
                     <RelatedContent

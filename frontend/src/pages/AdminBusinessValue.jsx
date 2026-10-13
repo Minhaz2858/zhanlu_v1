@@ -1,10 +1,105 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   TrendingUp, MessageSquare, FileText, DollarSign, Clock,
-  Percent, Layers, RefreshCw, Loader2, ExternalLink,
+  Percent, Layers, RefreshCw, Loader2, ExternalLink, Package, Check,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { authFetch } from '@/api/authFetch';
+
+/**
+ * Domain packs — packaged vertical value (IBM Gap 5). Installing merges
+ * the industry's vocabulary into the org glossary + adds starter
+ * questions. Idempotent server-side.
+ */
+function DomainPacksCard() {
+  const [packs, setPacks] = useState(null);
+  const [installing, setInstalling] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/domain-packs');
+      if (res.ok) setPacks((await res.json()).packs);
+    } catch {
+      /* fail-quiet — the section hides */
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const install = async (key) => {
+    setInstalling(key);
+    try {
+      const res = await authFetch(`/api/domain-packs/${key}/install`, { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      const out = await res.json();
+      toast.success(`${out.name} installed — ${out.glossary_terms_added} glossary terms added`);
+      load();
+    } catch (e) {
+      toast.error(`Install failed: ${e.message || e}`);
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  if (!packs || packs.length === 0) return null;
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-2">
+        <Package size={15} className="text-amber-600" />
+        <h2 className="text-sm font-semibold text-stone-800">Industry Packs</h2>
+        <span className="text-[11px] text-stone-400">
+          one-click vertical vocabulary + starter questions for your workspace
+        </span>
+      </div>
+      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {packs.map((p) => (
+          <div
+            key={p.pack_key}
+            className="rounded-xl border border-stone-200 bg-white px-4 py-3.5 flex flex-col gap-2"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-[13px] font-medium text-stone-800">{p.name}</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 text-stone-500 capitalize">
+                {p.industry}
+              </span>
+              {p.installed && (
+                <span className="ml-auto flex items-center gap-1 text-[10px] text-emerald-600">
+                  <Check size={11} /> installed
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-stone-500 leading-relaxed">{p.description}</p>
+            {p.starter_prompts?.[0] && (
+              <p className="text-[11px] text-stone-400 truncate">e.g. “{p.starter_prompts[0]}”</p>
+            )}
+            <div className="flex items-center gap-2 mt-auto pt-1">
+              <button
+                onClick={() => install(p.pack_key)}
+                disabled={p.installed || installing === p.pack_key}
+                className={`text-[11px] px-2.5 py-1 rounded-md border transition-colors ${
+                  p.installed
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700 cursor-default'
+                    : 'border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-50'
+                }`}
+              >
+                {installing === p.pack_key
+                  ? 'Installing…'
+                  : p.installed
+                    ? 'Installed — re-merge terms'
+                    : 'Install pack'}
+              </button>
+              <span className="text-[10px] text-stone-400">{p.terminology_count} glossary terms</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /**
  * Business Value — the AI-CoE board (admin-only).
@@ -275,6 +370,8 @@ export default function AdminBusinessValue() {
               <ExternalLink size={10} />
               Data: /api/roi/summary + /api/portfolio · costs from cost_ledger · acceptance from answer thumbs
             </p>
+
+            <DomainPacksCard />
           </>
         )}
       </div>
