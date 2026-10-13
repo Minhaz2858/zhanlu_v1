@@ -106,6 +106,13 @@ class Settings(BaseSettings):
     # provisioned by an admin only).
     ALLOW_ORG_SIGNUP: bool = False
 
+    # ── Option C Phase 1: LLM turn router (2026-10-13) ─────────────────
+    # off  = heuristic routing only (zero behavior change)
+    # dark = LLM decision logged beside the heuristic one (heuristic wins)
+    # on   = a confident LLM decision overrides the routing regexes
+    #        (automation-forced planning is never overridden)
+    V3_LLM_ROUTER_MODE: str = "off"
+
     # Rate limits (in-memory, per IP). Zero = disabled.
     RATE_LIMIT_LOGIN_PER_MIN: int = 5
     RATE_LIMIT_REGISTER_PER_10MIN: int = 3

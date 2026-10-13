@@ -12073,6 +12073,22 @@ async def add_message_stream(
 
     try:
         _v3_plan_trigger = should_trigger_planning(user_content)
+        # Router mode + "did this conversation already produce results?"
+        # (cheap proxy: any prior assistant message with tool calls or the
+        # current context bus carrying data sections) — LLM router inputs.
+        from app.services.turn_router import router_mode as _router_mode
+
+        _v3_llm_router_mode = _router_mode()
+        try:
+            _v3_conv_ctx_prior_results = bool(
+                any(
+                    (m.get("role") == "assistant" and (m.get("tool_calls") or m.get("file_exports")))
+                    for m in (conv.messages or [])
+                    if isinstance(m, dict)
+                )
+            )
+        except Exception:  # noqa: BLE001
+            _v3_conv_ctx_prior_results = False
         if not _v3_plan_trigger and is_followup_refinement(user_content, _v3_conv_ctx):
             logger.info(
                 "v3 add_message_stream: follow-up override — routing "
@@ -12167,6 +12183,55 @@ async def add_message_stream(
                 conversation_id,
             )
             _v3_plan_trigger = PlanTrigger(True, 1.0, {"forced": 1}, source="automation-forced")
+
+        # ── Option C Phase 1: the LLM turn router (2026-10-13) ──────────
+        # One routing decision for the whole turn, computed by the model
+        # instead of the ~150 keyword governors. Modes (V3_LLM_ROUTER_MODE):
+        #   off (default) = heuristics only, zero behavior change
+        #   dark          = LLM decision logged beside the heuristic one —
+        #                   the disagreement data justifies flipping to "on"
+        #   on            = confident LLM decision overrides the heuristics
+        # Automation-forced planning is NEVER overridden. Fail-open: any
+        # router error leaves the heuristic decision standing.
+        if is_fsm_enabled() and _v3_llm_router_mode != "off":
+            try:
+                from app.services.turn_router import apply_llm_route, decide_turn_route
+
+                _llm_decision = await decide_turn_route(
+                    user_content,
+                    has_data_context=_has_data_context,
+                    has_prior_results=bool(_v3_conv_ctx_prior_results),
+                    endpoint=effective_llm.endpoint,
+                )
+                _forced = (
+                    _v3_plan_trigger is not None
+                    and _v3_plan_trigger.source == "automation-forced"
+                )
+                _wants_fsm, _route_source = apply_llm_route(
+                    bool(_v3_plan_trigger),
+                    _llm_decision,
+                    heuristic_source=(
+                        _v3_plan_trigger.source if _v3_plan_trigger else "classifier-none"
+                    ),
+                    forced=_forced,
+                )
+                if _wants_fsm and not _v3_plan_trigger:
+                    _v3_plan_trigger = PlanTrigger(
+                        True,
+                        (_llm_decision or {}).get("confidence", 0.5),
+                        {"llm_route": 1},
+                        source="llm-router",
+                    )
+                elif not _wants_fsm and _v3_plan_trigger and _route_source == "llm-router":
+                    logger.info(
+                        "v3 add_message_stream: llm-router → ReAct (overrode %s, "
+                        "conv=%s)",
+                        _v3_plan_trigger.source, conversation_id,
+                    )
+                    _v3_plan_trigger = None
+            except Exception as _tr_err:  # noqa: BLE001 — fail-open
+                logger.warning("v3 turn_router failed (non-fatal): %s", _tr_err)
+
         logger.debug(
             "v3 add_message_stream: planning trigger confidence=%.2f signals=%s fsm_enabled=%s",
             _v3_plan_trigger.confidence,
