@@ -48,6 +48,7 @@ const AgentBuilder = lazy(() => import('@/pages/AgentBuilder'));
 const Settings = lazy(() => import('@/pages/Settings'));
 const AdminUsers = lazy(() => import('@/pages/AdminUsers'));
 const AdminObservability = lazy(() => import('@/pages/AdminObservability'));
+const AdminBusinessValue = lazy(() => import('@/pages/AdminBusinessValue'));
 const ResourceDetail = lazy(() => import('@/pages/ResourceDetail'));
 const AgentConfig = lazy(() => import('@/pages/AgentConfig'));
 const WorkflowCanvas = lazy(() => import('@/pages/WorkflowCanvas'));
@@ -167,6 +168,7 @@ const AuthenticatedApp = () => {
         <Route path="/settings" element={<Settings />} />
         <Route path="/admin/users" element={<AdminUsers />} />
         <Route path="/admin/observability" element={<AdminObservability />} />
+        <Route path="/admin/business-value" element={<AdminBusinessValue />} />
         <Route path="/dashboard/:id" element={<DashboardView />} />
         <Route path="/my-files" element={<MyFilesPage />} />
         <Route path="/from-personal" element={<FromPersonalPage />} />
