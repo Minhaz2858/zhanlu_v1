@@ -126,6 +126,15 @@ class Settings(BaseSettings):
     # off the event loop). Disable to stop cost bookkeeping.
     COST_LEDGER_ENABLED: bool = True
 
+    # ── Row-Level Security rollout (tenancy D3/D4, 2026-10-13) ─────────
+    # When True, sessions whose request carried a verified org claim pin
+    # `app.current_org` at transaction start (database.py after_begin) and
+    # Postgres RLS policies confine tenant tables to that org. Tables NOT
+    # in the RLS batch are unaffected; unset context (background jobs)
+    # bypasses via the policies' NULL clause. Postgres-only.
+    RLS_ENABLED: bool = True
+
+
 
 
     # Rate limits (in-memory, per IP). Zero = disabled.

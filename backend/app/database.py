@@ -49,6 +49,36 @@ if settings.is_sqlite:
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# ── RLS tenant scoping (2026-10-13, D3 of the tenancy design) ──────────────
+# At EVERY transaction start on Postgres, if the request's verified identity
+# set a tenant org (services.tenant_context), pin it with
+# ``SET LOCAL app.current_org`` — Postgres RLS policies then confine every
+# query in that transaction to the tenant, even where application code
+# forgot a WHERE clause. Sessions/threads without a tenant (background
+# jobs, seed scripts) run unset → the policies' NULL-bypass applies.
+# SQLite (tests) is skipped by the dialect check.
+from sqlalchemy import event as _sa_event
+
+RLS_ENABLED = bool(getattr(settings, "RLS_ENABLED", True))
+
+
+@_sa_event.listens_for(SessionLocal, "after_begin")
+def _set_tenant_on_begin(session, transaction, connection):  # noqa: ANN001
+    """Session after_begin: pin the tenant for this transaction (Postgres)."""
+    try:
+        if not RLS_ENABLED:
+            return
+        if connection.dialect.name != "postgresql":
+            return
+        from app.services.tenant_context import tenant_set_sql
+
+        sql = tenant_set_sql()
+        if not sql:
+            return
+        connection.exec_driver_sql(sql)
+    except Exception:  # noqa: BLE001 — isolation must never break queries
+        pass
+
 
 def get_db():
     """FastAPI dependency: yield a DB session and close it after request."""
