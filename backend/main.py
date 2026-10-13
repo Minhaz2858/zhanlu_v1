@@ -957,6 +957,12 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Tenant context FIRST (before CORS is fine — middleware order here is
+    # outermost-first; the tenant ContextVar must be set before any DB
+    # session dependency opens the request's first transaction).
+    from app.middleware.tenant_middleware import TenantContextMiddleware
+
+    app.add_middleware(TenantContextMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),
