@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, require_admin
+from app.deps import get_db, require_admin, require_org_admin
 from app.models.user import User
 from app.models.project import Project
 from app.models.agent_app import AgentApp
@@ -69,6 +69,9 @@ def _serialize_user(u: User) -> dict:
         "email": u.email,
         "full_name": u.full_name,
         "role": u.role,
+        # Tenant context (2026-10-13): admins see which org a user belongs
+        # to (their own — the list is org-scoped).
+        "org_id": u.org_id,
         "role_descriptions": u.role_descriptions or [],
         "role_description_text": u.role_description_text or "",
         "created_date": u.created_date.isoformat() if u.created_date else None,
@@ -80,10 +83,20 @@ def _serialize_user(u: User) -> dict:
 @router.get("")
 async def list_users(
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_org_admin),
 ):
-    """List all non-deleted users (admin only)."""
-    users = db.query(User).filter(User.is_deleted == False).order_by(User.created_date).all()
+    """List non-deleted users of the admin's OWN org (org-scoped admin).
+
+    2026-10-13 multi-tenant: was ALL users platform-wide — under SaaS that
+    leaks every tenant's user directory to any admin. Tenants are isolated:
+    an Org Admin manages their org only.
+    """
+    users = (
+        db.query(User)
+        .filter(User.is_deleted == False, User.org_id == admin.org_id)
+        .order_by(User.created_date)
+        .all()
+    )
     return [_serialize_user(u) for u in users]
 
 
@@ -160,13 +173,15 @@ async def role_feedback_metrics(
 async def get_user(
     user_id: str,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_org_admin),
 ):
     """Get a single user with owned and granted resource lists (admin only)."""
     user = db.query(User).filter(
         User.id == user_id, User.is_deleted == False
     ).first()
-    if not user:
+    # Org isolation (2026-10-13): cross-org users are INVISIBLE (404), so an
+    # admin cannot even confirm another tenant's account exists.
+    if not user or user.org_id != admin.org_id:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Owned resources
@@ -220,9 +235,9 @@ async def get_user(
 async def create_user(
     body: CreateUserRequest,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_org_admin),
 ):
-    """Create a new user (admin only)."""
+    """Create a new user in the admin's OWN org (org-scoped admin)."""
     existing = db.query(User).filter(
         User.email == body.email, User.is_deleted == False
     ).first()
@@ -244,6 +259,7 @@ async def create_user(
         role_descriptions=role_descriptions or None,
         role_description_text=(body.role_description_text or "").strip() or None,
         password_hash=auth_service.hash_password(body.password),
+        org_id=admin.org_id,  # new users belong to the admin's tenant
     )
     db.add(user)
     db.commit()
@@ -258,13 +274,13 @@ async def update_user(
     user_id: str,
     body: UpdateUserRequest,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_org_admin),
 ):
     """Update a user's email, name, role, or password (admin only)."""
     user = db.query(User).filter(
         User.id == user_id, User.is_deleted == False
     ).first()
-    if not user:
+    if not user or user.org_id != admin.org_id:
         raise HTTPException(status_code=404, detail="User not found")
 
     if body.email is not None:
@@ -311,7 +327,7 @@ async def update_user(
 async def delete_user(
     user_id: str,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_org_admin),
 ):
     """Soft-delete a user (admin only). Prevents self-deletion."""
     if user_id == admin.id:
@@ -320,6 +336,8 @@ async def delete_user(
     user = db.query(User).filter(
         User.id == user_id, User.is_deleted == False
     ).first()
+    if not user or user.org_id != admin.org_id:
+        raise HTTPException(status_code=404, detail="User not found")
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 

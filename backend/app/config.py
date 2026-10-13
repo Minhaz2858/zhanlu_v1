@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     # routers/auth.py). Enterprise / SaaS provisioning model.
     ALLOW_PUBLIC_REGISTRATION: bool = False
 
+    # Multi-tenant SaaS (2026-10-13): when True, POST .../auth/signup-org
+    # lets a new customer self-serve create an Organization + its first
+    # admin user. Default False keeps the enterprise behavior (accounts
+    # provisioned by an admin only).
+    ALLOW_ORG_SIGNUP: bool = False
+
     # Rate limits (in-memory, per IP). Zero = disabled.
     RATE_LIMIT_LOGIN_PER_MIN: int = 5
     RATE_LIMIT_REGISTER_PER_10MIN: int = 3

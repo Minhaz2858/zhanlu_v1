@@ -99,3 +99,22 @@ def require_admin(
     if getattr(user, "role", "user") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def require_org_admin(
+    user: User = Depends(get_current_user_required),
+) -> User:
+    """Org Admin guard (multi-tenant SaaS, 2026-10-13).
+
+    Today the roles are the same check — ``users.role == "admin"`` means
+    the admin OF THEIR ORG (the stored value is unchanged so existing
+    data, tokens and the frontend keep working). The distinct name exists
+    because the SEMANTICS differ from ``require_admin`` (platform-wide):
+    an Org Admin's powers stop at their ``org_id`` — user management,
+    datasources, domain config are all org-scoped. When a platform-level
+    super-admin is introduced later, ``require_admin`` will require it
+    while ``require_org_admin`` stays as-is.
+    """
+    if getattr(user, "role", "user") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user

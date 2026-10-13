@@ -61,7 +61,14 @@ class AuthService:
     # --- Access / refresh token lifecycle (plan 2026-07-27) ---
 
     def create_access_token(self, user_id: str, db: Session) -> str:
-        """Issue a short-lived (ACCESS_TOKEN_EXPIRE_MINUTES) access JWT with a JTI."""
+        """Issue a short-lived (ACCESS_TOKEN_EXPIRE_MINUTES) access JWT with a JTI.
+
+        2026-10-13 multi-tenant SaaS: the token also carries ``org_id`` and
+        ``role`` — the verified identity is the ONLY source of the tenant
+        context (the client can never supply an org). Claims are resolved
+        from the user row at issuance; readers fall back to the DB when a
+        legacy token lacks them.
+        """
         jti = str(uuid.uuid4())
         payload = {
             "sub": user_id,
@@ -70,7 +77,36 @@ class AuthService:
             "exp": self._utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
             "iat": self._utcnow(),
         }
+        try:
+            from app.models.user import User
+
+            u = db.query(User).filter(User.id == user_id).first()
+            if u is not None:
+                payload["org_id"] = u.org_id
+                payload["role"] = u.role
+        except Exception:  # noqa: BLE001 — claims are best-effort; DB is fallback
+            pass
         return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
+    def verify_token_claims(self, token: str, db: Session | None = None) -> dict | None:
+        """Decode a token and return its FULL claims (sub, org_id, role, …).
+
+        Returns None when the token is invalid/expired/revoked. Unlike
+        ``verify_token`` (which returns only the user id), this exposes the
+        org/role claims so the tenant context can be built from the token.
+        Legacy tokens without ``org_id`` resolve the org from the DB —
+        callers MUST prefer the DB row as the source of truth anyway (role
+        changes take effect without waiting for token expiry).
+        """
+        try:
+            payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            return None
+        if db is not None and payload.get("type") == "access":
+            jti = payload.get("jti")
+            if jti and self.is_access_token_revoked(jti, db):
+                return None
+        return payload
 
     def create_refresh_token(self, user_id: str, db: Session) -> str:
         """Issue a long-lived refresh token. Stores a SHA-256 hash; returns the RAW token (seen only by the client)."""

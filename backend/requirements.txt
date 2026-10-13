@@ -9,7 +9,8 @@ pydantic-settings==2.7.1
 pyjwt==2.10.1
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.20
-bcrypt==4.2.1
+# bcrypt pinned <4.1: passlib 1.7.4 reads bcrypt.__about__ (removed in 4.1) — 4.2.1 breaks hash_password under some import orders (tests)
+bcrypt==4.0.1
 httpx==0.28.1
 python-docx>=1.1.0
 python-pptx>=0.6.23

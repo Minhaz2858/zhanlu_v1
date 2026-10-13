@@ -58,7 +58,102 @@ async def login(
 
     access_token = auth_service.create_access_token(user.id, db)
     refresh_token = auth_service.create_refresh_token(user.id, db)
-    return {"access_token": access_token, "refresh_token": refresh_token, "user": user.to_dict()}
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "user": user.to_dict(),
+        # Explicit tenant context (multi-tenant SaaS, 2026-10-13): the
+        # frontend gates the admin console on `role`; `org_id` identifies
+        # the tenant. Both come from the server-resolved user row — the
+        # client never supplies them.
+        "org_id": user.org_id,
+        "role": user.role,
+    }
+
+
+@router.post("/apps/{app_id}/auth/signup-org")
+async def signup_org(
+    app_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    _rl=Depends(rate_limit(settings.RATE_LIMIT_LOGIN_PER_MIN, 60)),
+):
+    """Self-serve tenant onboarding (multi-tenant SaaS, 2026-10-13).
+
+    Creates an Organization + its FIRST admin user atomically. Gated by
+    ``ALLOW_ORG_SIGNUP`` (default false — enterprise deployments keep
+    admin-provisioned accounts only). The user's org comes from this
+    server-side creation, never from the client.
+    """
+    if not settings.ALLOW_ORG_SIGNUP:
+        raise HTTPException(
+            status_code=403,
+            detail="Organization signup is disabled. Contact the platform operator.",
+        )
+
+    org_name = str(body.get("org_name") or "").strip()
+    email = str(body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    full_name = str(body.get("full_name") or "").strip()
+
+    if not org_name or not email or not password:
+        raise HTTPException(
+            status_code=400, detail="org_name, email and password are required"
+        )
+    # Password policy (same as register)
+    from app.services.password_policy import validate_password as _vp
+
+    pw_err = _vp(password)
+    if pw_err:
+        raise HTTPException(status_code=400, detail=pw_err)
+
+    if db.query(User).filter(User.email == email, User.is_deleted == False).first():
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this email already exists. Log in instead.",
+        )
+
+    from app.models.organization import Organization
+    import re as _re
+    import uuid as _uuid
+
+    base_slug = _re.sub(r"[^a-z0-9]+", "-", org_name.lower()).strip("-") or "org"
+    slug = base_slug
+    for _ in range(5):
+        if not db.query(Organization).filter(Organization.slug == slug).first():
+            break
+        slug = f"{base_slug}-{_uuid.uuid4().hex[:4]}"
+    else:
+        raise HTTPException(status_code=500, detail="Could not allocate org slug")
+
+    org = Organization(name=org_name[:255], slug=slug[:100])
+    db.add(org)
+    db.flush()  # org.id needed for the user's org_id
+
+    user = User(
+        email=email,
+        full_name=full_name or email.split("@")[0],
+        role="admin",  # the first user of a new org IS its Org Admin
+        password_hash=auth_service.hash_password(password),
+        org_id=org.id,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    logger.info(
+        "signup-org: created org=%s(%s) + admin user=%s", org.name, org.slug, user.email
+    )
+    access_token = auth_service.create_access_token(user.id, db)
+    refresh_token = auth_service.create_refresh_token(user.id, db)
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "user": user.to_dict(),
+        "org_id": user.org_id,
+        "role": user.role,
+        "org": {"id": org.id, "name": org.name, "slug": org.slug},
+    }
 
 
 @router.post("/apps/{app_id}/auth/request-login-code")
