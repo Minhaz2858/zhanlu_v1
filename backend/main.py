@@ -39,6 +39,7 @@ from app.routers.functions import router as functions_router
 from app.routers.integrations import router as integrations_router
 from app.routers.agents import router as agents_router
 from app.routers.analytics import router as analytics_router
+from app.routers.roi import router as roi_router
 from app.routers.openharness import router as openharness_router
 from app.routers.artifacts import router as artifacts_router
 from app.routers.sandbox import router as sandbox_router
@@ -992,6 +993,7 @@ def create_app() -> FastAPI:
     app.include_router(integrations_router, prefix="/api")
     app.include_router(agents_router, prefix="/api")
     app.include_router(analytics_router, prefix="/api")
+    app.include_router(roi_router, prefix="/api")
     app.include_router(openharness_router, prefix="/api")
     app.include_router(artifacts_router, prefix="/api")
     app.include_router(sandbox_router, prefix="/api")

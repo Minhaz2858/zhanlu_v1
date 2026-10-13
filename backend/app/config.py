@@ -113,6 +113,15 @@ class Settings(BaseSettings):
     #        (automation-forced planning is never overridden)
     V3_LLM_ROUTER_MODE: str = "off"
 
+    # ── ROI service (IBM Gap 1, 2026-10-13) ────────────────────────────
+    # Assumptions behind the estimated hours-saved metric. These are the
+    # customer-adjustable knobs returned alongside the estimate so the
+    # number is always honest about what it assumes.
+    ROI_MINUTES_PER_TURN: float = 10.0
+    ROI_MINUTES_PER_ARTIFACT: float = 30.0
+    ROI_HOURLY_RATE: float = 40.0
+
+
     # Rate limits (in-memory, per IP). Zero = disabled.
     RATE_LIMIT_LOGIN_PER_MIN: int = 5
     RATE_LIMIT_REGISTER_PER_10MIN: int = 3
