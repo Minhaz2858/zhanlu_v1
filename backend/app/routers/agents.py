@@ -11542,6 +11542,23 @@ async def add_message_stream(
             effective_llm.locked_reason, user_model,
         )
 
+    # ── Cost-ledger tenant context (IBM Gap 1 completion, 2026-10-13) ──
+    # Every LLM completion on this turn books its token usage into
+    # cost_ledger against THIS tenant. The context comes from the verified
+    # identity + conversation row — never the client. asyncio.to_thread
+    # propagates it into the FSM's thread-pool execution.
+    try:
+        from app.services.llm_cost_recorder import set_llm_cost_context
+
+        set_llm_cost_context(
+            org_id=getattr(user, "org_id", None) or "default-org",
+            agent_name=getattr(conv, "agent_name", None),
+            conversation_id=conversation_id,
+            app_id=getattr(conv, "app_id", None),
+        )
+    except Exception as _cost_ctx_err:  # noqa: BLE001 — non-fatal
+        logger.debug("cost context set failed (non-fatal): %s", _cost_ctx_err)
+
     # ── User-level LLM overrides (Settings page) ──────────────────────
     llm_overrides = get_user_llm_overrides(db, user.id)
 

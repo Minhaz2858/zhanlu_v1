@@ -171,6 +171,21 @@ def roi_summary(db: Session, org_id: str, days: int = 30, app_id: str | None = N
         2,
     )
 
+    # Agents with booked costs but no conversations in the window (e.g.
+    # background/automation agents) still belong in the breakdown — the
+    # CoE view must show where ALL the money went.
+    for agent, amt in cost_by_agent.items():
+        if agent not in by_agent:
+            by_agent[agent] = {
+                "agent_name": agent,
+                "conversations": 0,
+                "user_turns": 0,
+                "assistant_answers": 0,
+                "artifacts_created": 0,
+                "cost_total": amt,
+                "est_hours_saved": 0.0,
+            }
+
     est_value_multiple = None
     if cost_total > 0 and totals["est_hours_saved"] > 0:
         est_value_multiple = round(
@@ -182,8 +197,8 @@ def roi_summary(db: Session, org_id: str, days: int = 30, app_id: str | None = N
         "window_days": days,
         "totals": {
             **totals,
-            "cost_total": round(cost_total, 2),
-            "cost_by_type": {k: round(v, 2) for k, v in sorted(
+            "cost_total": round(cost_total, 4),
+            "cost_by_type": {k: round(v, 4) for k, v in sorted(
                 cost_by_type.items(), key=lambda kv: -kv[1])},
             "cost_per_answered_turn": (
                 round(cost_total / totals["assistant_answers"], 4)

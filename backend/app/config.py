@@ -121,6 +121,12 @@ class Settings(BaseSettings):
     ROI_MINUTES_PER_ARTIFACT: float = 30.0
     ROI_HOURLY_RATE: float = 40.0
 
+    # Cost ledger wiring (IBM Gap 1 completion): when True, every successful
+    # LLM completion books its token usage into cost_ledger (fire-and-forget,
+    # off the event loop). Disable to stop cost bookkeeping.
+    COST_LEDGER_ENABLED: bool = True
+
+
 
     # Rate limits (in-memory, per IP). Zero = disabled.
     RATE_LIMIT_LOGIN_PER_MIN: int = 5

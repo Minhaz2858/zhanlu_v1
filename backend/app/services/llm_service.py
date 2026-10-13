@@ -750,6 +750,20 @@ async def call_llm(
             prompt_tokens=_llm_prompt_tokens,
             completion_tokens=_llm_completion_tokens,
         )
+        # ── Cost ledger booking (IBM Gap 1 completion, 2026-10-13) ──────
+        # Fire-and-forget: books this completion's token usage into
+        # cost_ledger with the tenant context set at request ingest. A
+        # bookkeeping failure can never break the answer.
+        try:
+            from app.services.llm_cost_recorder import record_llm_usage_cost
+
+            record_llm_usage_cost(
+                model=_llm_model,
+                prompt_tokens=_llm_prompt_tokens,
+                completion_tokens=_llm_completion_tokens,
+            )
+        except Exception as _cost_err:  # noqa: BLE001 — non-fatal
+            logger.debug("cost booking skipped: %s", _cost_err)
 
         # ── Cache result (temperature=0 only) ──
         if endpoint is None:
