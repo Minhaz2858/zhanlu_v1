@@ -79,6 +79,7 @@ def get_portfolio(
                 "artifacts_created": roi_agent.get("artifacts_created", 0),
                 "cost_total": roi_agent.get("cost_total", 0.0),
                 "est_hours_saved": roi_agent.get("est_hours_saved", 0.0),
+                "acceptance_rate": roi_agent.get("acceptance_rate"),
             },
         })
 
@@ -102,6 +103,7 @@ def get_portfolio(
                     "artifacts_created": roi_agent.get("artifacts_created", 0),
                     "cost_total": roi_agent.get("cost_total", 0.0),
                     "est_hours_saved": roi_agent.get("est_hours_saved", 0.0),
+                    "acceptance_rate": roi_agent.get("acceptance_rate"),
                 },
             })
 

@@ -68,6 +68,17 @@ def roi_summary(db: Session, org_id: str, days: int = 30, app_id: str | None = N
     from app.models.agent_conversation import AgentConversation
     from app.models.governance import CostLedger
 
+    # Quality dimension (Gap 3): acceptance rate per agent joins the value
+    # story — a use case that saves hours but gets thumbs-down is a risk
+    # the CoE board must surface.
+    try:
+        from app.services.answer_feedback import feedback_summary
+
+        _fb = feedback_summary(db, org_id=org_id, days=days, app_id=app_id)
+    except Exception as _fb_err:  # noqa: BLE001 — non-fatal
+        logger.debug("feedback summary unavailable: %s", _fb_err)
+        _fb = {"totals": {"acceptance_rate": None}, "by_agent": {}}
+
     days = max(1, min(int(days), 365))
     start = _window_start(days)
 
@@ -145,6 +156,8 @@ def roi_summary(db: Session, org_id: str, days: int = 30, app_id: str | None = N
             "artifacts_created": 0,
             "cost_total": cost_by_agent.get(agent, 0.0),
             "est_hours_saved": 0.0,
+            "acceptance_rate": (_fb.get("by_agent", {}).get(agent) or {}).get(
+                "acceptance_rate"),
         })
         slot["conversations"] += 1
         slot["user_turns"] += user_turns
@@ -171,10 +184,12 @@ def roi_summary(db: Session, org_id: str, days: int = 30, app_id: str | None = N
         2,
     )
 
-    # Agents with booked costs but no conversations in the window (e.g.
-    # background/automation agents) still belong in the breakdown — the
-    # CoE view must show where ALL the money went.
-    for agent, amt in cost_by_agent.items():
+    # Agents with booked costs or feedback but no conversations in the
+    # window (background/automation agents, rated-but-unlogged turns)
+    # still belong in the breakdown — the CoE view must show where ALL
+    # the money went and what users think of every agent.
+    _merge_agents = set(cost_by_agent) | set(_fb.get("by_agent", {}))
+    for agent in _merge_agents:
         if agent not in by_agent:
             by_agent[agent] = {
                 "agent_name": agent,
@@ -182,8 +197,10 @@ def roi_summary(db: Session, org_id: str, days: int = 30, app_id: str | None = N
                 "user_turns": 0,
                 "assistant_answers": 0,
                 "artifacts_created": 0,
-                "cost_total": amt,
+                "cost_total": cost_by_agent.get(agent, 0.0),
                 "est_hours_saved": 0.0,
+                "acceptance_rate": (_fb.get("by_agent", {}).get(agent) or {}).get(
+                    "acceptance_rate"),
             }
 
     est_value_multiple = None
@@ -198,6 +215,7 @@ def roi_summary(db: Session, org_id: str, days: int = 30, app_id: str | None = N
         "totals": {
             **totals,
             "cost_total": round(cost_total, 4),
+            "acceptance_rate": _fb.get("totals", {}).get("acceptance_rate"),
             "cost_by_type": {k: round(v, 4) for k, v in sorted(
                 cost_by_type.items(), key=lambda kv: -kv[1])},
             "cost_per_answered_turn": (
