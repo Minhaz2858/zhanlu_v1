@@ -1,0 +1,20 @@
+{
+  "pack_key": "manufacturing_c5",
+  "name": "C5 Chemical Manufacturing Assistant",
+  "version": "1.0.0",
+  "industry": "manufacturing",
+  "description": "C5 cracking-derivatives vocabulary (petrochemical): products, revenue measures, and supply-chain starter questions. Derived from a live deployment's semantic store.",
+  "starter_prompts": [
+    "Show me the top 10 products by revenue for last month",
+    "What is the revenue trend by product family this year?",
+    "Which customers bought 戊烷发泡剂 in the last quarter?"
+  ],
+  "terminology": [
+    {"word": "发泡剂", "description": "Blowing agent (pentane-based) used in foam production — a C5 cracking derivative product."},
+    {"word": "异戊二烯", "description": "Isoprene — C5 hydrocarbon feedstock for synthetic rubber and elastomers."},
+    {"word": "双环戊二烯", "description": "Dicyclopentadiene (DCPD) — C5 derivative used in resins and specialty polymers."},
+    {"word": "碳五石油树脂", "description": "C5 petroleum resin — used in adhesives, paints and coatings."},
+    {"word": "净额", "description": "Net amount — FAMOUNT, revenue net of tax. FALLAMOUNT = FAMOUNT + FTAXAMOUNT."},
+    {"word": "裂解碳五", "description": "Cracked C5 fraction — the feedstock stream from steam cracking that the C5 product family derives from."}
+  ]
+}

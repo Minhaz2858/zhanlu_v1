@@ -1,0 +1,20 @@
+{
+  "pack_key": "insurance_claims",
+  "name": "Insurance Claims Assistant",
+  "version": "1.0.0",
+  "industry": "insurance",
+  "description": "Claims, fraud, and underwriting vocabulary + starter questions. Built on the IBM insurance use-case pattern: claims processing, fraud detection, and underwriting are the highest-value, most-mature AI use cases in insurance.",
+  "starter_prompts": [
+    "Summarize open claims by adjuster and days-to-settle for this quarter",
+    "Which claims have risk factors that suggest possible fraud?",
+    "What is our claims volume trend by product line over the last 6 months?"
+  ],
+  "terminology": [
+    {"word": "claim", "description": "A formal request for coverage payment. Distinguish from 'policy' (the contract) and 'coverage' (the scope of protection)."},
+    {"word": "underwriting", "description": "The process of evaluating applicant risk to decide whether to offer coverage and at what price."},
+    {"word": "loss ratio", "description": "Incurred losses divided by earned premiums — the core profitability ratio of a book of business."},
+    {"word": "settlement", "description": "The agreed payout that closes a claim. A settled claim is closed; a pending claim is still open."},
+    {"word": "NPS", "description": "Net Promoter Score — customer loyalty metric. Gen-AI-assisted insurers see materially higher NPS (IBM IBV)."},
+    {"word": "fraud indicator", "description": "A data pattern (duplicate claims, identity mismatches, unusual timing) that flags a claim for investigation — never an automatic denial."}
+  ]
+}
