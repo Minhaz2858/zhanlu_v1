@@ -72,6 +72,7 @@ from app.models.learning_proposal import LearningProposal
 from app.models.audit_event import AuditEvent
 from app.models.skill_source import SkillSource
 from app.models.external_skill import ExternalSkill
+from app.models.agent_portfolio import AgentPortfolioEntry  # Gap 2: AI-CoE use-case registry
 from app.models.removed_curated_url import RemovedCuratedUrl
 from app.models.hook_rule import HookRule
 from app.models.dashboard import Dashboard
