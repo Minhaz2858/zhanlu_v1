@@ -293,6 +293,22 @@ class Settings(BaseSettings):
     # forward the raw bytes to a vision-capable model).
     IMAGE_OCR_ENABLED: bool = False
 
+    # ── Vision bridge (2026-10-13) ──────────────────────────────────────
+    # Lets the chat agent answer questions about PASTED/UPLOADED images even
+    # when the main model is text-only (live: deepseek-chat cannot see the
+    # image content blocks, so "look at this image" answers "the image
+    # didn't come through"). When a message carries images, each one is run
+    # through this OpenAI-compatible vision endpoint and the analysis is
+    # injected into the system prompt. VISION_* default to OPENAI_* so a
+    # single-provider deployment works by just naming a vision model.
+    # VISION_BRIDGE_MODE: auto = bridge only when the resolved main model
+    # does not look vision-capable (native image blocks already work there);
+    # always = bridge regardless; off = never (vision-model-only setups).
+    VISION_MODEL: str = ""
+    VISION_BASE_URL: str = ""
+    VISION_API_KEY: str = ""
+    VISION_BRIDGE_MODE: str = "auto"
+
     # ── Institutional-grade PPT/research-analyst pipeline (2026-08-25) ──
     # When True, the universal _RESEARCH_ANALYST_DIRECTIVE is appended to
     # the system prompt of every DB-bound agent (data_agent,

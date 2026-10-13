@@ -341,6 +341,51 @@ _LOOP_GUARD_GENERIC_MSG = (
 _NON_ANSWER_MAX_CHARS = _HARNESS_POLICY.budgets().non_answer_max_chars
 
 
+def _glossary_definitional_hit(question: str, kb_ids: list[str]) -> bool:
+    """True when this is a definitional question the VERIFIED glossary can
+    answer ("what is net revenue" / X是什么). Used by the v3 router to treat
+    such questions as data turns — mixed-mode planning (OCI agentic mode):
+    semantic lookup instead of a web search. Fail-soft: any error means no."""
+    import re as _re
+
+    q = (question or "").strip()
+    m = (
+        _re.match(
+            r"^(?:what(?:'s| is| are)|define|explain|meaning of|"
+            r"description of)\s+(.+?)[?.!\s]*$",
+            q, _re.IGNORECASE,
+        )
+        or _re.match(r"^(.+?)\s*(?:是什么|是什么意思)(?:吗)?[?？。]*$", q)
+        or _re.match(r"^什么是(.+?)[?？。]*$", q)
+    )
+    if not m:
+        return False
+    non_def = (
+        "trend", "compare", " by ", " per ", "top ", "how many",
+        "how much", "list", "show", "last ", "this month",
+    )
+    if any(w in q.lower() for w in non_def):
+        return False
+    try:
+        from app.database import SessionLocal
+        from app.services.db.semantic_store import get_semantic_store
+
+        s = SessionLocal()
+        try:
+            terms = [
+                t
+                for t in get_semantic_store(s, kb_ids or None).glossary(
+                    q, limit=3
+                )
+                if (t.definition or "").strip()
+            ]
+        finally:
+            s.close()
+        return bool(terms)
+    except Exception:
+        return False
+
+
 def _loop_guard_message(agent_name: str | None) -> str:
     """Agent-appropriate user-facing text when the loop guard stops a turn.
 
@@ -11518,6 +11563,43 @@ async def add_message_stream(
         if isinstance(u, str) and u.startswith("/api/uploads/")
     ]
 
+    # ── Vision bridge (2026-10-13) ──────────────────────────────────────
+    # Computed EARLY so EVERY downstream path gets eyes on pasted images:
+    # the FSM route (this conversation's main path — its own prompts never
+    # saw the ReAct-branch injection), the ReAct loop, and the routing
+    # decisions themselves. The native image content blocks only help
+    # vision-capable main models; deepseek-chat (this deployment) cannot
+    # see them, so the bridge runs each image through the configured
+    # VISION_* endpoint and produces a text analysis block. Honest on
+    # failure: when no vision channel is configured the block says so and
+    # forbids guessing. ``user_content`` stays clean for persistence —
+    # the block is appended only where LLM prompts consume it.
+    _vision_block = None
+    if file_urls:
+        try:
+            from app.services.image_understanding import (
+                build_bridge_prompt,
+                should_bridge,
+            )
+
+            if should_bridge(
+                getattr(effective_llm, "model_id", "") or settings.LLM_MODEL
+            ):
+                _vision_block = build_bridge_prompt(
+                    file_urls, str(user_content or "")
+                )
+                if _vision_block:
+                    logger.info(
+                        "vision bridge: analysis ready (%d chars, model=%s)",
+                        len(_vision_block),
+                        getattr(effective_llm, "model_id", "") or settings.LLM_MODEL,
+                    )
+        except Exception as _vis_err:  # noqa: BLE001 — non-fatal
+            logger.warning("vision bridge failed (non-fatal): %s", _vis_err)
+    _fsm_user_message = (
+        f"{user_content}\n\n{_vision_block}" if _vision_block else user_content
+    )
+
     user_msg = {
         "id": str(uuid.uuid4()),
         "role": user_role,
@@ -12007,10 +12089,26 @@ async def add_message_stream(
         # speed. No domain keywords — works for any customer's schema
         # and in Chinese.
         _has_data_context = bool(_v3_bound) or bool(_v3_pinned_dsr_id)
+        # Definitional questions ("what is net revenue" / X是什么) that the
+        # VERIFIED glossary can answer ARE data turns — mixed-mode planning
+        # (OCI agentic mode): the sealed NL pipeline's definitional lookup
+        # serves the curated definition without SQL, instead of the direct
+        # path web-searching generic literature. 2026-10-11.
+        # 2026-10-13: suppressed when the turn carries IMAGE attachments —
+        # live, "look at the image … what is the Q3 revenue figure?" matched
+        # the glossary term "revenue" and answered the curated FAMOUNT
+        # definition verbatim, hijacking a question that was about the image.
+        _definitional_glossary_hit = (
+            _has_data_context
+            and not _vision_block
+            and _glossary_definitional_hit(
+                user_content, [str(k) for k in (_v3_bound or [])]
+            )
+        )
         if (
             not _v3_plan_trigger
             and _has_data_context
-            and not _is_non_data_intent(user_content)
+            and (not _is_non_data_intent(user_content) or _definitional_glossary_hit)
         ):
             logger.info(
                 "v3 add_message_stream: data-bound override — bound=%d pinned=%s, "
@@ -12130,7 +12228,11 @@ async def add_message_stream(
                 _fsm_req = ExecutionRequest(
                     conversation_id=conversation_id,
                     agent_name=_v3_agent_name,
-                    user_message=user_content,
+                    # Vision bridge: the analysis block rides on the user
+                    # message so planning AND the FINALIZE narrator see what
+                    # the images contain (the FSM's own attachment path
+                    # yields nothing when OCR is disabled).
+                    user_message=_fsm_user_message,
                     user_id=str(getattr(user, "id", None)) if user else None,
                     # Phase 1: forward the user's uploaded files so the FSM's
                     # context_assembler can extract their text and fold it
@@ -13078,6 +13180,14 @@ async def add_message_stream(
             system_prompt += _del_directive
     except Exception as _del_err:  # noqa: BLE001 — non-fatal
         logger.debug("delegation nudge injection failed (non-fatal): %s", _del_err)
+
+    # ── Vision bridge injection (ReAct branch) ──────────────────────────
+    # Analysis was computed EARLY (right after ingest, before routing) so
+    # the FSM path gets it too — see the _vision_block computation. Here
+    # it just lands in the ReAct system prompt before it is baked into
+    # llm_messages.
+    if _vision_block:
+        system_prompt += "\n\n" + _vision_block
 
     llm_messages = _rebuild_v3_history_messages(system_prompt, messages)
 

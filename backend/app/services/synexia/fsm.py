@@ -1358,7 +1358,18 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
         # the answer — re-narrating it through the LLM pads it with generic
         # outside knowledge (live: a 200-char curated definition became
         # 4,300 chars of generic accounting prose). Yield it verbatim.
+        #
+        # 2026-10-13 vision-bridge guard: NOT on image turns. Live, "look
+        # at the attached image — what is the Q3 revenue figure in it?"
+        # matched the glossary term "revenue" and the curated FAMOUNT
+        # definition was yielded verbatim as the whole answer, hijacking a
+        # question that was about the IMAGE. When the vision bridge ran
+        # (marker in the user message), the glossary shortcut must never
+        # own the answer.
         try:
+            _question_has_images = "[Attached image" in str(
+                getattr(self.execution, "user_message", "") or ""
+            )
             for obs in (self.execution.observations or []):
                 _rd = getattr(obs, "result_data", None)
                 if (
@@ -1367,6 +1378,12 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
                     and _rd.get("mixed_mode") == "semantic_lookup"
                     and str(_rd.get("answer") or "").strip()
                 ):
+                    if _question_has_images:
+                        logger.info(
+                            "FSM: mixed-mode semantic_lookup suppressed — "
+                            "turn carries image attachments (vision bridge)"
+                        )
+                        break
                     _curated = str(_rd["answer"]).strip()
                     self.execution.assistant_content = _curated
                     logger.info(
