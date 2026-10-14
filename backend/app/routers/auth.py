@@ -53,6 +53,16 @@ async def login(
         User.email == email, User.is_deleted == False
     ).first()
 
+    # TEMP-DEBUG (RLS batch 4 verification): identify the failing branch.
+    import logging as _logging
+
+    _logging.getLogger("auth.debug").warning(
+        "LOGIN-DEBUG email=%s found=%s org_setting=%s",
+        email,
+        user is not None,
+        db.execute(__import__("sqlalchemy").text("SELECT current_setting('app.current_org', true)")).scalar(),
+    )
+
     if not user or not auth_service.verify_password(password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
