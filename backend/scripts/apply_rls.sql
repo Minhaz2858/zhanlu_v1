@@ -69,3 +69,17 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- ── Batch 3 (2026-10-14): all remaining org-scoped tables (92 added → 106 total) ──
+-- Generated dynamically: every table having an org_id column, EXCLUDING the
+-- audit denylist (needs design work before RLS):
+--   users, refresh_tokens, revoked_tokens        (auth path, pre-tenant)
+--   analytics_events, audit_logs, audit_events   (platform-wide telemetry)
+--   resource_access_policies, resource_shares, resource_registry, chat_shares
+--                                                (cross-org sharing — RLS would break grants)
+--   market_agents, tools, external_agents, external_skills, skill_sources,
+--   report_recipes, semantic_guidelines, response_cache_entries,
+--   removed_curated_urls, q_sql_examples         (shared catalogs — audit each)
+--   organizations                                (tenant root)
+-- Regenerate with the same information_schema query + denylist, apply in the
+-- stop-app window with lock_timeout.
