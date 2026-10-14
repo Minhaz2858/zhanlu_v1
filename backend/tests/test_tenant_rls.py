@@ -103,3 +103,32 @@ def test_session_listener_noop_on_sqlite(tmp_path):
     finally:
         db.close()
     assert ok
+
+
+def test_rls_policies_treat_empty_setting_as_unpinned_source():
+    """REGRESSION (2026-10-14, RLS batch 5): Postgres custom-GUC quirk —
+    after `SET LOCAL app.current_org` on a pooled connection, later
+    transactions see EMPTY STRING (not NULL) from current_setting, so the
+    original `... IS NULL` bypass silently failed on unpinned queries
+    (intermittent login 401s). Every tenant_isolation policy MUST use the
+    coalesce('' = '') bypass. SQLite can't run RLS — guard the SCRIPTS."""
+    import pathlib
+    import re
+
+    scripts = pathlib.Path(__file__).resolve().parent.parent / "scripts"
+    policy_re = re.compile(
+        r"CREATE POLICY tenant_isolation.*?USING\s*\((.*?)\)\s*", re.DOTALL
+    )
+    for name in ("apply_rls.sql", "apply_rls_batch4.sql", "apply_rls_batch5.sql"):
+        path = scripts / name
+        if not path.exists():
+            continue
+        src = path.read_text()
+        # The bare IS NULL bypass must never appear inside a tenant_isolation
+        # policy definition again.
+        for m in policy_re.finditer(src):
+            body = m.group(1)
+            assert "IS NULL" not in body or "coalesce" in body.lower(), (
+                f"{name}: policy bypass must treat '' as unpinned "
+                f"(SET LOCAL sticky-GUC quirk) — got: {body[:120]}"
+            )

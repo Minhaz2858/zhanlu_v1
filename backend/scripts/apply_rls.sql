@@ -30,8 +30,8 @@ BEGIN
         EXECUTE format($f$
             CREATE POLICY tenant_isolation ON %I
             USING (
-                org_id = current_setting('app.current_org', true)
-                OR current_setting('app.current_org', true) IS NULL
+                coalesce(current_setting('app.current_org', true), '') = ''
+                OR org_id = current_setting('app.current_org', true)
             )
         $f$, t);
         RAISE NOTICE 'RLS enabled on %', t;
@@ -61,8 +61,8 @@ BEGIN
         EXECUTE format($f$
             CREATE POLICY tenant_isolation ON %I
             USING (
-                org_id = current_setting('app.current_org', true)
-                OR current_setting('app.current_org', true) IS NULL
+                coalesce(current_setting('app.current_org', true), '') = ''
+                OR org_id = current_setting('app.current_org', true)
             )
         $f$, t);
         RAISE NOTICE 'RLS enabled on %', t;
