@@ -1,0 +1,15 @@
+{
+  "name": "echarts",
+  "version": "6.1.0",
+  "description": "Apache ECharts 6.1.0 (vendored prebuilt ESM bundle from apache/echarts; Apache-2.0). Self-contained: bundles zrender.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./echarts.esm.min.mjs",
+  "module": "./echarts.esm.min.mjs",
+  "exports": {
+    ".": "./echarts.esm.min.mjs"
+  },
+  "sideEffects": false,
+  "keywords": ["echarts", "charting", "visualization"],
+  "homepage": "https://echarts.apache.org"
+}

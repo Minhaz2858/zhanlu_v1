@@ -9,6 +9,7 @@ Proves both fixes at once:
 Run from the repo root against the copy stack on :5012.
 """
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -81,7 +82,8 @@ CASES = [
     }),
     ("MARIADB-AUTO-API-ONLY", {
         "db_type": "mariadb", "host": "zhanlu-copy-mariadb", "port": 3306,
-        "database_name": "acme_mariadb", "username": "root", "password": "***MARIA-PASSWORD-REDACTED***",
+        "database_name": "acme_mariadb", "username": "root",
+                       "password": os.environ.get("ACME_MARIADB_PASSWORD", ""),
     }),
 ]
 
