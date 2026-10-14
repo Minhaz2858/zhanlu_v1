@@ -137,6 +137,35 @@ def router_mode() -> str:
     return mode if mode in ("off", "dark", "on") else "off"
 
 
+def data_route_mode() -> str:
+    """fsm | react — who narrates data turns (Option C Phase 3).
+
+    fsm (default): the SynexiaFSM brain plans AND writes the final answer.
+    react: the ReAct orchestrator owns the turn and calls the boxed
+    `query_database` tool; the FSM pipeline runs inside the tool and the
+    orchestrator narrates from grounded rows.
+    """
+    mode = str(getattr(settings, "V3_DATA_ROUTE_MODE", "fsm") or "fsm").strip().lower()
+    return mode if mode in ("fsm", "react") else "fsm"
+
+
+def route_data_turn(plan_trigger_source: str | None, *, forced: bool) -> bool:
+    """True when a data turn should go to the ReAct orchestrator.
+
+    Phase 3 rule: in react mode every top-level FSM route becomes a ReAct
+    turn — EXCEPT automation-forced planning (scheduled jobs must stay
+    deterministic and never depend on orchestrator tool-choice). In fsm
+    mode (default) nothing changes. This is migration machinery, not a
+    keyword governor: the decision is one config value, not message-text
+    matching.
+    """
+    if data_route_mode() != "react":
+        return False
+    if forced or plan_trigger_source == "automation-forced":
+        return False
+    return plan_trigger_source is not None
+
+
 def apply_llm_route(
     heuristic_wants_fsm: bool,
     llm_decision: dict | None,

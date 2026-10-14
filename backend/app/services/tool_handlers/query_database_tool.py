@@ -87,10 +87,17 @@ async def _query_database(
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": f"pipeline unavailable: {exc}"}
 
-    from app.database import SessionLocal as _FallbackSession
+    # ALWAYS a fresh session for the FSM run: fsm.run executes blocking DB
+    # work via asyncio.to_thread while the CALLER's session stays owned by
+    # the event loop — sharing it raised "This session is provisioning a
+    # new connection; concurrent operations are not permitted" on the first
+    # live Phase 3 turn (the orchestrator's retry masked it; the second
+    # call won the race). Tenant context (app.current_org) propagates into
+    # the thread via the contextvar set by database.py's after_begin hook.
+    from app.database import SessionLocal as _SessionLocal
 
-    fsm_db = db or _FallbackSession()
-    own_session = db is None
+    fsm_db = _SessionLocal()
+    own_session = True
 
     req = ExecutionRequest(
         conversation_id=ctx.get("conversation_id") or "",

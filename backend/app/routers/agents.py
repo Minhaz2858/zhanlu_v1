@@ -5895,6 +5895,7 @@ _DATA_TOOL_NAMES = frozenset({
     "list_data_sources",
     "profile_data",
     "inspect_data_source",
+    "query_database",  # Phase 2: the boxed NL2SQL pipeline tool
 })
 
 
@@ -12255,6 +12256,30 @@ async def add_message_stream(
             _v3_plan_trigger.signals,
             is_fsm_enabled(),
         )
+
+        # ── Option C Phase 3: one narrator (2026-10-14) ─────────────────
+        # V3_DATA_ROUTE_MODE=react retires the FSM as the TOP-LEVEL brain:
+        # a data turn routes to the ReAct orchestrator, which calls the
+        # boxed `query_database` tool (the FSM pipeline runs INSIDE the
+        # tool with generate_response=False) and narrates from grounded
+        # rows. Automation-forced planning always keeps the FSM top-level.
+        try:
+            from app.services.turn_router import route_data_turn
+
+            if _v3_plan_trigger and route_data_turn(
+                _v3_plan_trigger.source,
+                forced=_v3_plan_trigger.source == "automation-forced",
+            ):
+                logger.info(
+                    "v3 add_message_stream: phase3 react route — FSM narrator "
+                    "retired for this turn (was %s, conv=%s)",
+                    _v3_plan_trigger.source,
+                    conversation_id,
+                )
+                _v3_plan_trigger = None
+        except Exception as _p3_err:  # noqa: BLE001 — fail-open to FSM
+            logger.warning("v3 phase3 route check failed (non-fatal): %s", _p3_err)
+
         if _v3_plan_trigger and is_fsm_enabled():
 
             async def _fsm_event_stream():
@@ -16387,6 +16412,10 @@ async def add_message_stream(
                 "agent_name": agent_name,
                 "conversation_metadata": conv.metadata_ or {},
                 "chat_session_id": chat_session_id,
+                # Phase 2/3: the boxed query_database tool resolves the
+                # tenant's domain config + pipeline scope from this.
+                "org_id": getattr(conv, "org_id", None),
+                "app_id": agent_app_id,
                 **(data_ctx_extras or {}),
                 "endpoint": effective_llm.endpoint,
                 # PERF 2026-08-24: deliverable turns synthesize post-loop;

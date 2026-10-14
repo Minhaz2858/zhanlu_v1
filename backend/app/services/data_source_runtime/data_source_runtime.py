@@ -306,17 +306,43 @@ def assert_artifact_source_provenance(
 #
 # When `has_weekly_report` is True, an exception clause is appended so
 def _build_anti_hallucination_directive(has_weekly_report: bool = False) -> str:
-    directive = (
-        "CRITICAL RULE: You have bound data sources (database and/or document). "
-        "For ANY data question, you MUST call the `ask_data_agent` tool FIRST. "
-        "Do NOT fabricate data, invent customer names, or generate data tables "
-        "without calling `ask_data_agent`. Once you receive real data from "
-        "`ask_data_agent`, summarize the key findings clearly: name the top "
-        "performers, cite totals and shares, note the time period, and highlight "
-        "any notable patterns. Every number you mention must come from the tool "
-        "result — but you SHOULD produce a substantive narrative, not just a "
-        "one-line handoff."
-    )
+    # Option C Phase 3 (2026-10-14): in react data-route mode the boxed
+    # `query_database` tool IS the data capability — the orchestrator
+    # narrates from its grounded rows. `ask_data_agent` (a second agent
+    # brain) stays available only as the explicit fallback for questions
+    # a single governed query cannot express.
+    try:
+        from app.services.turn_router import data_route_mode
+
+        _react_mode = data_route_mode() == "react"
+    except Exception:  # noqa: BLE001
+        _react_mode = False
+
+    if _react_mode:
+        directive = (
+            "CRITICAL RULE: You have bound data sources (database and/or document). "
+            "For ANY data question, you MUST call the `query_database` tool FIRST — "
+            "it runs the governed NL2SQL pipeline (semantic grounding, SQL, "
+            "validation, execution, verification) and returns GROUNDED rows. "
+            "Render every number in your answer from those rows; never invent data. "
+            "Call `ask_data_agent` ONLY when `query_database` fails or the question "
+            "needs iterative multi-step exploration that a single governed query "
+            "cannot express. Once you receive real data, summarize the key findings "
+            "clearly: name the top performers, cite totals and shares, note the "
+            "time period, and highlight any notable patterns."
+        )
+    else:
+        directive = (
+            "CRITICAL RULE: You have bound data sources (database and/or document). "
+            "For ANY data question, you MUST call the `ask_data_agent` tool FIRST. "
+            "Do NOT fabricate data, invent customer names, or generate data tables "
+            "without calling `ask_data_agent`. Once you receive real data from "
+            "`ask_data_agent`, summarize the key findings clearly: name the top "
+            "performers, cite totals and shares, note the time period, and highlight "
+            "any notable patterns. Every number you mention must come from the tool "
+            "result — but you SHOULD produce a substantive narrative, not just a "
+            "one-line handoff."
+        )
     return directive
 
 
@@ -1508,6 +1534,16 @@ def prepare_data_source_runtime(
             augmented_tools.append(normalize_tool_schema(entry.schema, fallback_name=entry.name))
     if "fetch_data_batch" not in existing_names:
         entry = registry.get_entry("fetch_data_batch")
+        if entry:
+            from app.services.tool_registry import normalize_tool_schema
+            augmented_tools.append(normalize_tool_schema(entry.schema, fallback_name=entry.name))
+    # Option C Phase 3 (2026-10-14): the boxed NL2SQL pipeline tool rides
+    # along for every data-bound agent so the orchestrator can answer data
+    # questions directly (react data-route mode makes it the FIRST choice
+    # in the anti-hallucination directive; even in fsm mode the tool is
+    # available when the orchestrator judges it the better fit).
+    if "query_database" not in existing_names:
+        entry = registry.get_entry("query_database")
         if entry:
             from app.services.tool_registry import normalize_tool_schema
             augmented_tools.append(normalize_tool_schema(entry.schema, fallback_name=entry.name))

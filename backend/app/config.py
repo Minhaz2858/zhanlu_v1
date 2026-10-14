@@ -113,6 +113,17 @@ class Settings(BaseSettings):
     #        (automation-forced planning is never overridden)
     V3_LLM_ROUTER_MODE: str = "off"
 
+    # ── Option C Phase 3: one narrator (2026-10-14) ─────────────────────
+    # fsm (default) = data turns route to the SynexiaFSM brain as before
+    # react         = data turns route to the ReAct orchestrator, which
+    #                 calls the boxed `query_database` tool (the FSM
+    #                 pipeline runs INSIDE the tool; the orchestrator
+    #                 narrates from grounded rows). Automation-forced
+    #                 planning still runs the FSM top-level (deterministic
+    #                 scheduled jobs must not depend on orchestrator
+    #                 tool-choice).
+    V3_DATA_ROUTE_MODE: str = "fsm"
+
     # ── ROI service (IBM Gap 1, 2026-10-13) ────────────────────────────
     # Assumptions behind the estimated hours-saved metric. These are the
     # customer-adjustable knobs returned alongside the estimate so the
