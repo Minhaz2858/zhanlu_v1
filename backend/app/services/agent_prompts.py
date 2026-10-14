@@ -2368,8 +2368,15 @@ def get_system_prompt(
     # under "agent_prompt_overrides.schema_hint". Platform default: no
     # per-app hint — every agent gets the same generic protocol below.
     try:
-        from app.services.domain_config import get_domain_config
-        _cfg = get_domain_config(agent_name) or {}
+        # Tenant-aware (tenancy T2, 2026-10-13): the config resolves per
+        # org — agent config → org config → default.json only for the
+        # default-org deployment. An agent without an app record (system
+        # agents) keeps the deployment default.
+        from app.services.domain_config import get_domain_config_for_org
+
+        _cfg = get_domain_config_for_org(
+            getattr(agent_app, "org_id", None) or None, agent_name
+        ) or {}
         _schema_hint = (
             (_cfg.get("agent_prompt_overrides") or {}).get("schema_hint") or ""
         )

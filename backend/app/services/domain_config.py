@@ -66,10 +66,15 @@ def _config_dirs() -> list[Path]:
 
 
 def _load_file_for(agent_name: str) -> dict[str, Any]:
-    """Load the domain config JSON for an agent (cached, fail-soft)."""
-    base = _safe_name(agent_name)
-    if not base:
+    """Load the domain config JSON (cached, fail-soft).
+
+    ``agent_name`` may carry one subdirectory level (``orgs/<org>``) —
+    each path segment is sanitized separately so the separator survives.
+    """
+    parts = [_safe_name(seg) for seg in str(agent_name).split("/")]
+    if any(not p for p in parts) or len(parts) > 2:
         return {}
+    base = "/".join(parts)
     for d in _config_dirs():
         for ext in (".json", ".yaml", ".yml"):
             p = d / f"{base}{ext}"
@@ -98,10 +103,48 @@ def get_domain_config(agent_name: str | None) -> dict[str, Any]:
     An empty/absent agent name resolves the app's DEFAULT config
     (``domain_configs/default.json``); when that file is absent the result is
     ``{}`` — i.e. the platform behaves as a generic enterprise system.
+
+    Multi-tenant note (2026-10-13): this legacy getter keeps the
+    single-tenant behavior for its ~29 existing callers (forecasting
+    modules resolve their own tenant elsewhere). Tenant-aware call sites
+    MUST use :func:`get_domain_config_for_org` instead — default.json is
+    the config of the default-org deployment, never a global fallback.
     """
     if not agent_name:
         return _load_file_for(_DEFAULT_CONFIG_BASENAME)
     return _load_file_for(agent_name)
+
+
+@lru_cache(maxsize=256)
+def get_domain_config_for_org(org_id: str | None, agent_name: str | None) -> dict[str, Any]:
+    """Tenant-aware domain config (tenancy T2, 2026-10-13).
+
+    Precedence:
+      1. explicit agent config — ``<agent_name>.json``
+      2. ORG config — ``domain_configs/orgs/<org_id>.json``
+      3. the deployment default — ``default.json`` — ONLY for the
+         default-org deployment itself
+      4. ``{}`` — fully generic behavior
+
+    The old behavior (default.json as an implicit global fallback for ANY
+    tenant) is gone: a new org gets a generic, schema-agnostic platform
+    unless it ships its own config — the coupling flagged in the tenancy
+    audit. orgs/ directory config wins over default.json even for
+    default-org when both exist (explicit beats implicit).
+    """
+    if agent_name:
+        cfg = _load_file_for(agent_name)
+        if cfg:
+            return cfg
+
+    if org_id:
+        cfg = _load_file_for(f"orgs/{_safe_name(org_id)}")
+        if cfg:
+            return cfg
+
+    if not org_id or org_id == "default-org":
+        return _load_file_for(_DEFAULT_CONFIG_BASENAME)
+    return {}
 
 
 def get_static_routes(agent_name: str | None = None) -> list[dict[str, Any]]:
@@ -130,3 +173,4 @@ def get_product_keys(agent_name: str | None = None) -> dict[str, Any]:
 
 def clear_cache() -> None:
     get_domain_config.cache_clear()
+    get_domain_config_for_org.cache_clear()

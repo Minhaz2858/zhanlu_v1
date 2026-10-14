@@ -38,3 +38,34 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- ── Batch 2 (2026-10-14): value-layer + ops tables ─────────────────────────
+DO $$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'nl2sql_query_logs',
+        'cost_ledger',
+        'experience_entries',
+        'agent_runs',
+        'automation_tasks',
+        'session_states',
+        'dashboard_apps',
+        'agent_todos'
+    ]
+    LOOP
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);
+        EXECUTE format($f$
+            CREATE POLICY tenant_isolation ON %I
+            USING (
+                org_id = current_setting('app.current_org', true)
+                OR current_setting('app.current_org', true) IS NULL
+            )
+        $f$, t);
+        RAISE NOTICE 'RLS enabled on %', t;
+    END LOOP;
+END
+$$;
