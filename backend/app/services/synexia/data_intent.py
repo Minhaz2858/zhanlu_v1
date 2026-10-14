@@ -10,6 +10,7 @@ _DATA_TOOL_NAMES = frozenset({
     "execute_sql",
     "sql_query",
     "ask_erp_kpi",
+    "query_database",  # Phase 2: the boxed NL2SQL pipeline tool
 })
 
 

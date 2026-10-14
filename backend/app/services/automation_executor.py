@@ -1063,6 +1063,18 @@ def execute_automation(execution_id: str) -> None:
             _mark_failed(db, execution, "Parent task not found")
             return
 
+        # ── Tenant domain-config scoping (tenancy T3, 2026-10-14) ───────
+        # Every domain-config read inside this run (forecasting prefixes,
+        # warehouse maps, agent hints…) resolves against the TASK's org —
+        # never the deployment default. Without this, two tenants'
+        # scheduled forecasts would share one tenant's vocabulary.
+        try:
+            from app.services.domain_config import set_domain_config_org
+
+            set_domain_config_org(getattr(task, "org_id", None))
+        except Exception as _dc_err:  # noqa: BLE001 — non-fatal
+            logger.debug("domain config org scoping failed: %s", _dc_err)
+
         # CAS transition queued -> running. Guards against duplicate spawns
         # (e.g. a retry firing twice) and stamps the wall-clock deadline the
         # janitor uses to reap hung runs.

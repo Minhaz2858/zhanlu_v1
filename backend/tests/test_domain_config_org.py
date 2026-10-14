@@ -101,3 +101,52 @@ def test_system_prompt_uses_org_scoped_config(tmp_path):
                                   agent_name="sales_agent")
     prompt2 = get_system_prompt("sales_agent", agent_app=app_default)
     assert "ESCISCO-SCHEMA-HINT" in prompt2
+
+
+# ── T3: the automation executor's org scoping of legacy reads ─────────────
+
+
+def test_legacy_getter_honors_active_org(tmp_path):
+    """set_domain_config_org(org) makes the ~29 legacy get_domain_config
+    callers resolve the ORG's config — this is how the automation
+    executor (forecast scheduler) threads the tenant through."""
+    from app.services.domain_config import (
+        clear_cache,
+        get_domain_config,
+        set_domain_config_org,
+    )
+
+    _write(tmp_path, "default", {"forecast_key_prefix": "escisco."})
+    _write_orgs("org-beta", {"forecast_key_prefix": "beta."})
+
+    clear_cache()
+    assert get_domain_config("")[  # legacy default-org behavior
+        "forecast_key_prefix"] == "escisco."
+
+    set_domain_config_org("org-beta")
+    try:
+        assert get_domain_config("")[  # scoped: the org's own config
+            "forecast_key_prefix"] == "beta."
+        assert get_domain_config("some_agent")[  # agent config would win
+            "forecast_key_prefix"] == "beta."
+    finally:
+        set_domain_config_org(None)
+
+    clear_cache()
+    assert get_domain_config("")["forecast_key_prefix"] == "escisco."
+
+
+def test_default_org_context_keeps_legacy_behavior(tmp_path):
+    from app.services.domain_config import (
+        clear_cache,
+        get_domain_config,
+        set_domain_config_org,
+    )
+
+    _write(tmp_path, "default", {"forecast_key_prefix": "escisco."})
+    clear_cache()
+    set_domain_config_org("default-org")  # the deployment itself
+    try:
+        assert get_domain_config("")["forecast_key_prefix"] == "escisco."
+    finally:
+        set_domain_config_org(None)

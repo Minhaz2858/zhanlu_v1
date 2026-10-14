@@ -32,6 +32,7 @@ no pinned tables, no allowlist).
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -40,6 +41,22 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: Tenant override for the legacy ``get_domain_config`` callers. Set by
+#: long-lived non-request entry points that KNOW the tenant (automation
+#: executor → task.org_id). When set to a non-default org, the legacy
+#: getter resolves tenant-aware instead of falling back to default.json —
+#: threading org through all ~29 consumers without touching them.
+#: Request paths that don't set it keep legacy behavior (fine for the
+#: default-org deployment; per-request org threading rides on RLS work).
+_ACTIVE_ORG: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "domain_config_active_org", default=None
+)
+
+
+def set_domain_config_org(org_id: str | None) -> None:
+    """Scope subsequent legacy get_domain_config reads to this tenant."""
+    _ACTIVE_ORG.set((org_id or "").strip() or None)
 
 # Default search dir. Override with env ZHL_DOMAIN_CONFIG_DIR (comma-separated
 # for multiple dirs; first hit wins per agent name).
@@ -65,6 +82,7 @@ def _config_dirs() -> list[Path]:
     return dirs + list(_DEFAULT_DIRS)
 
 
+@lru_cache(maxsize=256)
 def _load_file_for(agent_name: str) -> dict[str, Any]:
     """Load the domain config JSON (cached, fail-soft).
 
@@ -96,7 +114,6 @@ def _load_file_for(agent_name: str) -> dict[str, Any]:
     return {}
 
 
-@lru_cache(maxsize=256)
 def get_domain_config(agent_name: str | None) -> dict[str, Any]:
     """Return the (cached) domain config dict for an agent.
 
@@ -104,12 +121,21 @@ def get_domain_config(agent_name: str | None) -> dict[str, Any]:
     (``domain_configs/default.json``); when that file is absent the result is
     ``{}`` — i.e. the platform behaves as a generic enterprise system.
 
-    Multi-tenant note (2026-10-13): this legacy getter keeps the
-    single-tenant behavior for its ~29 existing callers (forecasting
-    modules resolve their own tenant elsewhere). Tenant-aware call sites
-    MUST use :func:`get_domain_config_for_org` instead — default.json is
-    the config of the default-org deployment, never a global fallback.
+    Multi-tenant note (2026-10-13, updated 2026-10-14 T3): the ~29 legacy
+    callers keep this entry point, and it now honors the tenant override
+    set by non-request entry points (automation executor → task.org_id):
+    when an active org is set, reads resolve tenant-aware. Request paths
+    that set no org keep the deployment-default behavior. Tenant-aware
+    call sites may still use :func:`get_domain_config_for_org` directly.
     """
+    return _resolve_legacy(agent_name)
+
+
+def _resolve_legacy(agent_name: str | None) -> dict[str, Any]:
+    """Legacy resolution with the tenant override applied (T3)."""
+    active_org = _ACTIVE_ORG.get()
+    if active_org and active_org != "default-org":
+        return get_domain_config_for_org(active_org, agent_name)
     if not agent_name:
         return _load_file_for(_DEFAULT_CONFIG_BASENAME)
     return _load_file_for(agent_name)
@@ -172,5 +198,5 @@ def get_product_keys(agent_name: str | None = None) -> dict[str, Any]:
 
 
 def clear_cache() -> None:
-    get_domain_config.cache_clear()
+    _load_file_for.cache_clear()
     get_domain_config_for_org.cache_clear()
