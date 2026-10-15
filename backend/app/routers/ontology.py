@@ -27,6 +27,7 @@ from app.services.ontology import (
 )
 from app.services.ontology.data import execute_approved_action
 from app.services.ontology.coverage import compute_coverage
+from app.services.ontology.discovery import discover_and_recompute_coverage
 from app.services.ontology.serialize import (
     action_to_dict,
     binding_to_dict,
@@ -267,6 +268,78 @@ def list_po_drafts(
         }
         for d in rows
     ]
+
+
+@router.post("/ontology/discover")
+def run_discovery(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Auto-discovery seeding: match unwired ontology objects against the
+    org's real database schemas (verified bindings only — never guessed),
+    then recompute honest coverage."""
+    org = admin.org_id
+    ensure_domains(db, org)
+    return discover_and_recompute_coverage(db, org)
+
+
+@router.get("/ontology/po-drafts/export")
+def export_po_drafts(
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Export the buyer's PO draft worklist as an xlsx procurement file."""
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    from app.models.procurement import ProcurementPoDraft
+
+    org = _org_or_404(user, org_id)
+    rows = (
+        db.query(ProcurementPoDraft)
+        .filter(
+            ProcurementPoDraft.org_id == org,
+            ProcurementPoDraft.is_deleted == False,  # noqa: E712
+        )
+        .order_by(ProcurementPoDraft.created_date.desc())
+        .limit(1000)
+        .all()
+    )
+    headers = [
+        "Draft ID", "Supplier", "Supplier Code", "Product", "Quantity",
+        "Unit", "Est. Unit Price", "Est. Amount", "Currency",
+        "Justification", "Status", "Created",
+    ]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "PO Drafts"
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for d in rows:
+        ws.append([
+            d.id, d.supplier_name, d.supplier_code, d.product,
+            d.quantity, d.unit, d.est_unit_price, d.est_amount,
+            d.currency, d.justification, d.status,
+            d.created_date.isoformat() if d.created_date else None,
+        ])
+    # Reasonable column widths for readability in Excel/WPS.
+    widths = [40, 28, 14, 30, 10, 8, 14, 14, 10, 44, 12, 20]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="po_drafts.xlsx"'},
+    )
 
 
 @router.post("/ontology/actions/{action_id}/execute-approved")

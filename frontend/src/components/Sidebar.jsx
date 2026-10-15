@@ -3,7 +3,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useChatSession } from '@/lib/ChatSessionContext';
-import { Plus, Workflow, Store, Wrench, PanelLeftClose, PanelLeftOpen, ShieldCheck, Folder, LayoutGrid, Activity, TrendingUp } from 'lucide-react';
+import { Plus, Workflow, Store, Wrench, PanelLeftClose, PanelLeftOpen, ShieldCheck, Folder, LayoutGrid, Activity, TrendingUp, Building2 } from 'lucide-react';
 import UserMenu from '@/components/UserMenu';
 import ThemeToggle from '@/components/ThemeToggle';
 import SessionList from '@/components/chat/SessionList';
@@ -110,6 +110,7 @@ export default function Sidebar() {
     ...(isAdmin ? [{ to: '/admin/users', label: (lang === 'en' ? t.sidebar.admin : t.sidebar.adminZh), icon: ShieldCheck }] : []),
     ...(isAdmin ? [{ to: '/admin/observability', label: (lang === 'en' ? 'Agent Observability' : '智能体可观测性'), icon: Activity }] : []),
     ...(isAdmin ? [{ to: '/admin/business-value', label: (lang === 'en' ? 'Business Value' : '业务价值'), icon: TrendingUp }] : []),
+    ...(isAdmin ? [{ to: '/admin/enterprise-profile', label: (lang === 'en' ? 'Enterprise Profile' : '企业档案'), icon: Building2 }] : []),
   ];
 
   function linkClass({ isActive }) {
