@@ -25,6 +25,7 @@ from app.services.ontology import (
     list_objects,
     read_object_data,
 )
+from app.services.ontology.data import execute_approved_action
 from app.services.ontology.coverage import compute_coverage
 from app.services.ontology.serialize import (
     action_to_dict,
@@ -191,6 +192,99 @@ def execute_ontology_action(
     return execute_action(
         db, org, getattr(user, "id", None), action_id,
         body.params, context={"user_id": getattr(user, "id", None)},
+    )
+
+
+class ActionBindBody(BaseModel):
+    tool_name: str | None = None
+    description: str | None = None
+
+
+@router.patch("/ontology/actions/{action_id}/bind")
+def bind_action(
+    action_id: str,
+    body: ActionBindBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Wire an action to a registry tool (the verb becomes executable).
+
+    Coverage treats a bound tool that doesn't exist as not-executable —
+    binding is validated against the registry here too."""
+    from app.services.tool_registry import registry
+
+    org = admin.org_id
+    action = get_action(db, org, action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+    if body.tool_name is not None:
+        if registry.get_entry(body.tool_name) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"tool {body.tool_name!r} is not in the registry",
+            )
+        action.tool_name = body.tool_name
+    if body.description is not None:
+        action.description = body.description
+    db.commit()
+    return action_to_dict(action)
+
+
+class ApprovedExecuteBody(BaseModel):
+    approval_id: str
+    params: dict | None = None
+
+
+@router.get("/ontology/po-drafts")
+def list_po_drafts(
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """The buyer's worklist: approval-gated PO drafts (P0-4 write-back)."""
+    from app.models.procurement import ProcurementPoDraft
+
+    org = _org_or_404(user, org_id)
+    rows = (
+        db.query(ProcurementPoDraft)
+        .filter(
+            ProcurementPoDraft.org_id == org,
+            ProcurementPoDraft.is_deleted == False,  # noqa: E712
+        )
+        .order_by(ProcurementPoDraft.created_date.desc())
+        .limit(100)
+        .all()
+    )
+    return [
+        {
+            "id": d.id, "supplier_name": d.supplier_name,
+            "supplier_code": d.supplier_code, "product": d.product,
+            "quantity": d.quantity, "unit": d.unit,
+            "est_unit_price": d.est_unit_price, "est_amount": d.est_amount,
+            "currency": d.currency, "justification": d.justification,
+            "status": d.status, "approval_id": d.approval_id,
+            "created_date": d.created_date.isoformat() if d.created_date else None,
+        }
+        for d in rows
+    ]
+
+
+@router.post("/ontology/actions/{action_id}/execute-approved")
+def execute_approved_ontology_action(
+    action_id: str,
+    body: ApprovedExecuteBody,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Run a write-type action AFTER an org admin approved it (P0-3).
+
+    The approval is proof for THIS action + tool only — mismatches are
+    refused; expiry is enforced."""
+    org = user.org_id
+    return execute_approved_action(
+        db, org, getattr(user, "id", None), action_id,
+        body.approval_id, body.params,
+        context={"user_id": getattr(user, "id", None)},
     )
 
 

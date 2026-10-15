@@ -146,14 +146,100 @@ def test_action_without_tool_is_a_proposal(db):
     assert "no bound tool" in res["reason"]
 
 
-def test_write_action_never_auto_fires(db):
+def test_write_action_creates_governance_approval(db):
+    """P0-3: a write action NEVER auto-fires — it creates a pending
+    ApprovalRequest; the params ride in the approval's context."""
+    from app.models.governance import ApprovalRequest
+
     act = OntologyAction(org_id=ORG, object_id="o1", name="po_draft",
                          tool_name="some_tool", risk_level="write")
     db.add(act)
     db.commit()
-    res = execute_action(db, ORG, "u1", act.id)
+    res = execute_action(db, ORG, "u1", act.id, params={"qty": 5})
     assert res["success"] is False
     assert res["blocked"] == "confirmation_required"
+    approval = db.query(ApprovalRequest).filter(
+        ApprovalRequest.id == res["approval_id"]).one()
+    assert approval.status == "pending"
+    assert approval.context_json["action_id"] == act.id
+    assert approval.context_json["tool_name"] == "some_tool"
+    assert approval.context_json["params"]["qty"] == 5
+
+
+def test_execute_approved_action_full_contract(db, monkeypatch):
+    """P0-3: approve → execute-approved runs the tool ONCE, bound to the
+    approval; wrong-action and unapproved approvals are refused."""
+    from app.models.governance import ApprovalRequest
+    import app.services.agent_tools as agent_tools
+
+    act = OntologyAction(org_id=ORG, object_id="o1", name="po_draft",
+                         tool_name="po_tool", risk_level="write")
+    db.add(act)
+    db.commit()
+    res = execute_action(db, ORG, "u1", act.id)
+    approval_id = res["approval_id"]
+
+    calls = []
+
+    def fake_execute_tool(name, args, session, user_id, context=None):
+        calls.append((name, context.get("approval_id")))
+        return {"success": True, "draft_id": "d1"}
+
+    monkeypatch.setattr(agent_tools, "execute_tool", _async_fake(fake_execute_tool))
+
+    from app.services.governance.approval_service import ApprovalService
+    from app.services.ontology.data import execute_approved_action
+
+    # Not yet approved → refused
+    res = execute_approved_action(db, ORG, "u1", act.id, approval_id)
+    assert res["success"] is False and res["blocked"] == "confirmation_required"
+
+    ApprovalService(db).approve(approval_id, reviewed_by="boss")
+
+    # Mismatched action → refused (an approval is proof for ONE write)
+    other = OntologyAction(org_id=ORG, object_id="o1", name="other",
+                           tool_name="po_tool", risk_level="write")
+    db.add(other)
+    db.commit()
+    res = execute_approved_action(db, ORG, "u1", other.id, approval_id)
+    assert res["success"] is False and "mismatch" in res["reason"]
+
+    # The real one → runs, with the approval threaded into context
+    res = execute_approved_action(db, ORG, "u1", act.id, approval_id)
+    assert res["success"] is True
+    assert res["approved_by"] == "boss"
+    assert calls == [("po_tool", approval_id)]
+
+
+def _async_fake(sync_fn):
+    async def wrapper(*a, **kw):
+        return sync_fn(*a, **kw)
+    return wrapper
+
+
+def test_po_draft_tool_direct_call_is_refused(db):
+    """P0-4: the LLM can NOT create PO drafts directly — only through an
+    approved ontology action (the approval id is the proof)."""
+    import asyncio
+
+    from app.services.tool_handlers.po_draft_tool import _direct_call_guard
+
+    res = asyncio.run(_direct_call_guard(
+        {"supplier_name": "X"}, db, "u1", context={}))
+
+    assert res["success"] is False
+    assert "governance approval" in res["reason"]
+
+    # With an approval in context → the draft is born approved + bound
+    res = asyncio.run(_direct_call_guard(
+        {"supplier_name": "测试供应商", "quantity": 500,
+         "est_unit_price": 8500},
+        db, "u1", context={"org_id": ORG, "approval_id": "appr-1"},
+    ))
+    assert res["success"] is True
+    assert res["status"] == "approved"
+    assert res["est_amount"] == 4_250_000.0
+    assert res["approval_id"] == "appr-1"
 
 
 def test_read_action_runs_bound_tool(db, monkeypatch):
@@ -171,7 +257,7 @@ def test_read_action_runs_bound_tool(db, monkeypatch):
 
     import app.services.agent_tools as agent_tools
 
-    monkeypatch.setattr(agent_tools, "execute_tool", fake_execute_tool)
+    monkeypatch.setattr(agent_tools, "execute_tool", _async_fake(fake_execute_tool))
     res = execute_action(db, ORG, "u1", act.id, params={"x": 1})
     assert res["success"] is True
     assert captured["name"] == "stock_tool"

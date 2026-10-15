@@ -95,8 +95,23 @@ def read_object_data(
         "domain_id": obj.domain_id,
         "backing": {"kind": "table", "ref": ref},
         "row_count": len(data),
-        "rows": data,
+        "rows": _map_rows_to_properties(data, obj),
     }
+
+
+def _map_rows_to_properties(rows: list[dict], obj: OntologyObject) -> list[dict]:
+    """Rename column-keyed rows to the object's PROPERTY names — the
+    ontology contract speaks business language, not physical columns."""
+    mapping = {
+        (p.get("column") or p.get("name")): p.get("name")
+        for p in (obj.properties_json or [])
+        if isinstance(p, dict)
+    }
+    if not mapping:
+        return rows
+    return [
+        {mapping.get(k, k): v for k, v in row.items()} for row in rows
+    ]
 
 
 def _read_via_kb(
@@ -161,7 +176,7 @@ def _read_via_kb(
         "domain_id": obj.domain_id,
         "backing": {"kind": "kb", "kb_id": kb_id, "ref": table},
         "row_count": len(rows),
-        "rows": rows,
+        "rows": _map_rows_to_properties(rows, obj),
         "truncated": bool(result.get("truncated")),
     }
 
@@ -198,31 +213,60 @@ def execute_action(
                 "proposal until wired to a registry tool"
             ),
         }
+    merged = {**(action.params_json or {}), **(params or {})}
     if action.risk_level == "write" or action.requires_confirmation:
+        # P0-3: writes go through the governance approval flow — a pending
+        # ApprovalRequest is created; an org admin approves via the existing
+        # governance API; the caller then re-runs through
+        # execute_approved_action with the approval id. Never auto-fire.
+        from app.services.governance.approval_service import ApprovalService
+
+        approval = ApprovalService(db).create_request(
+            action_type="ontology_action",
+            action_description=(
+                f"Ontology action {action.name!r} "
+                f"(tool={action.tool_name}) — {action.description or 'write-back'}"
+            ),
+            risk_tier="high",
+            context_json={
+                "action_id": action.id,
+                "action_name": action.name,
+                "tool_name": action.tool_name,
+                "object_id": action.object_id,
+                "params": merged,
+            },
+            org_id=org_id,
+        )
         return {
             "success": False,
             "blocked": "confirmation_required",
+            "approval_id": approval.id,
             "reason": (
                 f"action {action.name!r} is risk_level={action.risk_level} — "
-                "write-backs require human confirmation (governance approval)"
+                "an approval request was created; an org admin must approve "
+                "it (POST /api/approvals/{id}/approve), then call "
+                "execute-approved"
             ),
         }
 
+    import asyncio
+
     from app.services.agent_tools import execute_tool
 
-    merged = {**(action.params_json or {}), **(params or {})}
     try:
-        result = execute_tool(
-            action.tool_name,
-            merged,
-            db,
-            user_id,
-            context={
-                "org_id": org_id,
-                "ontology_action_id": action.id,
-                "ontology_object_id": action.object_id,
-                **(context or {}),
-            },
+        result = asyncio.run(
+            execute_tool(
+                action.tool_name,
+                merged,
+                db,
+                user_id,
+                context={
+                    "org_id": org_id,
+                    "ontology_action_id": action.id,
+                    "ontology_object_id": action.object_id,
+                    **(context or {}),
+                },
+            )
         )
     except Exception as exc:  # noqa: BLE001 — report, don't raise
         logger.warning(
@@ -240,5 +284,107 @@ def execute_action(
         "action": action.name,
         "tool": action.tool_name,
         "risk_level": action.risk_level,
+        "result": result,
+    }
+
+
+def execute_approved_action(
+    db: Session,
+    org_id: str,
+    user_id: str | None,
+    action_id: str,
+    approval_id: str,
+    params: dict | None = None,
+    context: dict | None = None,
+) -> dict:
+    """Run a write-type ontology action after governance approval.
+
+    The approval MUST be: found, owned by this org, status=approved, not
+    expired, and bound to THIS action (context_json.action_id) with the
+    same tool — an approval is a proof for one specific write, not a
+    blanket permission (mirrors the agent-loop approval semantics).
+    """
+    from app.models.governance import ApprovalRequest
+    from app.services.agent_tools import execute_tool
+
+    action = (
+        db.query(OntologyAction)
+        .filter(
+            OntologyAction.id == action_id,
+            OntologyAction.org_id == org_id,
+            OntologyAction.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if not action:
+        return {"success": False, "reason": "action not found"}
+    if not action.tool_name:
+        return {"success": False, "reason": "action has no bound tool"}
+
+    approval = (
+        db.query(ApprovalRequest)
+        .filter(
+            ApprovalRequest.id == approval_id,
+            ApprovalRequest.org_id == org_id,
+        )
+        .first()
+    )
+    if not approval:
+        return {"success": False, "reason": "approval not found in this org"}
+    if approval.status != "approved":
+        return {
+            "success": False,
+            "blocked": "confirmation_required",
+            "reason": f"approval is {approval.status!r}, not approved",
+        }
+    ctx = approval.context_json or {}
+    if ctx.get("action_id") != action_id or ctx.get("tool_name") != action.tool_name:
+        return {
+            "success": False,
+            "reason": "approval does not match this action (id/tool mismatch)",
+        }
+    if approval.expires_at is not None:
+        from datetime import datetime, timezone
+
+        expires = approval.expires_at
+        if getattr(expires, "tzinfo", None) is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires < datetime.now(timezone.utc):
+            return {"success": False, "reason": "approval has expired"}
+
+    merged = {**(ctx.get("params") or {}), **(action.params_json or {}),
+              **(params or {})}
+    import asyncio
+
+    try:
+        result = asyncio.run(
+            execute_tool(
+                action.tool_name,
+                merged,
+                db,
+                user_id,
+                context={
+                    "org_id": org_id,
+                    "ontology_action_id": action.id,
+                    "ontology_object_id": action.object_id,
+                    "approval_id": approval.id,
+                    **(context or {}),
+                },
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — report, don't raise
+        logger.warning(
+            "approved action %s tool %s failed: %s",
+            action.name, action.tool_name, exc,
+        )
+        return {"success": False,
+                "reason": f"tool {action.tool_name} failed: {exc}"}
+
+    return {
+        "success": bool(result.get("success")),
+        "action": action.name,
+        "tool": action.tool_name,
+        "approval_id": approval.id,
+        "approved_by": approval.reviewed_by,
         "result": result,
     }
