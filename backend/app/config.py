@@ -1595,6 +1595,15 @@ class Settings(BaseSettings):
     # ontology external surface (X-API-Key on /api/integrations/ontology/*).
     # Empty = the external surface is disabled (401 on every call).
     ONTOLOGY_API_KEY: str = ""
+    # ONTOLOGY_LLM_DISCOVERY_ENABLED (SaaS dynamic discovery): when hint
+    # matching can't bind an object to a real table, an LLM matches object
+    # properties to the tenant's ACTUAL schema (any ERP/PLM/CRM) with a
+    # confidence score. Only ≥ ONTOLOGY_DISCOVERY_AUTOBIND_THRESHOLD is
+    # auto-bound; below is reported as "proposed" for a human.
+    ONTOLOGY_LLM_DISCOVERY_ENABLED: bool = True
+    ONTOLOGY_DISCOVERY_AUTOBIND_THRESHOLD: float = 0.8
+    # Hard cap on LLM matching calls per discovery run (cost control).
+    ONTOLOGY_DISCOVERY_MAX_LLM_CALLS: int = 24
     # RED_TEAM_ENABLED (ADLC P1-4): scheduled adversarial campaigns against
     # published agents every 6h (probes in services/red_team.py). Costs
     # ~len(probes) LLM calls per agent per cycle — enable in production
