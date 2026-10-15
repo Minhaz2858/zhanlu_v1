@@ -111,12 +111,17 @@ def patched_pg_only(monkeypatch):
 
 
 def _patch_llm(monkeypatch, verdict_by_table):
+    import re as _re
+
     import app.services.llm_service as llm_module
 
     def fake(prompt, schema=None, temperature=0.0, **kw):
         for table, verdict in verdict_by_table.items():
             if table in prompt:
-                return verdict
+                out = dict(verdict)
+                m = _re.search(r"\[(\d+)\] table=" + _re.escape(table), prompt)
+                out["table_index"] = int(m.group(1)) if m else 0
+                return out
         return {}
 
     monkeypatch.setattr(llm_module, "chat_completion_json_sync", fake)

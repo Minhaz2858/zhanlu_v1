@@ -165,10 +165,24 @@ def _read_via_kb(
         return {"success": False, "reason": "data source not found in this org"}
 
     props = obj.properties_json or []
+    # Only properties with a VERIFIED column are selectable — unmapped
+    # properties have no physical column (partial LLM mappings are
+    # legitimate) and falling back to the property name would query a
+    # column that does not exist.
     select_cols = [
-        (p.get("column") or p.get("name")) for p in props if isinstance(p, dict)
+        p.get("column") for p in props
+        if isinstance(p, dict) and p.get("column")
     ]
-    select_cols = [c for c in select_cols if c and _IDENT_RE.match(c)] or ["*"]
+    select_cols = [c for c in select_cols if c and _IDENT_RE.match(c)]
+    if not select_cols:
+        return {
+            "success": False,
+            "reason": (
+                f"object {obj.name!r} has no property mapped to a real "
+                "column yet — map properties via the bind endpoint"
+            ),
+            "hint": "never invent data — report the failure",
+        }
 
     where_clauses = [
         f"{key} = :f_{key}"

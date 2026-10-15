@@ -164,12 +164,16 @@ def _tokens(name: str) -> set[str]:
 
 
 def _shortlist(
-    obj, inventories: list[tuple[str, str, list[str]]], max_tables: int = 30,
+    obj, inventories: list[tuple[str, str, list[str]]], max_tables: int = 40,
 ) -> list[tuple[str, str]]:
     """Candidate tables for an object by token overlap (object name +
-    property names vs table name). Falls back to the first ``max_tables``
-    tables when nothing overlaps — a tenant with a totally alien naming
-    scheme still gets a chance via the LLM pass."""
+    property names vs table name).
+
+    SaaS-critical: a tenant connects MANY systems and the ontology must
+    treat them EQUALLY. The no-overlap fallback therefore ROUND-ROBINS
+    across every connected source (one table per source per round) — a
+    foreign CRM's tables are never crowded out by whichever system
+    happens to be first in the list."""
     want = _tokens(obj.name) | {
         t for p in (obj.properties_json or [])
         if isinstance(p, dict) for t in _tokens(p.get("name") or "")
@@ -183,48 +187,72 @@ def _shortlist(
     scored.sort(reverse=True)
     out = [(kb_id, t) for _, kb_id, t in scored[:max_tables]]
     if not out:
-        for kb_id, _db_type, tables in inventories:
-            for t in tables[:max_tables]:
-                out.append((kb_id, t))
-            if len(out) >= max_tables:
-                break
+        # round-robin one table per source per pass — equal representation
+        seen: set[tuple[str, str]] = set()
+        cursors = [0] * len(inventories)
+        while len(out) < max_tables and any(
+            cursors[i] < len(inv[2]) for i, inv in enumerate(inventories)
+        ):
+            for i, (kb_id, _dt, tables) in enumerate(inventories):
+                if cursors[i] >= len(tables):
+                    continue
+                t = tables[cursors[i]]
+                cursors[i] += 1
+                key = (kb_id, t)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+                if len(out) >= max_tables:
+                    break
     return out[:max_tables]
 
 
 def _llm_schema_match(
-    obj, kb_id: str, table: str, columns: list[str], db_type: str | None,
+    obj,
+    candidates: list[tuple[str, str, list[str]]],
+    db_types: dict[str, str],
 ) -> dict | None:
-    """One bounded LLM call: match an object + its properties to a real
-    table + real columns, with a 0..1 confidence. Returns the parsed
-    verdict or None (LLM unavailable / unparsable = never binds)."""
+    """ONE bounded LLM call: pick the best table for an object from ALL
+    candidates (across every connected source) and map its properties to
+    REAL columns, with a 0..1 confidence. One call per object — not per
+    candidate — so budget is predictable and no source is crowded out by
+    candidate ordering. Returns None (never binds) on abstain/error."""
     from app.services.llm_service import chat_completion_json_sync
 
+    if not candidates:
+        return None
     props = [
         (p.get("name") if isinstance(p, dict) else str(p))
         for p in (obj.properties_json or [])
     ]
+    table_blocks = []
+    for i, (kb_id, table, cols) in enumerate(candidates):
+        table_blocks.append(
+            f"[{i}] table={table} (source type: {db_types.get(kb_id, 'unknown')})\n"
+            f"    columns: {cols[:12]}"
+        )
     prompt = (
         "You are mapping a business ontology object to a real database "
-        "table from a company's own system (ERP/PLM/CRM — could be any "
-        "vendor, any naming convention, any language).\n\n"
+        "table from a company's OWN connected systems (ERP/PLM/CRM — any "
+        "vendor, any naming convention, any language). Multiple sources "
+        "may be connected; consider ALL candidate tables equally.\n\n"
         f"Ontology object: {obj.name}"
         + (f" ({obj.display_name})" if obj.display_name else "")
         + (f" — {obj.description}" if obj.description else "") + "\n"
-        f"Properties: {props}\n"
-        f"Source system type: {db_type or 'unknown'}\n"
-        f"Candidate table: {table}\n"
-        f"Real columns of this table: {columns[:30]}\n\n"
-        "Decide: does this table plausibly hold this object's records? "
-        "Map each property to the column that holds it (use the EXACT "
-        "column names given). Be strict — wrong mappings are worse than "
-        "no mapping.\n\n"
-        'Answer JSON: {"match": true|false, "confidence": 0.0-1.0, '
-        '"properties": {"prop_name": "EXACT_COLUMN"}}'
+        f"Properties: {props}\n\n"
+        "Candidate tables (real schema):\n" + "\n".join(table_blocks) + "\n\n"
+        "Decide which candidate table (if any) plausibly holds this "
+        "object's records, and map each property to the column that "
+        "holds it (EXACT column names). Be strict — wrong mappings are "
+        "worse than no mapping; answer match=false when nothing fits.\n\n"
+        'Answer JSON: {"match": true|false, "table_index": <int>, '
+        '"confidence": 0.0-1.0, "properties": {"prop": "EXACT_COLUMN"}}'
     )
     schema = {
         "type": "object",
         "properties": {
             "match": {"type": "boolean"},
+            "table_index": {"type": "integer"},
             "confidence": {"type": "number"},
             "properties": {"type": "object"},
         },
@@ -243,11 +271,16 @@ def _llm_schema_match(
         return None
     if not verdict.get("match") or conf <= 0:
         return None
+    idx = verdict.get("table_index")
+    if not isinstance(idx, int) or not (0 <= idx < len(candidates)):
+        idx = 0  # tolerate a missing index when only one candidate exists
+    kb_id, table, cols = candidates[idx]
     props_out = {
         str(k): str(v) for k, v in (verdict.get("properties") or {}).items()
-        if isinstance(k, str) and isinstance(v, str)
+        if isinstance(k, str) and isinstance(v, str) and v in cols
     }
-    return {"confidence": conf, "properties": props_out}
+    return {"kb_id": kb_id, "table": table, "confidence": conf,
+            "properties": props_out}
 
 
 def _apply_binding(obj, kb_id: str, table: str, mapped: dict[str, str]) -> None:
@@ -393,60 +426,61 @@ def discover_bindings(db: Session, org_id: str, *, apply: bool = True) -> dict:
             continue
 
         shortlist = _shortlist(obj, inventories)
-        resolved = False
-        for kb_id, table in shortlist[:8]:
-            if llm_calls >= max_llm_calls:
-                break
-            cols = _verified_columns(schema_svc, kb_id, table)
-            if not cols:
-                continue
-            db_type = next(
-                (dt for kid, dt, _ in inventories if kid == kb_id), None)
-            llm_calls += 1
-            verdict = _llm_schema_match(obj, kb_id, table, cols, db_type)
-            if not verdict:
-                continue  # LLM abstained — try the next candidate
-            # verify the LLM's column choices against the REAL schema
-            mapped = {
-                p: c for p, c in verdict["properties"].items() if c in cols
-            }
-            conf = verdict["confidence"]
-            if conf >= threshold and apply:
-                _apply_binding(obj, kb_id, table, mapped)
-                discovered += 1
-                report.append({
-                    "object": obj.name, "status": "bound",
-                    "method": "llm", "confidence": conf,
-                    "kb_id": kb_id, "table": table,
-                    "properties_mapped": mapped,
-                    "properties_unmapped": [
-                        (p.get("name") if isinstance(p, dict) else str(p))
-                        for p in (obj.properties_json or [])
-                        if (p.get("name") if isinstance(p, dict)
-                            else str(p)) not in mapped
-                    ],
-                })
-            else:
-                proposed += 1
-                report.append({
-                    "object": obj.name,
-                    "status": "proposed" if apply else "would-propose",
-                    "method": "llm", "confidence": conf,
-                    "kb_id": kb_id, "table": table,
-                    "properties_mapped": mapped,
-                    "note": (
-                        "confidence below auto-bind threshold — "
-                        "review and bind it explicitly via the bind endpoint"
-                    ),
-                })
-            resolved = True
-            break
-        if not resolved:
+        if not shortlist:
+            report.append({"object": obj.name, "status": "no-table-found"})
+            continue
+        if llm_calls >= max_llm_calls:
             report.append({
                 "object": obj.name, "status": "no-table-found",
+                "note": "llm call budget exhausted — re-run discovery",
+            })
+            continue
+        # ONE call per object: describe candidates (bounded) and let the
+        # LLM pick the best table across ALL connected sources.
+        cand: list[tuple[str, str, list[str]]] = []
+        for kb_id, table in shortlist[:10]:
+            cols = _verified_columns(schema_svc, kb_id, table)
+            if cols:
+                cand.append((kb_id, table, cols))
+        if not cand:
+            report.append({"object": obj.name, "status": "no-table-found"})
+            continue
+        llm_calls += 1
+        verdict = _llm_schema_match(obj, cand, dict(
+            (kb_id, dt) for kb_id, dt, _ in inventories))
+        if not verdict:
+            report.append({"object": obj.name, "status": "no-table-found"})
+            continue
+        kb_id = verdict["kb_id"]
+        table = verdict["table"]
+        conf = verdict["confidence"]
+        mapped = verdict["properties"]  # already verified against cols
+        if conf >= threshold and apply:
+            _apply_binding(obj, kb_id, table, mapped)
+            discovered += 1
+            report.append({
+                "object": obj.name, "status": "bound",
+                "method": "llm", "confidence": conf,
+                "kb_id": kb_id, "table": table,
+                "properties_mapped": mapped,
+                "properties_unmapped": [
+                    (p.get("name") if isinstance(p, dict) else str(p))
+                    for p in (obj.properties_json or [])
+                    if (p.get("name") if isinstance(p, dict)
+                        else str(p)) not in mapped
+                ],
+            })
+        else:
+            proposed += 1
+            report.append({
+                "object": obj.name,
+                "status": "proposed" if apply else "would-propose",
+                "method": "llm", "confidence": conf,
+                "kb_id": kb_id, "table": table,
+                "properties_mapped": mapped,
                 "note": (
-                    "llm call budget exhausted — re-run discovery"
-                    if llm_calls >= max_llm_calls else None
+                    "confidence below auto-bind threshold — "
+                    "review and bind it explicitly via the bind endpoint"
                 ),
             })
 
