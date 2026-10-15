@@ -59,6 +59,7 @@ class QueryService:
         sql: str,
         max_rows: int = DEFAULT_MAX_ROWS,
         timeout_s: int = DEFAULT_TIMEOUT_S,
+        params: dict | None = None,
     ) -> dict:
         """Run `sql` against the KB and return rows + metadata.
 
@@ -142,7 +143,9 @@ class QueryService:
         with get_connector(kb) as conn:
             # +1 to PROVE truncation (see docstring).
             try:
-                fetched = conn.execute(sql, max_rows=row_cap + 1, timeout_s=timeout_cap)
+                fetched = conn.execute(
+                    sql, params=params, max_rows=row_cap + 1, timeout_s=timeout_cap
+                )
                 executed_sql = str(getattr(conn, "last_executed_sql", "") or sql)
             except Exception as exc:
                 # ── Collation self-healing (2026-10-10) ──
@@ -170,7 +173,7 @@ class QueryService:
                     kb_id, exc,
                 )
                 fetched = conn.execute(
-                    healed, max_rows=row_cap + 1, timeout_s=timeout_cap
+                    healed, params=params, max_rows=row_cap + 1, timeout_s=timeout_cap
                 )
                 executed_sql = str(getattr(conn, "last_executed_sql", "") or healed)
                 collation_healed = True

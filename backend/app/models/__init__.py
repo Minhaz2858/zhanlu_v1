@@ -73,6 +73,14 @@ from app.models.audit_event import AuditEvent
 from app.models.skill_source import SkillSource
 from app.models.external_skill import ExternalSkill
 from app.models.agent_portfolio import AgentPortfolioEntry  # Gap 2: AI-CoE use-case registry
+from app.models.ontology import (  # P0-2: Enterprise AI OS ontology core
+    AgentDomainBinding,
+    CoverageState,
+    OntologyAction,
+    OntologyDomain,
+    OntologyLink,
+    OntologyObject,
+)
 from app.models.nl2sql_query_log import Nl2sqlQueryLog  # Gap 4: literacy mining source
 from app.models.removed_curated_url import RemovedCuratedUrl
 from app.models.hook_rule import HookRule
@@ -115,6 +123,12 @@ from app.models.kb_capability import KBCapabilityProfile
 __all__ = [
     "TimestampedBase",
     "KBCapabilityProfile",
+    "OntologyDomain",
+    "OntologyObject",
+    "OntologyLink",
+    "OntologyAction",
+    "AgentDomainBinding",
+    "CoverageState",
     "Organization",
     "AppWorkspace",
     "User",

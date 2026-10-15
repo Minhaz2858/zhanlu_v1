@@ -41,6 +41,7 @@ from app.routers.agents import router as agents_router
 from app.routers.analytics import router as analytics_router
 from app.routers.roi import router as roi_router
 from app.routers.portfolio import router as portfolio_router
+from app.routers.ontology import router as ontology_router
 from app.routers.ai_literacy import router as ai_literacy_router
 from app.routers.domain_packs import router as domain_packs_router
 from app.routers.openharness import router as openharness_router
@@ -1004,6 +1005,7 @@ def create_app() -> FastAPI:
     app.include_router(analytics_router, prefix="/api")
     app.include_router(roi_router, prefix="/api")
     app.include_router(portfolio_router, prefix="/api")
+    app.include_router(ontology_router, prefix="/api")
     app.include_router(ai_literacy_router, prefix="/api")
     app.include_router(domain_packs_router, prefix="/api")
     app.include_router(openharness_router, prefix="/api")
