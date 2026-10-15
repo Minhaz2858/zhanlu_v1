@@ -1698,6 +1698,15 @@ class Settings(BaseSettings):
     # tool-search, case-based reasoning.
     EMBEDDING_LOCAL_FALLBACK_ENABLED: bool = True
     EMBEDDING_LOCAL_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # 2026-10-15: EMBEDDING_PROVIDER decides where embeddings come from:
+    #   local = ALWAYS the in-process sentence-transformers model — never
+    #           any remote API (this deployment: no embeddings API key;
+    #           the old code inherited LLM_API_KEY and hammered
+    #           api.openai.com with a DeepSeek key → doomed 401 per call).
+    #   auto  = API only when a DEDICATED EMBEDDING_API_KEY is set, or an
+    #           explicit EMBEDDING_API_BASE was configured; otherwise local.
+    #   api   = always call the API (operator override; local on failure).
+    EMBEDDING_PROVIDER: str = "auto"
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

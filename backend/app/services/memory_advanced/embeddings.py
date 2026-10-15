@@ -152,6 +152,39 @@ def _local_fallback_enabled() -> bool:
         return True
 
 
+def _provider_mode() -> str:
+    """local | auto | api — see config.EMBEDDING_PROVIDER (2026-10-15).
+
+    Bug this fixes: get_embedding used to inherit LLM_API_KEY /
+    OPENAI_API_KEY as the embeddings key, so a DeepSeek-key deployment
+    hammered api.openai.com on EVERY embedding and ate a doomed 401
+    before the local fallback engaged. Now the remote API is only used
+    when a DEDICATED embeddings key/base exists (auto), or the operator
+    forces it (api) — otherwise local-first, zero doomed calls.
+    """
+    try:
+        from app.config import settings
+
+        mode = str(getattr(settings, "EMBEDDING_PROVIDER", "auto") or "auto").strip().lower()
+    except Exception:  # noqa: BLE001
+        mode = "auto"
+    return mode if mode in ("local", "auto", "api") else "auto"
+
+
+def _should_call_remote_api(dedicated_key_set: bool, api_base_explicit: bool) -> bool:
+    """``dedicated_key_set`` = a DEDICATED embeddings key exists (the
+    EMBEDDING_API_KEY env or an explicit caller-supplied api_key — NOT the
+    inherited LLM/OPENAI key, which was the doomed-401 bug)."""
+    mode = _provider_mode()
+    if mode == "local":
+        return False
+    if mode == "api":
+        return dedicated_key_set
+    # auto: a DEDICATED embeddings key wins; an explicitly configured
+    # base implies the operator pointed embeddings somewhere.
+    return dedicated_key_set or api_base_explicit
+
+
 def _local_embed(texts: list[str]) -> list[list[float]]:
     """Embed with the local sentence-transformers model (lazy singleton)."""
     global _LOCAL_MODEL
@@ -225,12 +258,16 @@ def get_embedding(
         return None
 
     model = model or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+    api_base_explicit = bool(api_base or os.environ.get("EMBEDDING_API_BASE"))
+    # Deliberate key = caller-supplied or DEDICATED env — the LLM/OPENAI
+    # inheritance below is convenience, never a reason to dial remotely.
+    dedicated = bool(api_key or os.environ.get("EMBEDDING_API_KEY"))
     api_base = api_base or os.environ.get("EMBEDDING_API_BASE", os.environ.get("LLM_API_BASE", "https://api.openai.com"))
     api_key = api_key or os.environ.get("EMBEDDING_API_KEY") or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 
-    if not api_key:
-        # No API backend configured — use the local model (flag-gated).
-        logger.debug("embeddings: no API key; local fallback")
+    if not _should_call_remote_api(dedicated, api_base_explicit):
+        # Provider mode says local — no doomed remote calls (2026-10-15).
+        logger.debug("embeddings: provider=local path for %d chars", len(text))
         vecs = _local_fallback_vectors([text])
         return EmbeddingResult(
             text=text, vector=vecs[0] or [], model="local",
@@ -298,6 +335,14 @@ def get_embeddings_batch(
         return []
     out: list[Optional[list[float]]] = [None] * len(texts)
     pending: list[tuple[int, str]] = []
+
+    # Provider gate (2026-10-15): same contract as get_embedding — no
+    # doomed remote calls when no dedicated embeddings backend exists.
+    api_base_explicit = bool(api_base or os.environ.get("EMBEDDING_API_BASE"))
+    dedicated = bool(api_key or os.environ.get("EMBEDDING_API_KEY"))
+    api_key = api_key or os.environ.get("EMBEDDING_API_KEY") or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    call_remote = _should_call_remote_api(dedicated, api_base_explicit)
+
     for i, t in enumerate(texts):
         if not t or not t.strip():
             continue
@@ -306,6 +351,12 @@ def get_embeddings_batch(
             out[i] = cached
         else:
             pending.append((i, t))
+    if not call_remote:
+        local = _local_fallback_vectors([t for _, t in pending])
+        for (orig_idx, _t), vec in zip(pending, local):
+            if vec:
+                out[orig_idx] = vec
+        return out
     for chunk_start in range(0, len(pending), max_batch):
         chunk = pending[chunk_start : chunk_start + max_batch]
         try:
@@ -313,7 +364,7 @@ def get_embeddings_batch(
                 [t for _, t in chunk],
                 model=model or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small"),
                 api_base=api_base or os.environ.get("EMBEDDING_API_BASE", os.environ.get("LLM_API_BASE", "https://api.openai.com")),
-                api_key=api_key or os.environ.get("EMBEDDING_API_KEY") or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", ""),
+                api_key=api_key,
             )
         except Exception as exc:
             _API_FAIL_UNTIL = time.time() + _API_FAIL_COOLDOWN_S
