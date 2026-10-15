@@ -19701,6 +19701,13 @@ async def add_message_stream(
             except Exception as _inv_err:  # noqa: BLE001 — non-fatal
                 logger.warning("v3 stream: invocation record failed (non-fatal): %s", _inv_err)
             _done_payload = {"type": "done", "content": _done_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()}
+            # P1-5 TrustPanel: standardized trust contract on every answer
+            # (citations + confidence + grade) — build failure is non-fatal.
+            try:
+                from app.services.trust_panel import trust_panel_for_message
+                _done_payload["trust"] = trust_panel_for_message(assistant_msg)
+            except Exception as _trust_err:  # noqa: BLE001 — never break done
+                logger.warning("v3 stream: trust panel failed (non-fatal): %s", _trust_err)
             if _v3_cancelled:
                 _done_payload["status"] = "cancelled"
             yield f'data: {json.dumps(_done_payload)}\n\n'

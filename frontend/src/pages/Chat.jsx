@@ -2235,6 +2235,7 @@ export default function Chat() {
     let streamingPlanSteps = []; // 2026-08-27: plan_step_added/completed → live todo checklist
     let finalArtifacts = [];  // artifacts extracted from the done event's conversation
     let sources = [];         // citations extracted from the done event (Kimi/GPT-style source chips)
+    let trustPanel = null;    // P1-5 TrustPanel contract from the done frame
     let aborted = false;
     try {
       stream.startSending(sid, gen);
@@ -2529,6 +2530,9 @@ export default function Chat() {
           } else if (Array.isArray(evt.sources) && evt.sources.length) {
             sources = evt.sources;
           }
+          // P1-5 TrustPanel: the standardized trust contract from the done
+          // frame (citations + confidence + honest grade).
+          trustPanel = evt.trust && evt.trust.grade ? evt.trust : null;
           if (gen === genRef.current) {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id
@@ -2539,6 +2543,7 @@ export default function Chat() {
                   refining: false,
                   ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
                   ...(sources.length ? { sources } : {}),
+                  ...(trustPanel ? { trust: trustPanel } : {}),
                 }
                 : m
             ));
@@ -2680,6 +2685,7 @@ export default function Chat() {
         ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
         ...(currentPhase ? { phase: currentPhase } : {}),
         ...(sources.length ? { sources } : {}),
+        ...(trustPanel ? { trust: trustPanel } : {}),
       });
       await base44.entities.ChatSession.update(sid, { last_message_at: new Date().toISOString() });
       touchSession(sid);

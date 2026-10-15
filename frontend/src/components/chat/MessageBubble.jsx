@@ -2,7 +2,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import StreamingMarkdown from './StreamingMarkdown';
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil, Database, Table2, FileText, FileSpreadsheet, Image as ImageIcon, File, ExternalLink } from 'lucide-react';
+import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil, Database, Table2, FileText, FileSpreadsheet, Image as ImageIcon, File, ExternalLink, ShieldCheck } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ClarifyOptions from './ClarifyOptions';
 import ClarifyBatchForm from './ClarifyBatchForm';
@@ -662,6 +662,32 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                     </span>
                   );
                 })}
+              </div>
+            )}
+            {/* P1-5 TrustPanel: honest trust badge on every grounded answer —
+                grade is verified/sourced/unsourced (never invented), with
+                optional confidence. Shows even WITHOUT citations, because
+                "unsourced" is exactly what the user should see. */}
+            {!isUser && !isStreaming && message.trust?.grade && (
+              <div className="mt-2 flex items-center gap-1.5">
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${
+                    message.trust.grade === 'verified'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : message.trust.grade === 'sourced'
+                        ? 'border-sky-200 bg-sky-50 text-sky-700'
+                        : 'border-stone-200 bg-stone-50 text-stone-500'
+                  }`}
+                  title={lang === 'en'
+                    ? 'Trust: verified = checked against data, sourced = citations attached, unsourced = no citations'
+                    : '信任：verified=已对数据核验，sourced=附引用，unsourced=无引用'}
+                >
+                  <ShieldCheck className="h-3 w-3" />
+                  {message.trust.grade}
+                  {typeof message.trust.confidence === 'number' && (
+                    <span className="opacity-70">{Math.round(message.trust.confidence * 100)}%</span>
+                  )}
+                </span>
               </div>
             )}
             {/* Message actions: copy, share, like, dislike */}

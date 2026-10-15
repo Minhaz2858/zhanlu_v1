@@ -1,0 +1,38 @@
+{
+  "pack_key": "finance",
+  "name": "Finance Agents",
+  "version": "1.0.0",
+  "industry": "finance",
+  "description": "AR/AP, close, and variance vocabulary + starter questions.",
+  "starter_prompts": [
+    "What is our DSO trend over the last 6 months?",
+    "Flag expense-line variances above 10% vs budget this quarter",
+    "Summarize overdue receivables by customer and days past due"
+  ],
+  "terminology": [
+    {
+      "word": "DSO",
+      "description": "Days Sales Outstanding — average days to collect receivables."
+    },
+    {
+      "word": "variance",
+      "description": "Actual minus budget/plan. Flag for review, not automatically an error."
+    },
+    {
+      "word": "accrual",
+      "description": "Expense/revenue recognized before cash moves."
+    },
+    {
+      "word": "reconciliation",
+      "description": "Matching two records (ledger vs bank) — agents surface mismatches, humans resolve."
+    },
+    {
+      "word": "aging bucket",
+      "description": "Receivables grouped by days overdue (0-30/31-60/61-90/90+)."
+    },
+    {
+      "word": "close",
+      "description": "The period-end process of finalizing books. AI accelerates reconciliation, never posts unreviewed entries."
+    }
+  ]
+}

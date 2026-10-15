@@ -1,0 +1,38 @@
+{
+  "pack_key": "data_bi",
+  "name": "Data / BI Agents",
+  "version": "1.0.0",
+  "industry": "data & analytics",
+  "description": "Metrics, lineage, and certification vocabulary + starter questions.",
+  "starter_prompts": [
+    "Which metrics are certified vs draft in our catalog?",
+    "Trace the lineage of the revenue metric to its source tables",
+    "Which dashboards use stale data sources (no refresh in 7 days)?"
+  ],
+  "terminology": [
+    {
+      "word": "certified metric",
+      "description": "A metric definition reviewed and approved by an owner — safe for exec reporting."
+    },
+    {
+      "word": "lineage",
+      "description": "The path data takes from source to report — the backbone of trust."
+    },
+    {
+      "word": "semantic layer",
+      "description": "Business-language mapping over physical data. In this platform, that IS the ontology."
+    },
+    {
+      "word": "data freshness",
+      "description": "How recently source data was updated — surfaced in TrustPanel on answers."
+    },
+    {
+      "word": "workload hints",
+      "description": "Mined query patterns that improve NL2SQL planning (this platform mines them automatically)."
+    },
+    {
+      "word": "shadow metric",
+      "description": "An unmanaged duplicate of an official metric — the #1 source of conflicting numbers."
+    }
+  ]
+}

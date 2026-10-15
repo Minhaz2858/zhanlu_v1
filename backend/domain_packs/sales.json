@@ -1,0 +1,38 @@
+{
+  "pack_key": "sales",
+  "name": "Sales Agents",
+  "version": "1.0.0",
+  "industry": "sales",
+  "description": "Pipeline, lead, and quote vocabulary + starter questions (IBM ai-agents-in-sales: lead scoring, CRM-integrated engagement, forecasting, coaching).",
+  "starter_prompts": [
+    "Score this week's new leads against our ideal-customer profile",
+    "What is our win rate by product line this quarter vs last?",
+    "Which open opportunities are stalled and need a follow-up?"
+  ],
+  "terminology": [
+    {
+      "word": "lead",
+      "description": "An unqualified potential customer. A lead becomes an 'opportunity' after qualification."
+    },
+    {
+      "word": "opportunity",
+      "description": "A qualified deal in the pipeline with expected value and close date."
+    },
+    {
+      "word": "win rate",
+      "description": "Won opportunities divided by closed opportunities (won+lost) in a period."
+    },
+    {
+      "word": "pipeline coverage",
+      "description": "Open pipeline value divided by quota — 3x is a common health floor."
+    },
+    {
+      "word": "sales cycle",
+      "description": "Average days from opportunity creation to close."
+    },
+    {
+      "word": "nurture",
+      "description": "Automated sequence of touches for not-yet-ready leads — outbound sends stay human-approved."
+    }
+  ]
+}

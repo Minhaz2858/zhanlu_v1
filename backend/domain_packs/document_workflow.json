@@ -1,0 +1,38 @@
+{
+  "pack_key": "document_workflow",
+  "name": "Document / Workflow Agents",
+  "version": "1.0.0",
+  "industry": "operations",
+  "description": "Document lifecycle and approval vocabulary + starter questions.",
+  "starter_prompts": [
+    "Which documents are awaiting my approval right now?",
+    "Summarize this uploaded contract against our checklist",
+    "What documents mention supplier X and when were they last updated?"
+  ],
+  "terminology": [
+    {
+      "word": "document state",
+      "description": "draft → review → approved → published → archived. Transitions may require approval."
+    },
+    {
+      "word": "approval queue",
+      "description": "Items waiting on a human decision — the governance approvals surface."
+    },
+    {
+      "word": "retention",
+      "description": "How long a document class must be kept before deletion."
+    },
+    {
+      "word": "extraction",
+      "description": "Pulling structured fields from unstructured documents — agents propose, reviewers confirm."
+    },
+    {
+      "word": "template",
+      "description": "The approved base version of a recurring document type."
+    },
+    {
+      "word": "version of record",
+      "description": "The single authoritative version — everything else is a draft or copy."
+    }
+  ]
+}

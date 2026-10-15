@@ -1,0 +1,38 @@
+{
+  "pack_key": "customer_service",
+  "name": "Customer Service Agents",
+  "version": "1.0.0",
+  "industry": "customer service",
+  "description": "Ticket, SLA, and escalation vocabulary + starter questions (IBM ai-customer-service-chatbots: 24/7 resolution, escalation-with-context, CSAT).",
+  "starter_prompts": [
+    "What is our ticket resolution rate and CSAT this month?",
+    "Which open tickets are breaching SLA today?",
+    "Summarize the top 5 complaint themes from closed tickets"
+  ],
+  "terminology": [
+    {
+      "word": "ticket",
+      "description": "A tracked customer issue with status and SLA clock."
+    },
+    {
+      "word": "SLA",
+      "description": "Service Level Agreement — the promised response/resolution time per priority."
+    },
+    {
+      "word": "escalation",
+      "description": "Structured handoff to a human with full context (summary + collected data). In this platform it is an ontology action type."
+    },
+    {
+      "word": "CSAT",
+      "description": "Customer Satisfaction score from post-interaction ratings."
+    },
+    {
+      "word": "first contact resolution",
+      "description": "Share of issues resolved in a single interaction — the strongest chatbot quality signal."
+    },
+    {
+      "word": "deflection",
+      "description": "Issues fully resolved by automation without human touch. Track honestly — never count silent failures."
+    }
+  ]
+}

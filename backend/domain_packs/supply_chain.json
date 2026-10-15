@@ -1,0 +1,38 @@
+{
+  "pack_key": "supply_chain",
+  "name": "Supply Chain Agents",
+  "version": "1.0.0",
+  "industry": "supply chain",
+  "description": "Inventory, logistics, and demand vocabulary + starter questions (IBM ai-agents-supply-chain: continuous sense→decide→act inside guardrails).",
+  "starter_prompts": [
+    "Which SKUs will hit safety-stock breach within 14 days at current demand?",
+    "Summarize inbound shipments delayed more than 3 days",
+    "Where is inventory building up against forecast demand?"
+  ],
+  "terminology": [
+    {
+      "word": "safety stock",
+      "description": "Buffer inventory held against demand/supply variability. Breach = projected stock below it."
+    },
+    {
+      "word": "demand forecast",
+      "description": "Projected future sales per SKU/period. This platform tracks forecast accuracy (MAE/RMSE) explicitly."
+    },
+    {
+      "word": "SKU",
+      "description": "Stock Keeping Unit — the finest granularity of inventory tracking."
+    },
+    {
+      "word": "OTIF",
+      "description": "On-Time-In-Full delivery performance measure for inbound or outbound shipments."
+    },
+    {
+      "word": "bullwhip effect",
+      "description": "Demand variability amplification moving upstream in a supply chain."
+    },
+    {
+      "word": "rebalance",
+      "description": "Moving stock between locations to match demand — a write action, always approval-gated."
+    }
+  ]
+}

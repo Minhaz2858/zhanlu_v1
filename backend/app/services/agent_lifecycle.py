@@ -57,10 +57,62 @@ def _revision(agent, version: int, action: str, user_id: str | None,
     )
 
 
+class EvalGateBlocked(Exception):
+    """Raised when publish is refused because the agent's eval suite is
+    failing (P1-6: evals as a release GATE, not just a dashboard)."""
+
+    def __init__(self, detail: dict):
+        self.detail = detail
+        super().__init__(detail.get("reason", "eval gate blocked publish"))
+
+
+def eval_gate_status(db, agent_id: str) -> dict | None:
+    """Evaluate the promote gate for an agent. Returns None when the gate
+    passes (or doesn't apply); otherwise a detail dict explaining WHY.
+
+    Applies only when the agent HAS golden test cases — an agent with no
+    suite is not failed, but the caller may still choose to warn.
+    """
+    from app.config import settings
+    from app.models.agent_test_case import AgentTestCase
+
+    if not getattr(settings, "EVAL_PROMOTE_GATE_ENABLED", True):
+        return None
+    cases = (
+        db.query(AgentTestCase)
+        .filter(AgentTestCase.agent_app_id == agent_id)
+        .all()
+    )
+    if not cases:
+        return None  # no suite → gate not applicable
+    total_runs = sum(int(c.run_count or 0) for c in cases)
+    total_pass = sum(int(c.pass_count or 0) for c in cases)
+    failing = [c.name for c in cases if (c.last_result or "") == "fail"]
+    pass_rate = (total_pass / total_runs) if total_runs else 0.0
+    floor = float(getattr(settings, "EVAL_GATE_FLOOR", 0.8))
+    if failing or pass_rate < floor:
+        return {
+            "blocked": "eval_gate",
+            "reason": (
+                f"eval gate: pass_rate {pass_rate:.2f} < floor {floor:.2f}"
+                + (f"; failing cases: {', '.join(failing[:5])}" if failing else "")
+            ),
+            "pass_rate": round(pass_rate, 3),
+            "floor": floor,
+            "failing_cases": failing[:10],
+            "hint": "fix the failing cases, or publish with force=true to override (audited)",
+        }
+    return None
+
+
 def publish_agent(db, agent_id: str, user_id: str | None = None,
-                  note: str | None = None) -> dict[str, Any]:
+                  note: str | None = None,
+                  force: bool = False) -> dict[str, Any]:
     """Snapshot + bump version + set status=published. Idempotent-safe:
-    re-publishing without changes still creates a new revision (audit)."""
+    re-publishing without changes still creates a new revision (audit).
+
+    P1-6: an agent whose golden eval suite is failing is REFUSED unless
+    ``force=True`` — which is recorded in the revision note (audited)."""
     from app.models.agent_app import AgentApp
     from app.models.agent_app_revision import AgentAppRevision
 
@@ -69,12 +121,21 @@ def publish_agent(db, agent_id: str, user_id: str | None = None,
     if agent is None:
         raise LookupError(f"Agent not found: {agent_id}")
 
+    gate = eval_gate_status(db, agent_id)
+    if gate and not force:
+        raise EvalGateBlocked(gate)
+
+    if gate and force:
+        note = f"{note or ''} [eval-gate overridden] {gate['reason']}".strip()
+
     agent.version = (agent.version or 1) + 1
     agent.status = "published"
     revision = _revision(agent, agent.version, "publish", user_id, note)
     db.add(revision)
     db.commit()
-    logger.info("agent_lifecycle: %s published v%d by %s", agent_id, agent.version, user_id)
+    logger.info("agent_lifecycle: %s published v%d by %s (gate=%s)",
+                agent_id, agent.version, user_id,
+                "forced" if gate else "pass")
     return {"agent_id": agent_id, "version": agent.version, "status": agent.status}
 
 

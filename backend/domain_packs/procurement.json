@@ -1,0 +1,38 @@
+{
+  "pack_key": "procurement",
+  "name": "Procurement Agents",
+  "version": "1.0.0",
+  "industry": "procurement",
+  "description": "Supplier, PO, and sourcing vocabulary + starter questions (IBM ai-agents-in-procurement: supplier evaluation, PO automation, compliance). PO write-back is approval-gated.",
+  "starter_prompts": [
+    "Which suppliers are overdue on delivery commitments this month?",
+    "Draft a PO for 500t of isoprene from our approved supplier list",
+    "Compare unit prices across suppliers for our top 5 purchased materials"
+  ],
+  "terminology": [
+    {
+      "word": "PO",
+      "description": "Purchase Order — a formal, approval-gated commitment to buy. In this platform a PO draft is created only via an approved ontology action."
+    },
+    {
+      "word": "supplier",
+      "description": "A vendor providing goods/services. Distinct from a 'customer' (who buys from us)."
+    },
+    {
+      "word": "lead time",
+      "description": "Days from order placement to delivery — the core supplier-performance metric."
+    },
+    {
+      "word": "compliance check",
+      "description": "Verification that a supplier/PO meets policy (approved vendor list, budget, terms) before commitment."
+    },
+    {
+      "word": "alternate sourcing",
+      "description": "Qualifying a second supplier for a critical material to de-risk supply."
+    },
+    {
+      "word": "payment terms",
+      "description": "Agreed invoice settlement conditions (e.g. Net 30). Watch for mismatch vs supplier master data."
+    }
+  ]
+}

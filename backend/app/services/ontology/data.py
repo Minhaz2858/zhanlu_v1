@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# P2-3 multimodal foundation: property types whose values may be media
+# references. A URL-valued cell of these types is surfaced as an
+# attachment ({media_url, media_type}) instead of a bare string.
+_MEDIA_TYPES = {"image", "file", "audio", "video"}
+
 
 def read_object_data(
     db: Session,
@@ -101,16 +106,36 @@ def read_object_data(
 
 def _map_rows_to_properties(rows: list[dict], obj: OntologyObject) -> list[dict]:
     """Rename column-keyed rows to the object's PROPERTY names — the
-    ontology contract speaks business language, not physical columns."""
+    ontology contract speaks business language, not physical columns.
+
+    P2-3 multimodal foundation: properties typed as image/file/audio/
+    video whose value looks like a URL are wrapped as media attachments
+    (modality-agnostic contract — values stay honest, never fabricated)."""
     mapping = {
-        (p.get("column") or p.get("name")): p.get("name")
+        (p.get("column") or p.get("name")): p
         for p in (obj.properties_json or [])
         if isinstance(p, dict)
     }
     if not mapping:
         return rows
+
+    def _wrap(value, prop: dict):
+        if value is None:
+            return None
+        ptype = (prop.get("type") or "").lower()
+        if ptype in _MEDIA_TYPES and isinstance(value, str):
+            v = value.strip()
+            if v.startswith(("http://", "https://", "/uploads/", "/files/")):
+                return {"media_url": v, "media_type": ptype}
+        return value
+
     return [
-        {mapping.get(k, k): v for k, v in row.items()} for row in rows
+        {
+            (mapping.get(k, {}).get("name") if k in mapping else k):
+                _wrap(v, mapping.get(k, {})) if k in mapping else v
+            for k, v in row.items()
+        }
+        for row in rows
     ]
 
 

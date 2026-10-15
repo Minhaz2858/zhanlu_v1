@@ -1,0 +1,38 @@
+{
+  "pack_key": "hr",
+  "name": "HR / People Agents",
+  "version": "1.0.0",
+  "industry": "human resources",
+  "description": "Employee lifecycle vocabulary + starter questions (IBM AskHR pattern: employee-facing self-service).",
+  "starter_prompts": [
+    "What is our headcount and attrition rate by department this year?",
+    "Summarize open roles and days-to-fill for each",
+    "Which compliance trainings are overdue and for whom?"
+  ],
+  "terminology": [
+    {
+      "word": "headcount",
+      "description": "Number of active employees at a point in time."
+    },
+    {
+      "word": "attrition",
+      "description": "Rate of voluntary+involuntary departures over a period (annualized)."
+    },
+    {
+      "word": "time-to-fill",
+      "description": "Days from requisition opening to accepted offer."
+    },
+    {
+      "word": "eNPS",
+      "description": "Employee Net Promoter Score from pulse surveys."
+    },
+    {
+      "word": "compa-ratio",
+      "description": "Employee pay divided by range midpoint — pay-equity lens. Sensitive data: reads are org-admin visible."
+    },
+    {
+      "word": "onboarding",
+      "description": "Structured first-days/weeks process. Employee PII never leaves the tenant boundary."
+    }
+  ]
+}

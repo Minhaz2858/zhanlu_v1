@@ -1,0 +1,38 @@
+{
+  "pack_key": "legal",
+  "name": "Legal / Compliance Agents",
+  "version": "1.0.0",
+  "industry": "legal",
+  "description": "Contract, obligation, and risk vocabulary + starter questions.",
+  "starter_prompts": [
+    "Which contracts expire in the next 90 days and need renewal action?",
+    "Summarize non-standard clauses in our last 10 signed contracts",
+    "Flag commitments in this contract that conflict with our standard terms"
+  ],
+  "terminology": [
+    {
+      "word": "obligation",
+      "description": "A contractual duty with an owner and deadline (deliver, pay, report)."
+    },
+    {
+      "word": "renewal window",
+      "description": "The period before expiry in which renewal action must start."
+    },
+    {
+      "word": "non-standard clause",
+      "description": "Deviation from the approved template — AI flags, counsel decides."
+    },
+    {
+      "word": "indemnity",
+      "description": "Clause allocating loss responsibility between parties."
+    },
+    {
+      "word": "data processing agreement",
+      "description": "Attachment governing personal-data handling — check before sharing customer data with any tool."
+    },
+    {
+      "word": "redline",
+      "description": "A proposed contract edit. AI drafts redlines for human legal review only."
+    }
+  ]
+}

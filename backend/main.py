@@ -1006,6 +1006,8 @@ def create_app() -> FastAPI:
     app.include_router(roi_router, prefix="/api")
     app.include_router(portfolio_router, prefix="/api")
     app.include_router(ontology_router, prefix="/api")
+    from app.routers.ontology_external import router as ontology_external_router
+    app.include_router(ontology_external_router, prefix="/api")
     app.include_router(ai_literacy_router, prefix="/api")
     app.include_router(domain_packs_router, prefix="/api")
     app.include_router(openharness_router, prefix="/api")

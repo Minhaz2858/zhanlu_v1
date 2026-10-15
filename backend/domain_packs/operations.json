@@ -1,0 +1,38 @@
+{
+  "pack_key": "operations",
+  "name": "Operations Agents",
+  "version": "1.0.0",
+  "industry": "operations",
+  "description": "Process, quality, and utilization vocabulary + starter questions.",
+  "starter_prompts": [
+    "What is our on-time completion rate for internal requests this month?",
+    "Which process steps have the highest rework rate?",
+    "Summarize equipment downtime by cause last week"
+  ],
+  "terminology": [
+    {
+      "word": "cycle time",
+      "description": "End-to-end duration of a process instance."
+    },
+    {
+      "word": "rework",
+      "description": "Work returned for correction — top process-quality leak."
+    },
+    {
+      "word": "OEE",
+      "description": "Overall Equipment Effectiveness (availability x performance x quality)."
+    },
+    {
+      "word": "bottleneck",
+      "description": "The step constraining total throughput — agents analyze, humans reallocate."
+    },
+    {
+      "word": "yield",
+      "description": "Good output divided by total input."
+    },
+    {
+      "word": "downtime",
+      "description": "Period a resource is unavailable, ideally coded by cause."
+    }
+  ]
+}

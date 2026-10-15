@@ -1,0 +1,38 @@
+{
+  "pack_key": "marketing",
+  "name": "Marketing Agents",
+  "version": "1.0.0",
+  "industry": "marketing",
+  "description": "Campaign, content, and audience vocabulary + starter questions (IBM ai-agents-in-marketing: content generation, campaign orchestration, social listening, personalization).",
+  "starter_prompts": [
+    "Draft launch content for our Q4 campaign and adapt it per channel",
+    "Which audience segments responded best to the last three campaigns?",
+    "Summarize social listening signals about our brand this week"
+  ],
+  "terminology": [
+    {
+      "word": "campaign",
+      "description": "A coordinated set of marketing activities with a shared goal, audience, and time window."
+    },
+    {
+      "word": "audience segment",
+      "description": "A group of prospects/customers sharing attributes used for targeting. Distinct from a 'channel' (where content is delivered)."
+    },
+    {
+      "word": "social listening",
+      "description": "Monitoring public channels for brand/product mentions to detect trends and sentiment."
+    },
+    {
+      "word": "CAC",
+      "description": "Customer Acquisition Cost — total marketing spend divided by customers acquired in a period."
+    },
+    {
+      "word": "personalization",
+      "description": "Tailoring content/offers to an individual based on their data — agents propose, humans approve outbound sends."
+    },
+    {
+      "word": "conversion rate",
+      "description": "Share of audience members completing the target action (purchase, signup) after exposure."
+    }
+  ]
+}

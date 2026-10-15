@@ -44,7 +44,7 @@ function BackingBadge({ obj }) {
   );
 }
 
-function CoverageCard({ domain, onClick, selected }) {
+function CoverageCard({ domain, value, onClick, selected }) {
   const cov = domain.coverage || {};
   const readiness = cov.readiness || 'drafted';
   return (
@@ -66,6 +66,17 @@ function CoverageCard({ domain, onClick, selected }) {
         <span className="text-emerald-600">{cov.objects_live ?? 0} live</span>
         <span>{cov.actions_executable ?? 0} actions runnable</span>
       </div>
+      {value && (value.est_value > 0 || value.agents?.length > 0) && (
+        <div className="mt-1.5 flex items-center gap-3 text-[10px] text-stone-400">
+          {value.est_value > 0 && (
+            <span className="text-amber-700">≈ ${value.est_value.toLocaleString()} est. value</span>
+          )}
+          {value.agents?.length > 0 && <span>{value.agents.length} agent{value.agents.length === 1 ? '' : 's'}</span>}
+          {value.acceptance_rate != null && (
+            <span>{Math.round(value.acceptance_rate * 100)}% accepted</span>
+          )}
+        </div>
+      )}
     </button>
   );
 }
@@ -190,15 +201,17 @@ function PoDraftsCard({ onExport, exporting }) {
 export default function EnterpriseProfile() {
   const [overview, setOverview] = useState(null);
   const [objects, setObjects] = useState([]);
+  const [value, setValue] = useState([]);
   const [selectedDomain, setSelectedDomain] = useState(null);
   const [discovering, setDiscovering] = useState(false);
   const [exporting, setExporting] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [ovRes, objRes] = await Promise.all([
+      const [ovRes, objRes, valRes] = await Promise.all([
         authFetch('/api/ontology/overview'),
         authFetch('/api/ontology/objects'),
+        authFetch('/api/ontology/coverage-value'),
       ]);
       if (ovRes.ok) {
         const ov = await ovRes.json();
@@ -206,6 +219,7 @@ export default function EnterpriseProfile() {
         setSelectedDomain((cur) => cur || ov.domains?.[0]?.id || null);
       }
       if (objRes.ok) setObjects(await objRes.json());
+      if (valRes.ok) setValue((await valRes.json()).domains || []);
     } catch {
       toast.error('Failed to load the enterprise profile');
     }
@@ -319,6 +333,7 @@ export default function EnterpriseProfile() {
               <CoverageCard
                 key={d.id}
                 domain={d}
+                value={value.find((v) => v.domain_id === d.id)}
                 selected={d.id === selectedDomain}
                 onClick={() => setSelectedDomain(d.id)}
               />

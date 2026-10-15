@@ -1,0 +1,38 @@
+{
+  "pack_key": "product_dev",
+  "name": "Product Development Agents",
+  "version": "1.0.0",
+  "industry": "product",
+  "description": "Backlog, release, and discovery vocabulary + starter questions.",
+  "starter_prompts": [
+    "Summarize top customer feedback themes for the current roadmap cycle",
+    "Which epics are at risk given velocity and open blockers?",
+    "What shipped in the last release and what feedback did it generate?"
+  ],
+  "terminology": [
+    {
+      "word": "epic",
+      "description": "A large body of work spanning multiple sprints."
+    },
+    {
+      "word": "velocity",
+      "description": "Completed work per sprint — used for forecasting, never as a performance score."
+    },
+    {
+      "word": "blocker",
+      "description": "An impediment stopping progress — fan-out target for coordination agents."
+    },
+    {
+      "word": "feature flag",
+      "description": "Runtime toggle decoupling deploy from release."
+    },
+    {
+      "word": "discovery",
+      "description": "Evidence-gathering about user needs before build. AI synthesizes; humans decide."
+    },
+    {
+      "word": "tech debt",
+      "description": "Accumulated shortcuts with future cost — track explicitly, don't let it hide."
+    }
+  ]
+}

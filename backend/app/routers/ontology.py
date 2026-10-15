@@ -342,6 +342,71 @@ def export_po_drafts(
     )
 
 
+class FanoutBody(BaseModel):
+    object_name: str
+    change_summary: str
+    team_id: str | None = None
+
+
+@router.post("/ontology/fanout/notify")
+def fanout_notify(
+    body: FanoutBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """P1-3: fan out a business-object change to the agents bound to
+    LINKED objects' domains (ontology-link traversal, audit-logged)."""
+    from app.services.ontology.fanout import notify_object_change
+
+    return notify_object_change(
+        db, admin.org_id, body.object_name, body.change_summary,
+        changed_by=getattr(admin, "id", None), team_id=body.team_id,
+    )
+
+
+@router.get("/ontology/coverage-value")
+def coverage_value(
+    days: int = Query(default=30, ge=1, le=365),
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P1-4: per-domain value rollups (ROI/usage/acceptance joined onto
+    the coverage map via agent↔domain bindings)."""
+    from app.services.ontology.domain_value import domain_value_rollups
+
+    org = _org_or_404(user, org_id)
+    return domain_value_rollups(db, org, days=days)
+
+
+@router.get("/ontology/export-template")
+def export_template(
+    domains: str | None = Query(default=None,
+                                description="Comma-separated domain codes"),
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """P1-6: export a deployable template (domain packs + ontology subset
+    + bound agents) as a JSON bundle."""
+    import json
+
+    from fastapi.responses import Response
+
+    from app.services.ontology.template_export import export_org_template
+
+    org = _org_or_404(admin, org_id)
+    codes = [d.strip() for d in (domains or "").split(",") if d.strip()] or None
+    bundle = export_org_template(db, org, codes)
+    return Response(
+        content=json.dumps(bundle, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": 'attachment; filename="org_template.json"'
+        },
+    )
+
+
 @router.post("/ontology/actions/{action_id}/execute-approved")
 def execute_approved_ontology_action(
     action_id: str,

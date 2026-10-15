@@ -23,6 +23,7 @@ router = APIRouter(tags=["agent-lifecycle"])
 
 class PublishBody(BaseModel):
     note: str | None = None
+    force: bool = False  # P1-6: override a failing eval gate (audited)
 
 
 class RollbackBody(BaseModel):
@@ -42,9 +43,12 @@ def publish_agent(
         return agent_lifecycle.publish_agent(
             db, agent_id, user_id=getattr(user, "id", None),
             note=(body.note if body else None),
+            force=bool(body.force) if body else False,
         )
     except LookupError as e:
         raise HTTPException(404, str(e))
+    except agent_lifecycle.EvalGateBlocked as e:
+        raise HTTPException(422, e.detail)
 
 
 @router.post("/agents/{agent_id}/unpublish")

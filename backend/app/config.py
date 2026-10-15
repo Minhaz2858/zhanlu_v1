@@ -1587,6 +1587,14 @@ class Settings(BaseSettings):
     # Set to a long random string to let machine callers delegate tasks
     # without an interactive login.
     A2A_API_KEY: str = ""
+    # EVAL_PROMOTE_GATE_ENABLED (P1-6): refuse publish of agents whose
+    # golden eval suite is failing (pass_rate < EVAL_GATE_FLOOR). Callers
+    # may override with force=true — recorded in the revision note.
+    EVAL_PROMOTE_GATE_ENABLED: bool = True
+    # ONTOLOGY_API_KEY (P2-1): server-to-server key for the read-only
+    # ontology external surface (X-API-Key on /api/integrations/ontology/*).
+    # Empty = the external surface is disabled (401 on every call).
+    ONTOLOGY_API_KEY: str = ""
     # RED_TEAM_ENABLED (ADLC P1-4): scheduled adversarial campaigns against
     # published agents every 6h (probes in services/red_team.py). Costs
     # ~len(probes) LLM calls per agent per cycle — enable in production

@@ -1,0 +1,38 @@
+{
+  "pack_key": "security",
+  "name": "Security Agents",
+  "version": "1.0.0",
+  "industry": "security",
+  "description": "Access, finding, and hardening vocabulary + starter questions.",
+  "starter_prompts": [
+    "Which access grants are unused for 90+ days?",
+    "Summarize open security findings by severity and owner",
+    "Who accessed sensitive data sources in the last 24 hours?"
+  ],
+  "terminology": [
+    {
+      "word": "finding",
+      "description": "A detected potential vulnerability/misconfiguration. Severity drives remediation SLA."
+    },
+    {
+      "word": "least privilege",
+      "description": "Grant only the access needed — the default posture for agents too."
+    },
+    {
+      "word": "audit trail",
+      "description": "Immutable record of who did what when — every ontology action writes one."
+    },
+    {
+      "word": "secrets rotation",
+      "description": "Scheduled replacement of credentials. Keys in env/config, never in prompts or logs."
+    },
+    {
+      "word": "guardrail",
+      "description": "A hard limit on what automation may do (risk-tier enforcement in this platform)."
+    },
+    {
+      "word": "risk tier",
+      "description": "read=auto, write=human-approved — how this platform grades every action."
+    }
+  ]
+}

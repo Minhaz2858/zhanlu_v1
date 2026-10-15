@@ -1,0 +1,38 @@
+{
+  "pack_key": "it_ops",
+  "name": "IT / AIOps Agents",
+  "version": "1.0.0",
+  "industry": "it operations",
+  "description": "Incident, change, and SLO vocabulary + starter questions.",
+  "starter_prompts": [
+    "Which services had incidents this week and what was MTTR?",
+    "List changes deployed in the last 7 days and any related incidents",
+    "Which alerts are noisy (firing > 5x/day with no action)?"
+  ],
+  "terminology": [
+    {
+      "word": "incident",
+      "description": "Unplanned service interruption/degradation. Severity P1-P4 drives response."
+    },
+    {
+      "word": "MTTR",
+      "description": "Mean Time To Restore — core reliability KPI."
+    },
+    {
+      "word": "change",
+      "description": "A planned modification to a service. Unapproved changes are the top self-inflicted outage cause."
+    },
+    {
+      "word": "SLO",
+      "description": "Service Level Objective — internal reliability target (e.g. 99.9% availability)."
+    },
+    {
+      "word": "noise",
+      "description": "Alerts that repeatedly fire without requiring action — agents propose tuning, humans approve."
+    },
+    {
+      "word": "runbook",
+      "description": "Documented remediation steps. Agents execute runbooks only within defined guardrails."
+    }
+  ]
+}
