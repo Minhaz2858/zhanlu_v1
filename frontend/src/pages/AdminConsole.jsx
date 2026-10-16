@@ -12,7 +12,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { formatAbsoluteTime } from '@/lib/time';
 import {
   Shield, DollarSign, FileText, CheckCircle2, XCircle, Clock,
-  Loader2, AlertCircle, ChevronDown, ChevronRight,
+  Loader2, AlertCircle, ChevronDown, ChevronRight, UserCheck,
 } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 
@@ -31,23 +31,27 @@ export default function AdminConsole() {
   const [costBreakdown, setCostBreakdown] = useState([]);
   const [auditLogs, setAuditLogs] = useState([]);
   const [policyDecisions, setPolicyDecisions] = useState([]);
+  const [escalations, setEscalations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState({});
 
   const loadData = useCallback(async () => {
     try {
-      const [apps, cost, breakdown, logs, decisions] = await Promise.all([
+      const [apps, cost, breakdown, logs, decisions, escs] = await Promise.all([
         fetchJSON(`${API_BASE}/governance/approvals?status=pending`),
         fetchJSON(`${API_BASE}/governance/cost`),
         fetchJSON(`${API_BASE}/governance/cost/breakdown`),
         fetchJSON(`${API_BASE}/governance/audit?limit=50`),
         fetchJSON(`${API_BASE}/governance/policy-decisions?limit=50`),
+        // P3-6: the human handoff queue (escalations with full context)
+        fetchJSON(`${API_BASE}/ontology/escalations`),
       ]);
       setApprovals(apps);
       setCostSummary(cost);
       setCostBreakdown(breakdown);
       setAuditLogs(logs);
       setPolicyDecisions(decisions);
+      setEscalations(Array.isArray(escs) ? escs : []);
     } catch (e) {
       console.error('Failed to load admin data:', e);
     } finally {
@@ -83,6 +87,19 @@ export default function AdminConsole() {
     setActionLoading({ ...actionLoading, [id]: null });
   }
 
+  async function handleResolveEscalation(id) {
+    setActionLoading({ ...actionLoading, [`esc-${id}`]: 'resolving' });
+    try {
+      await fetchJSON(`${API_BASE}/ontology/escalations/${id}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: 'Resolved by admin' }),
+      });
+      loadData();
+    } catch (e) { console.error(e); }
+    setActionLoading({ ...actionLoading, [`esc-${id}`]: null });
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -91,8 +108,10 @@ export default function AdminConsole() {
     );
   }
 
+  const openEscalations = escalations.filter((e) => e.status === 'open');
   const tabs = [
     { key: 'approvals', label: 'Approvals', icon: Shield, count: approvals.length },
+    { key: 'escalations', label: 'Escalations', icon: UserCheck, count: openEscalations.length },
     { key: 'cost', label: 'Cost', icon: DollarSign },
     { key: 'audit', label: 'Audit Log', icon: FileText, count: auditLogs.length },
     { key: 'policy', label: 'Policy Decisions', icon: CheckCircle2, count: policyDecisions.length },
@@ -169,6 +188,63 @@ export default function AdminConsole() {
                       Reject
                     </button>
                   </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* Escalations Tab (P3-6: human handoff queue with full context) */}
+      {tab === 'escalations' && (
+        <div className="space-y-3">
+          {escalations.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No escalations — agents are handling everything, or nothing needs a human yet
+            </p>
+          ) : (
+            escalations.map((esc) => (
+              <div key={esc.id} className="rounded-xl border border-border bg-card p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        esc.status === 'open'
+                          ? 'bg-amber-100 text-amber-700'
+                          : 'bg-green-100 text-green-700'
+                      }`}>{esc.status}</span>
+                      {esc.sentiment && (
+                        <span className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] text-red-600">
+                          {esc.sentiment}
+                        </span>
+                      )}
+                      {esc.agent_name && (
+                        <span className="text-[11px] text-muted-foreground">from {esc.agent_name}</span>
+                      )}
+                    </div>
+                    <p className="mt-1.5 text-sm font-medium text-foreground">{esc.summary}</p>
+                    {esc.context && (
+                      <details className="mt-1.5">
+                        <summary className="cursor-pointer text-[11px] text-primary">context transferred</summary>
+                        <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-secondary p-2 text-[10px] leading-relaxed">
+                          {JSON.stringify(esc.context, null, 2)}
+                        </pre>
+                      </details>
+                    )}
+                    {esc.resolution_note && (
+                      <p className="mt-1 text-[11px] text-green-700">Resolved: {esc.resolution_note}</p>
+                    )}
+                  </div>
+                  {esc.status === 'open' && (
+                    <button
+                      onClick={() => handleResolveEscalation(esc.id)}
+                      disabled={actionLoading[`esc-${esc.id}`]}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                    >
+                      {actionLoading[`esc-${esc.id}`] === 'resolving' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                      Resolve
+                    </button>
+                  )}
                 </div>
               </div>
             ))
