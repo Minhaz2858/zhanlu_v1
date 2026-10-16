@@ -381,6 +381,7 @@ def _enrich_tables(db: Session, tables: list[dict], top_k: int) -> list[dict]:
             "description_en": meta.description_en,
             "coverage_json": meta.coverage_json,
             "domain_name": getattr(meta, "domain_name", None),
+            "grain": getattr(meta, "grain", None),
             "rrf_score": t.get("rrf_score", 0),
             "columns": [
                 {
@@ -536,6 +537,11 @@ def _render_table_chunk(t: dict, *, detail: str = "full") -> str:
     chunk += ");"
     if t.get("domain_name"):
         chunk += f"  -- domain: {t['domain_name']}"
+    # P-SV: grain ("one row = what") — the SQL author must know the row
+    # semantics BEFORE it aggregates (e.g. a per-order grain table cannot be
+    # summed together with a per-month rollup).
+    if t.get("grain"):
+        chunk += f"  -- grain: {t['grain']}"
     if t.get("description_zh"):
         chunk += f"  -- {t['description_zh']}"
     if t.get("row_count"):
@@ -682,6 +688,10 @@ def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
             "max_date": cov.get("max_date", ""),
             "min_date": cov.get("min_date", ""),
             "table_role": r.table_role,
+            # P-SV: "one row = what" — surfaced in the TOC and selector line
+            # so the selection LLM distinguishes a fact table from its
+            # pre-aggregated rollup twin.
+            "grain": getattr(r, "grain", None),
             "domain_name": getattr(r, "domain_name", None),
             # Measured vocabulary for this table (slice 2) — the values that
             # ACTUALLY occur, which is what lets a question phrased in the
@@ -772,6 +782,10 @@ def _toc_line(t: dict, *, compact: bool = False) -> str:
         parts.append(desc[:60])
     if role and role != "unknown" and not compact:
         parts.append(f"role={role}")
+    # P-SV: grain on the selector line — a compact but decisive hint that
+    # keeps rollup tables from being chosen for detail questions.
+    if t.get("grain") and not compact:
+        parts.append(f"grain={t['grain'][:50]}")
     # Measured vocabulary. This line is what the table SELECTOR reads, and both
     # blocks of it need the hint: the ranked candidates (so the hint can confirm
     # a retrieval hit) AND the rest of the catalog, where two ERP objects are

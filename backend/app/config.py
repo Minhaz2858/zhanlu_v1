@@ -459,6 +459,15 @@ class Settings(BaseSettings):
     # app/models/query_plan_memory.py, logic: app/services/db/plan_memory.py.
     NL2SQL_PLAN_MEMORY_ENABLED: bool = True
 
+    # NL2SQL_SOURCE_VERIFICATION_ENABLED: the blocking gate BETWEEN table
+    # selection and SQL generation (services/db/source_verification.py).
+    # Uses per-table grain + authority metadata (kb_table_meta.grain,
+    # .authority_override, project_catalog_overlay.grain/table_role) to:
+    # force-include an approved metric's bound table, drop archive twins of
+    # selected live tables, and refuse/clarify a detail question answered
+    # only from pre-aggregated sources.
+    NL2SQL_SOURCE_VERIFICATION_ENABLED: bool = True
+
     # ── Answer figure provenance (routers/agents.py guardrail) ───────────
     # Every SQL-side guard stops at the rows. This checks the PROSE: each
     # data figure in the final answer must exist in the turn's tool results

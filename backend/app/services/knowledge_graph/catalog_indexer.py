@@ -635,7 +635,8 @@ _ROLE_NAME_SUFFIX_RE = re.compile(r"(name|title|label)$", re.IGNORECASE)
 
 
 def _classify_table_roles(tables: list[dict]) -> None:
-    """Mutate each table dict with a structural ``table_role`` classification.
+    """Mutate each table dict with a structural ``table_role`` classification
+    and a ``grain`` guess ("one row = what").
 
     Called during catalog indexing when ``TABLE_ROLE_AUTO_CLASSIFY_ENABLED``.
     Uses the full table set so FK in-degree (how many other tables point TO a
@@ -654,13 +655,79 @@ def _classify_table_roles(tables: list[dict]) -> None:
 
     for i, t in enumerate(tables):
         t["table_role"] = _classify_table_role(t, indegree.get(i, 0))
+        t["grain"] = _infer_grain(t)
+
+
+# Name hints for the extended role taxonomy (P-SV). Checked BEFORE the
+# structural heuristics — a table NAMED sales_summary is an aggregate even
+# if it looks structurally like a fact.
+_AGGREGATE_RE = re.compile(
+    r"(summary|agg|aggregate|_by_day|_by_month|_daily|_monthly|_rollup)", re.I)
+_REPORT_VIEW_RE = re.compile(r"(^vw_|_view$|^v_|_report$)", re.I)
+_FORECAST_RE = re.compile(r"(forecast|prediction|_pred$|projected)", re.I)
+_ARCHIVE_RE = re.compile(r"(archive|backup|_bak$|_hist(ory)?$|_old$)", re.I)
+
+
+def _infer_grain(table: dict, role: str | None = None) -> str | None:
+    """Guess "one row = what" for the Source Verification Gate.
+
+    Heuristics, most specific first:
+    - explicit business-key columns (order_no, invoice_no…) → one row per that
+    - fact with N FK targets → one row per <target> × <target> (× date)
+    - single-PK entity → one row per <pk>
+    - date + measures → one row per <date col>
+    Returns a human-readable phrase or None (unknown grain is honest).
+    """
+    role = role or table.get("table_role") or ""
+    cols = table.get("columns", [])
+    col_names = [c.get("column_name", "") for c in cols]
+
+    biz_keys = [cn for cn in col_names
+                if re.search(r"(no$|_no$|number$|_code$|_key$)", cn, re.I)
+                and not re.search(r"(type|status|flag)", cn, re.I)]
+    if biz_keys:
+        return f"one row per {biz_keys[0].lower()}"
+
+    fks = [fk.get("ref_table", "") for fk in table.get("foreign_keys", [])
+           if fk.get("ref_table")]
+    if role == "fact" and fks:
+        parts = [f"one {f}" for f in fks[:2]]
+        has_date = any(
+            _ROLE_DATE_RE.search(cn) or _is_date_type(c.get("data_type", ""))
+            for cn, c in ((c.get("column_name", ""), c) for c in cols))
+        if has_date:
+            parts.append("one date")
+        return "one row per " + " × ".join(parts)
+
+    pks = [c.get("column_name", "") for c in cols if c.get("is_primary_key")]
+    if len(pks) == 1:
+        return f"one row per {pks[0].lower()}"
+
+    if role == "aggregate":
+        has_date = any(
+            _ROLE_DATE_RE.search(cn) or _is_date_type(c.get("data_type", ""))
+            for cn, c in ((c.get("column_name", ""), c) for c in cols))
+        group_cols = [cn for cn in col_names
+                      if _ROLE_ID_RE.search(cn) or _ROLE_NAME_RE.search(cn)]
+        what = " × ".join(group_cols[:2]) if group_cols else "pre-aggregated period"
+        return f"one row per {what} (pre-aggregated)" + (" + date" if has_date else "")
+    return None
+
+
+
 
 
 def _classify_table_role(table: dict, fk_indegree: int) -> str:
     """Classify a single table's role via structural heuristics.
 
-    Returns: ``entity_master | fact | dimension | bridge | unknown``.
+    Returns: ``entity_master | fact | dimension | bridge | aggregate |
+    reporting_view | forecast | archive | unknown``.
     Priority order:
+      0. name hints  — a table NAMED sales_summary / vw_xxx / xxx_forecast /
+         xxx_archive is what its name says, even if it *looks* structurally
+         like a fact. Aggregate/report/forecast/archive objects are exactly
+         the ones the Source Verification Gate must steer the LLM away from
+         for raw business measures, so the name signal outranks structure.
       1. entity_master — small row count, id+name columns, a category/type
          column OR referenced by FKs from other tables.
       2. fact        — large row count, a temporal column + measure columns.
@@ -668,6 +735,17 @@ def _classify_table_role(table: dict, fk_indegree: int) -> str:
       4. dimension   — moderate row count with id+name columns.
       5. unknown     — fallback.
     """
+    # 0) Name hints (checked BEFORE structure — see _AGGREGATE_RE etc.).
+    name = str(table.get("table_name") or "")
+    if _AGGREGATE_RE.search(name):
+        return "aggregate"
+    if _FORECAST_RE.search(name):
+        return "forecast"
+    if _ARCHIVE_RE.search(name):
+        return "archive"
+    if _REPORT_VIEW_RE.search(name):
+        return "reporting_view"
+
     row_count = table.get("row_count") or 0
     cols = table.get("columns", [])
     col_names = [c.get("column_name", "") for c in cols]
@@ -1638,6 +1716,11 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
             meta.description_zh = t.get("description_zh")
             meta.description_en = t.get("description_en")
             meta.coverage_json = t.get("coverage_json")
+            # P-SV: grain is recomputed each index (structure may have
+            # changed). A human correction lives in
+            # project_catalog_overlay.grain, which overrides at read time —
+            # so overwriting the auto value here is safe.
+            meta.grain = t.get("grain")
             # Preserve a human/LLM-set role; only overwrite with a fresh
             # auto-classification (index-time) if still "unknown" or coming
             # from this same index pass.
@@ -1656,6 +1739,7 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
                 description_en=t.get("description_en"),
                 coverage_json=t.get("coverage_json"),
                 table_role=role,
+                grain=t.get("grain"),
             )
             db.add(meta)
         # ── source truth (2026-09-20) — written on every index, never merged

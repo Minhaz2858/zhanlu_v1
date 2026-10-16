@@ -937,6 +937,80 @@ class NLAnswerService:
             schema_info = _filter_schema_info(schema_info, resolved_policy, kb_id)
             schema_text = _format_schema_for_prompt(schema_info)
 
+        # 1c-SV. SOURCE VERIFICATION GATE (P-SV) — the blocking check BETWEEN
+        # table selection and SQL generation. "LLM proposes, the semantic
+        # system verifies":
+        #   - an approved metric the question names force-includes its bound
+        #     base table (auto-repair);
+        #   - an archive twin of a selected live table is dropped (authority);
+        #   - a detail question answered only from pre-aggregated sources is
+        #     refused with a clarification instead of a wrong rollup number;
+        #   - grain facts ride into the SQL prompt as guidance.
+        _sv_guidance = ""
+        if getattr(settings, "NL2SQL_SOURCE_VERIFICATION_ENABLED", True):
+            try:
+                from app.services.db.source_verification import verify_sources
+
+                _sv_selected = [
+                    (entry.get("table") or "")
+                    for entry in (schema_info or {}).get("tables") or []
+                ]
+                _sv = verify_sources(
+                    self._db, kb_id, question, _sv_selected,
+                    project_id=project_id,
+                )
+                if not _sv.passed:
+                    if _sv.refuse:
+                        logger.warning(
+                            "NLAnswer: source verification refused for KB %s: %s",
+                            kb_id, _sv.refuse,
+                        )
+                        return {
+                            "success": False,
+                            "error": _sv.refuse,
+                            "source_id": kb_id,
+                            "source_verification": "refused",
+                        }
+                    # clarify — never fabricate a rollup answer for a detail
+                    # question; ask instead.
+                    logger.info(
+                        "NLAnswer: source verification clarification for KB %s",
+                        kb_id,
+                    )
+                    return {
+                        "success": False,
+                        "error": _sv.clarify,
+                        "source_id": kb_id,
+                        "needs_clarification": True,
+                        "source_verification": "clarify",
+                    }
+                if _sv.removed_tables or _sv.added_tables:
+                    _keep = [
+                        t for t in _sv_selected
+                        if t and t not in _sv.removed_tables
+                    ] + [
+                        t for t in _sv.added_tables if t and t not in _sv_selected
+                    ]
+                    _keep = list(dict.fromkeys(_keep))
+                    if _keep:
+                        schema_info = _schema_info_from_toc_selection(
+                            self._db, kb_id, _keep, schema_svc,
+                        )
+                        schema_text = _format_schema_for_prompt(schema_info)
+                        logger.info(
+                            "NLAnswer: source verification repaired plan for "
+                            "KB %s — added=%s removed=%s",
+                            kb_id, _sv.added_tables, _sv.removed_tables,
+                        )
+                if _sv.guidance:
+                    _sv_guidance = _sv.guidance
+                for _d in _sv.disclosures:
+                    logger.info("NLAnswer: source verification — %s", _d)
+            except Exception as _sv_err:
+                logger.debug(
+                    "NLAnswer: source verification skipped: %s", _sv_err
+                )
+
         # 1b-wl (P0-1): mined workload hints — validated join paths among the
         # selected tables + the filters analysts actually apply. Appended to
         # the schema text so the SQL model reuses proven conventions instead
@@ -1082,6 +1156,8 @@ class NLAnswerService:
                 _log_guidance,
                 _unsupported_guidance,
                 _ratio_guidance,
+                # P-SV: grain facts + authority exclusions from the gate.
+                _sv_guidance,
             )
             if part
         )

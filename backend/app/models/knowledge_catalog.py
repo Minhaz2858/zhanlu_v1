@@ -57,7 +57,18 @@ class KBTableMeta(TimestampedBase):
     # TOC renderer and prompt builder group tables without a join.
     domain_name: Mapped[str | None] = mapped_column(String(191), nullable=True, index=True)
     table_role: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
-    # entity_master | fact | dimension | bridge | unknown
+    # entity_master | fact | dimension | bridge | aggregate | reporting_view
+    # | forecast | archive | unknown
+    # P-SV: "one row = what" — auto-inferred at index time (PK / FK set /
+    # date column), human-overridable via project_catalog_overlay.grain.
+    # This is the metadata the Source Verification Gate checks BEFORE
+    # SQL generation (e.g. reject `orders` when the question needs
+    # `order_items` grain).
+    grain: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Human-set source-authority override for this table:
+    # 'authoritative' | 'standard' | 'weak'. NULL = compute from signals
+    # (approved metric bindings > fact/entity role > stale/archive).
+    authority_override: Mapped[str | None] = mapped_column(String(20), nullable=True)
     entity_master_hints: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # {"entity_type": str, "filter_columns": list[str], "category_column": str,
     #  "sample_categories": list[str]} — discovered filter metadata for
@@ -278,6 +289,8 @@ class ProjectCatalogOverlay(TimestampedBase):
     metric_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
     table_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Per-project override of the auto-classified KBTableMeta.table_role.
+    # P-SV: human grain declaration — "one row = what" (beats auto-inference).
+    grain: Mapped[str | None] = mapped_column(String(200), nullable=True)
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default="table")
     # table / kb / table_role
 
