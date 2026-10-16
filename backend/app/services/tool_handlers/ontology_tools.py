@@ -342,3 +342,197 @@ registry.register(
     emoji="🎯",
     max_result_size_chars=40_000,
 )
+
+
+# ── P3-14: segmentation over live data (read-only GROUP BY) ─────────────
+
+async def _segment_records(args: dict, db: Session, user_id: str | None,
+                           context: dict | None = None) -> dict:
+    import re as _re
+
+    object_name = str(args.get("object_name") or "").strip()
+    segment_by = str(args.get("segment_by") or "").strip()
+    if not object_name or not segment_by:
+        return {"success": False,
+                "reason": "object_name and segment_by are required"}
+
+    from app.services.ontology.queries import get_object_by_name
+    from app.services.db.query_service import QueryService
+
+    org_id = _org_id(context)
+    obj = get_object_by_name(db, org_id, object_name)
+    if not obj:
+        return {"success": False,
+                "reason": f"object {object_name!r} not found in the ontology"}
+    if not (obj.backing_ref and obj.backing_kind != "manual"):
+        return {"success": False,
+                "reason": (f"object {object_name!r} is not bound to live data — "
+                           "run discovery first (never segment invented rows)")}
+    # resolve the physical column for the segment property
+    prop = next((p for p in (obj.properties_json or [])
+                 if isinstance(p, dict) and p.get("name") == segment_by), None)
+    col = prop.get("column") if prop else None
+    if not col or not _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", col):
+        return {"success": False,
+                "reason": (f"property {segment_by!r} has no verified column — "
+                           "map it via the bind endpoint")}
+    if not obj.backing_ref.startswith("kb:"):
+        return {"success": False,
+                "reason": "segmentation supports tenant-database objects (kb: refs)"}
+    parts = obj.backing_ref.split(":", 2)  # kb:<kb_id>:<table>
+    kb_id, table = parts[1], parts[2]
+    if not _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
+        return {"success": False, "reason": "backing table name is not a safe identifier"}
+
+    sql = (f"SELECT {col} AS segment, COUNT(*) AS n FROM {table} "
+           f"WHERE {col} IS NOT NULL GROUP BY {col} ORDER BY n DESC LIMIT 15")
+    try:
+        result = QueryService(db).execute(kb_id, sql, max_rows=15, timeout_s=20)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "reason": f"segment query failed: {exc}"}
+    segments = [
+        {"segment": r.get("segment"), "count": r.get("n")}
+        for r in (result.get("rows") or [])
+    ]
+    total = sum(s["count"] or 0 for s in segments)
+    return {
+        "success": True, "object": object_name, "segmented_by": segment_by,
+        "total_counted": total, "segments": segments,
+        "note": ("live counts from the bound table — top "
+                 f"{len(segments)} segments by size"),
+    }
+
+
+SEGMENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "segment_records",
+        "description": (
+            "Segment live records by any mapped property (read-only "
+            "GROUP BY on the bound table). Use for audience segmentation, "
+            "portfolio breakdowns, or campaign targeting inputs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "object_name": {"type": "string",
+                                "description": "Ontology object (e.g. Customer)."},
+                "segment_by": {"type": "string",
+                               "description": "Property to segment by (must be mapped to a column)."},
+            },
+            "required": ["object_name", "segment_by"],
+        },
+    },
+}
+
+registry.register(
+    name="segment_records",
+    schema=SEGMENT_SCHEMA,
+    handler=_segment_records,
+    category="data",
+    toolset="data",
+    description="Segment live records by a mapped property (GROUP BY counts).",
+    emoji="🧩",
+    max_result_size_chars=20_000,
+)
+
+
+# ── P3-13: campaign planning (read-tier — plans, never sends) ───────────
+
+async def _plan_campaign(args: dict, db: Session, user_id: str | None,
+                         context: dict | None = None) -> dict:
+    from app.services.llm_service import chat_completion_json_sync
+    from app.services.ontology.queries import get_object_by_name
+    from app.services.ontology.serialize import object_to_dict
+
+    objective = str(args.get("objective") or "").strip()
+    if not objective:
+        return {"success": False, "reason": "objective is required"}
+    org_id = _org_id(context)
+
+    # ground the plan in real audience data when an object is given
+    audience_block = ""
+    object_name = args.get("object_name")
+    if object_name:
+        obj = get_object_by_name(db, org_id, str(object_name))
+        if obj and obj.backing_ref and obj.backing_kind != "manual":
+            d = object_to_dict(obj)
+            audience_block = (
+                f"\nAudience object (REAL, bound to live data): "
+                f"{d.get('name')} — properties: "
+                f"{[p.get('name') for p in (d.get('properties') or [])]}\n"
+                "Base channel/step decisions on these properties; do not "
+                "assume data you have not seen."
+            )
+
+    prompt = (
+        "You are a senior marketing strategist. Produce a concrete, "
+        "executable campaign plan for the objective. Be specific: real "
+        "channel names, ordered steps with owners, measurable KPIs with "
+        "target numbers, and per-segment message angles. Do not invent "
+        "customer data." + audience_block + "\n\n"
+        f"Objective: {objective}\n"
+        f"Additional notes: {args.get('notes') or 'none'}\n\n"
+        'Answer JSON: {"theme": str, "channels": [str], '
+        '"steps": [{"order": int, "action": str, "owner": str}], '
+        '"kpis": [{"name": str, "target": str}], '
+        '"messages": [{"segment": str, "angle": str}]}'
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "theme": {"type": "string"},
+            "channels": {"type": "array", "items": {"type": "string"}},
+            "steps": {"type": "array", "items": {"type": "object"}},
+            "kpis": {"type": "array", "items": {"type": "object"}},
+            "messages": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": ["theme", "channels", "steps", "kpis"],
+    }
+    try:
+        plan = chat_completion_json_sync(prompt, schema=schema, temperature=0.3)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "reason": f"planning LLM failed: {exc}"}
+    if not plan or not plan.get("theme"):
+        return {"success": False, "reason": "planner returned no plan"}
+    return {
+        "success": True, "objective": objective, "plan": plan,
+        "note": ("plan only — outbound sends and ad spend remain "
+                 "human-executed (risk policy)"),
+    }
+
+
+CAMPAIGN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "plan_campaign",
+        "description": (
+            "Produce a structured marketing campaign plan (theme, "
+            "channels, ordered steps, KPIs, per-segment messages) for an "
+            "objective. Read-tier: it PLANS — outbound execution stays "
+            "with humans."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "objective": {"type": "string",
+                              "description": "What the campaign must achieve."},
+                "object_name": {"type": "string",
+                                "description": "Optional ontology object to ground audience decisions."},
+                "notes": {"type": "string", "description": "Constraints, budget, timing."},
+            },
+            "required": ["objective"],
+        },
+    },
+}
+
+registry.register(
+    name="plan_campaign",
+    schema=CAMPAIGN_SCHEMA,
+    handler=_plan_campaign,
+    category="data",
+    toolset="data",
+    description="Structured campaign plan (theme/channels/steps/KPIs) — plans, never sends.",
+    emoji="📣",
+    max_result_size_chars=30_000,
+)

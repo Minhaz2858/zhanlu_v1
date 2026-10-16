@@ -15,7 +15,12 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.models.ontology import AgentDomainBinding
+from app.models.ontology import (
+    AgentDomainBinding,
+    OntologyDomain,
+    OntologyLink,
+    OntologyObject,
+)
 from app.services.ontology.queries import (
     list_actions,
     list_bindings,
@@ -121,3 +126,114 @@ def export_org_template(
             "org must re-run discovery to bind objects to ITS OWN data"
         ),
     }
+
+
+def import_org_template(db: Session, org_id: str, bundle: dict) -> dict:
+    """Seed an org from an exported template bundle (P1-6 counterpart).
+
+    HONESTY RULES (mirroring discovery):
+    - never overwrites: existing domains/objects/links/bindings are kept
+    - imported objects arrive UNBOUND (backing null) — the importing org
+      re-runs discovery to bind them to ITS OWN data; bundle backing refs
+      are never copied (they point at the exporting org's databases)
+    - idempotent: importing the same bundle twice changes nothing
+    """
+    report = {
+        "domains_created": 0, "objects_created": 0, "objects_skipped": 0,
+        "links_created": 0, "links_skipped": 0,
+        "bindings_created": 0, "bindings_skipped": 0,
+    }
+    existing_domains = {d.code: d for d in list_domains(db, org_id)}
+    existing_objects = {o.name: o for o in list_objects(db, org_id)}
+    existing_links = {
+        (l.from_object_id, l.to_object_id, l.link_type)
+        for l in list_links(db, org_id)
+    }
+
+    for dspec in (bundle.get("domains") or []):
+        code = (dspec.get("code") or "").strip()
+        if not code:
+            continue
+        domain = existing_domains.get(code)
+        if not domain:
+            domain = OntologyDomain(
+                org_id=org_id, code=code,
+                name=dspec.get("name") or code,
+                description=dspec.get("description"),
+                sort_order=100,
+            )
+            db.add(domain)
+            db.flush()
+            existing_domains[code] = domain
+            report["domains_created"] += 1
+
+        for ospec in (dspec.get("objects") or []):
+            name = (ospec.get("name") or "").strip()
+            if not name:
+                continue
+            if name in existing_objects:
+                report["objects_skipped"] += 1
+                continue
+            props = []
+            for p in (ospec.get("properties") or []):
+                if isinstance(p, dict) and p.get("name"):
+                    # backing columns are NOT imported — org-specific
+                    props.append({"name": p["name"],
+                                  "type": p.get("type") or "string"})
+            obj = OntologyObject(
+                org_id=org_id, domain_id=domain.id, name=name,
+                display_name=ospec.get("display_name") or name,
+                description=ospec.get("description"),
+                backing_kind="manual", backing_ref=None,
+                properties_json=props,
+            )
+            db.add(obj)
+            db.flush()
+            existing_objects[name] = obj
+            report["objects_created"] += 1
+
+    obj_by_name = {o.name: o for o in list_objects(db, org_id)}
+    for lspec in (bundle.get("links") or []):
+        src = obj_by_name.get((lspec.get("from") or ""))
+        dst = obj_by_name.get((lspec.get("to") or ""))
+        link_type = lspec.get("link_type") or "related_to"
+        if not src or not dst or src.id == dst.id:
+            continue
+        key = (src.id, dst.id, link_type)
+        if key in existing_links:
+            report["links_skipped"] += 1
+            continue
+        db.add(OntologyLink(
+            org_id=org_id, from_object_id=src.id, to_object_id=dst.id,
+            link_type=link_type, cardinality=lspec.get("cardinality") or "N:M",
+        ))
+        existing_links.add(key)
+        report["links_created"] += 1
+
+    for agent_name, binds in (bundle.get("agent_bindings") or {}).items():
+        for b in binds:
+            domain = existing_domains.get(b.get("domain") or "")
+            if not domain or not agent_name:
+                continue
+            exists = any(
+                bd.agent_name == agent_name and bd.domain_id == domain.id
+                for bd in list_bindings(db, org_id)
+            )
+            if exists:
+                report["bindings_skipped"] += 1
+                continue
+            db.add(AgentDomainBinding(
+                org_id=org_id, agent_name=agent_name,
+                domain_id=domain.id,
+                permission_scope=b.get("permission_scope") or "read",
+            ))
+            report["bindings_created"] += 1
+
+    db.commit()
+    try:
+        from app.services.ontology.coverage import compute_coverage
+
+        compute_coverage(db, org_id)
+    except Exception:  # noqa: BLE001 — coverage recompute is a follow-up
+        pass
+    return report

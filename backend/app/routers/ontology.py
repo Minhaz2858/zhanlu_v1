@@ -580,6 +580,27 @@ def resolve_escalation_ep(
         raise HTTPException(404, str(e))
 
 
+class ImportTemplateBody(BaseModel):
+    bundle: dict
+
+
+@router.post("/ontology/import-template")
+def import_template(
+    body: ImportTemplateBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """P1-6 counterpart: seed this org from an exported template bundle
+    (domains + unbound objects + links + agent bindings). Idempotent;
+    objects arrive unbound — run discovery to bind to YOUR data."""
+    from app.services.ontology.template_export import import_org_template
+
+    bundle = body.bundle
+    if not isinstance(bundle, dict) or not bundle.get("domains"):
+        raise HTTPException(422, "bundle must be an exported template JSON with 'domains'")
+    return import_org_template(db, admin.org_id, bundle)
+
+
 @router.post("/ontology/actions/{action_id}/execute-approved")
 def execute_approved_ontology_action(
     action_id: str,

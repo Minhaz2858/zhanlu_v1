@@ -75,6 +75,9 @@ function CoverageCard({ domain, value, onClick, selected }) {
           {value.acceptance_rate != null && (
             <span>{Math.round(value.acceptance_rate * 100)}% accepted</span>
           )}
+          {value.csat != null && (
+            <span>CSAT {Math.round(value.csat)}</span>
+          )}
         </div>
       )}
     </button>
