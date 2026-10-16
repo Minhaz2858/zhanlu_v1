@@ -834,6 +834,20 @@ async def lifespan(app: FastAPI):
     # NL2SQL query logs (frequent joins, common filters, popular tables) into
     # query_workload_stats, which SemanticStore reads as workload evidence.
     # Flag-gated (NL2SQL_WORKLOAD_MINING_ENABLED); non-fatal on startup error.
+    # P3-2: ontology sensing loop — scheduled data watches that fan out
+    # through ontology links on breach (IBM continuous sense→decide→act).
+    sensing_stop = asyncio.Event()
+    sensing_task = None
+    try:
+        from app.services.ontology.sensing import run_ontology_sensors
+        sensing_task = asyncio.create_task(
+            run_ontology_sensors(sensing_stop),
+            name="ontology-sensing",
+        )
+        startup_logger.info("Ontology sensing loop started (poll=60s)")
+    except Exception as e:
+        startup_logger.warning("Ontology sensing loop startup error (non-fatal): %s", e)
+
     workload_miner_stop = asyncio.Event()
     workload_miner_task = None
     if getattr(settings, "NL2SQL_WORKLOAD_MINING_ENABLED", True):
@@ -921,8 +935,17 @@ async def lifespan(app: FastAPI):
         except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
         except Exception as e:
-
             startup_logger.warning("Catalog watchdog shutdown error: %s", e)
+
+    # P3-2: stop the ontology sensing loop
+    sensing_stop.set()
+    if sensing_task is not None:
+        try:
+            await asyncio.wait_for(sensing_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        except Exception as e:
+            startup_logger.warning("Ontology sensing shutdown error: %s", e)
 
     workload_miner_stop.set()
     if workload_miner_task is not None:

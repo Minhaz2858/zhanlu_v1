@@ -407,6 +407,143 @@ def export_template(
     )
 
 
+class SensorBody(BaseModel):
+    name: str
+    object_name: str
+    kb_id: str
+    watch_sql: str
+    op: str = "lt"
+    threshold: float = 0
+    schedule_seconds: int = 3600
+    description: str | None = None
+    team_id: str | None = None
+
+
+@router.post("/ontology/sensors")
+def create_sensor(
+    body: SensorBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """P3-2: create a scheduled data watch that fans out through the
+    ontology on breach. The watch SQL runs through the read-only gate."""
+    import uuid as _uuid
+
+    from app.models.ontology_sensor import OntologySensor
+
+    if body.op not in ("lt", "lte", "gt", "gte", "eq"):
+        raise HTTPException(422, f"unknown operator: {body.op}")
+    if body.schedule_seconds < 60:
+        raise HTTPException(422, "schedule_seconds must be >= 60")
+    sensor = OntologySensor(
+        id=str(_uuid.uuid4()), org_id=admin.org_id,
+        name=body.name, description=body.description,
+        object_name=body.object_name, kb_id=body.kb_id,
+        watch_sql=body.watch_sql, op=body.op, threshold=body.threshold,
+        schedule_seconds=body.schedule_seconds, team_id=body.team_id,
+        enabled=True, created_by_id=getattr(admin, "id", None),
+    )
+    db.add(sensor)
+    db.commit()
+    return {"id": sensor.id, "status": "created"}
+
+
+@router.get("/ontology/sensors")
+def list_sensors(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P3-2: list the org's sensors with last state + recent runs, plus
+    the bindable object names and data sources for the create form."""
+    from app.models.knowledge_base import KnowledgeBase
+    from app.models.ontology_sensor import OntologySensor, OntologySensorRun
+
+    org = getattr(user, "org_id", None) or "default-org"
+    sensors = (
+        db.query(OntologySensor)
+        .filter(OntologySensor.org_id == org,
+                OntologySensor.is_deleted == False)  # noqa: E712
+        .order_by(OntologySensor.created_date.desc())
+        .all()
+    )
+    out = []
+    for s in sensors:
+        d = s.to_dict()
+        d.pop("watch_sql", None)
+        last_runs = (
+            db.query(OntologySensorRun)
+            .filter(OntologySensorRun.sensor_id == s.id,
+                    OntologySensorRun.is_deleted == False)  # noqa: E712
+            .order_by(OntologySensorRun.created_date.desc())
+            .limit(5).all()
+        )
+        d["recent_runs"] = [
+            {"value": r.value, "breached": r.breached,
+             "transition": r.transition, "error": r.error,
+             "ran_at": r.created_date.isoformat() if r.created_date else None}
+            for r in last_runs
+        ]
+        out.append(d)
+    kbs = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.org_id == org,
+                KnowledgeBase.is_deleted == False,  # noqa: E712
+                KnowledgeBase.source_kind == "database")  # noqa: E712
+        .all()
+    )
+    objects = [
+        {"name": o.name, "display_name": o.display_name}
+        for o in list_objects(db, org)
+    ]
+    return {
+        "sensors": out,
+        "data_sources": [{"id": k.id, "name": k.name, "db_type": k.db_type}
+                         for k in kbs],
+        "objects": objects,
+    }
+
+
+@router.post("/ontology/sensors/{sensor_id}/run")
+def run_sensor_now(
+    sensor_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """P3-2: immediate evaluation (test run / manual run)."""
+    from app.models.ontology_sensor import OntologySensor
+    from app.services.ontology.sensing import evaluate_sensor
+
+    sensor = db.query(OntologySensor).filter(
+        OntologySensor.id == sensor_id,
+        OntologySensor.org_id == admin.org_id,
+        OntologySensor.is_deleted == False,  # noqa: E712
+    ).first()
+    if not sensor:
+        raise HTTPException(404, "sensor not found")
+    return evaluate_sensor(db, sensor)
+
+
+@router.delete("/ontology/sensors/{sensor_id}")
+def delete_sensor(
+    sensor_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    from app.models.ontology_sensor import OntologySensor
+
+    sensor = db.query(OntologySensor).filter(
+        OntologySensor.id == sensor_id,
+        OntologySensor.org_id == admin.org_id,
+        OntologySensor.is_deleted == False,  # noqa: E712
+    ).first()
+    if not sensor:
+        raise HTTPException(404, "sensor not found")
+    sensor.is_deleted = True
+    sensor.enabled = False
+    db.commit()
+    return {"id": sensor_id, "status": "deleted"}
+
+
 @router.post("/ontology/actions/{action_id}/execute-approved")
 def execute_approved_ontology_action(
     action_id: str,

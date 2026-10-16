@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  Building2, RefreshCw, Loader2, Download, MapPin,
+  Building2, RefreshCw, Loader2, Download, MapPin, Radar, Plus,
   CircleDot, Layers, Database, ShieldCheck,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -198,6 +198,201 @@ function PoDraftsCard({ onExport, exporting }) {
   );
 }
 
+function SensorsCard({ reloadSignal }) {
+  // P3-2: scheduled data watches → ontology fan-out on breach.
+  const [data, setData] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({
+    name: '', object_name: '', kb_id: '', watch_sql: '',
+    op: 'gt', threshold: 0, schedule_seconds: 3600,
+  });
+
+  const load = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/ontology/sensors');
+      if (res.ok) setData(await res.json());
+    } catch { /* fail-quiet */ }
+  }, []);
+
+  useEffect(() => { load(); }, [load, reloadSignal]);
+
+  const create = async () => {
+    if (!form.name || !form.object_name || !form.kb_id || !form.watch_sql.trim()) {
+      toast.error('Name, object, data source and watch SQL are required');
+      return;
+    }
+    setCreating(true);
+    try {
+      const res = await authFetch('/api/ontology/sensors', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      toast.success('Sensor created — the loop will watch it every minute');
+      setShowForm(false);
+      setForm({ ...form, name: '', watch_sql: '' });
+      await load();
+    } catch (e) {
+      toast.error(`Create failed: ${e.message || e}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const runNow = async (id) => {
+    try {
+      const res = await authFetch(`/api/ontology/sensors/${id}/run`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const out = await res.json();
+      if (out.error) toast.error(`Sensor error: ${out.error}`);
+      else if (out.transition === 'breach') toast.warning(`BREACH — value ${out.value} · agents notified`);
+      else if (out.transition === 'recovery') toast.success(`Recovered — value ${out.value}`);
+      else toast.info(`Value ${out.value} — ${out.breached ? 'still in breach' : 'within limits'}`);
+      await load();
+    } catch (e) {
+      toast.error(`Run failed: ${e.message || e}`);
+    }
+  };
+
+  const remove = async (id) => {
+    try {
+      const res = await authFetch(`/api/ontology/sensors/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast.success('Sensor removed');
+      await load();
+    } catch (e) {
+      toast.error(`Delete failed: ${e.message || e}`);
+    }
+  };
+
+  if (!data) return null;
+  const stateChip = (s) => {
+    let st = {};
+    try { st = JSON.parse(s.last_state_json || '{}'); } catch { /* empty */ }
+    if (!s.enabled) return ['paused', 'border-stone-200 bg-stone-50 text-stone-400'];
+    if (st.breached) return ['BREACH', 'border-red-200 bg-red-50 text-red-700'];
+    if (s.last_run_at) return ['watching', 'border-emerald-200 bg-emerald-50 text-emerald-700'];
+    return ['new', 'border-sky-200 bg-sky-50 text-sky-700'];
+  };
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center gap-2">
+        <Radar size={15} className="text-stone-600" />
+        <h2 className="text-sm font-semibold text-stone-800">Sensing</h2>
+        <span className="text-[11px] text-stone-400">
+          scheduled watches on your real data — on breach, linked-domain agents are notified
+          (breach fires once, recovery fires once — never spam)
+        </span>
+        <button
+          onClick={() => setShowForm((v) => !v)}
+          className="ml-auto flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-50"
+        >
+          <Plus size={12} /> New sensor
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="mt-3 rounded-xl border border-stone-200 bg-white p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-[12px]">
+          <input className="border border-stone-200 rounded-md px-2.5 py-1.5" placeholder="Sensor name (e.g. stalled PO watch)"
+            value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <select className="border border-stone-200 rounded-md px-2.5 py-1.5"
+            value={form.object_name} onChange={(e) => setForm({ ...form, object_name: e.target.value })}>
+            <option value="">Notify object…</option>
+            {data.objects.map((o) => (
+              <option key={o.name} value={o.name}>{o.display_name || o.name}</option>
+            ))}
+          </select>
+          <select className="border border-stone-200 rounded-md px-2.5 py-1.5"
+            value={form.kb_id} onChange={(e) => setForm({ ...form, kb_id: e.target.value })}>
+            <option value="">Data source…</option>
+            {data.data_sources.map((k) => (
+              <option key={k.id} value={k.id}>{k.name} ({k.db_type || 'database'})</option>
+            ))}
+          </select>
+          <div className="flex items-center gap-2">
+            <select className="border border-stone-200 rounded-md px-2 py-1.5"
+              value={form.op} onChange={(e) => setForm({ ...form, op: e.target.value })}>
+              {['gt', 'gte', 'lt', 'lte', 'eq'].map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+            <input type="number" step="any" className="w-24 border border-stone-200 rounded-md px-2.5 py-1.5"
+              value={form.threshold} onChange={(e) => setForm({ ...form, threshold: Number(e.target.value) })} />
+            <select className="border border-stone-200 rounded-md px-2 py-1.5"
+              value={form.schedule_seconds} onChange={(e) => setForm({ ...form, schedule_seconds: Number(e.target.value) })}>
+              <option value={300}>every 5 min</option>
+              <option value={3600}>every hour</option>
+              <option value={21600}>every 6 h</option>
+              <option value={86400}>daily</option>
+            </select>
+          </div>
+          <textarea className="sm:col-span-2 border border-stone-200 rounded-md px-2.5 py-1.5 font-mono text-[11px]"
+            rows={2} placeholder="Watch SQL — must return ONE numeric value, e.g. SELECT COUNT(*) FROM deals WHERE stage = 'stalled'"
+            value={form.watch_sql} onChange={(e) => setForm({ ...form, watch_sql: e.target.value })} />
+          <div className="sm:col-span-2 flex items-center gap-2">
+            <button onClick={create} disabled={creating}
+              className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">
+              {creating ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
+              Create sensor
+            </button>
+            <span className="text-[10px] text-stone-400">
+              runs through the same read-only gate as chat agents — write SQL is rejected
+            </span>
+          </div>
+        </div>
+      )}
+
+      {data.sensors.length === 0 ? (
+        <p className="mt-3 text-[11px] text-stone-400">
+          No sensors yet. A sensor watches a query on one of your connected data sources and
+          notifies the agents bound to the watched object's linked domains when the value crosses
+          your threshold.
+        </p>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {data.sensors.map((s) => {
+            const [label, cls] = stateChip(s);
+            return (
+              <div key={s.id} className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-medium text-stone-800">{s.name}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${cls}`}>{label}</span>
+                  <span className="text-[10px] text-stone-400">
+                    watches {s.object_name} · {s.op} {s.threshold} · every {s.schedule_seconds >= 3600 ? `${s.schedule_seconds / 3600}h` : `${s.schedule_seconds / 60}m`}
+                  </span>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <button onClick={() => runNow(s.id)}
+                      className="text-[11px] px-2 py-1 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50">
+                      Run now
+                    </button>
+                    <button onClick={() => remove(s.id)}
+                      className="text-[11px] px-2 py-1 rounded-md border border-stone-200 text-stone-400 hover:bg-red-50 hover:text-red-600">
+                      Remove
+                    </button>
+                  </div>
+                </div>
+                {s.recent_runs?.length > 0 && (
+                  <div className="mt-1.5 flex items-center gap-3 text-[10px] text-stone-400">
+                    {s.recent_runs.slice(0, 3).map((r, i) => (
+                      <span key={i}>
+                        {r.ran_at ? new Date(r.ran_at).toLocaleTimeString() : ''}: {r.error ? `error — ${r.error.slice(0, 40)}` : `${r.transition} (value ${r.value})`}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EnterpriseProfile() {
   const [overview, setOverview] = useState(null);
   const [objects, setObjects] = useState([]);
@@ -344,6 +539,8 @@ export default function EnterpriseProfile() {
         {domain && <div className="mt-4"><ObjectsPanel domain={domain} objects={objects} /></div>}
 
         <PoDraftsCard onExport={exportDrafts} exporting={exporting} />
+
+        <SensorsCard />
       </div>
     </div>
   );

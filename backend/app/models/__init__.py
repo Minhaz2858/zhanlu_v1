@@ -82,6 +82,10 @@ from app.models.ontology import (  # P0-2: Enterprise AI OS ontology core
     OntologyObject,
 )
 from app.models.procurement import ProcurementPoDraft  # P0-4: first write-back
+from app.models.ontology_sensor import (  # P3-2: scheduled sensing pipeline
+    OntologySensor,
+    OntologySensorRun,
+)
 from app.models.nl2sql_query_log import Nl2sqlQueryLog  # Gap 4: literacy mining source
 from app.models.removed_curated_url import RemovedCuratedUrl
 from app.models.hook_rule import HookRule
