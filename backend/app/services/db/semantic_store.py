@@ -269,17 +269,29 @@ class SemanticStore:
         kb_ids: Sequence[str] | None = None,
         project_id: str | None = None,
         agent_id: str | None = None,
+        org_id: str | None = None,
     ) -> None:
         self.db = db
         self.kb_ids: tuple[str, ...] = tuple(k for k in (kb_ids or []) if k)
         self.project_id = project_id
         self.agent_id = agent_id
+        # Multi-tenant enforcement (audit fix): when the owning org is known,
+        # EVERY read below is additionally filtered on ``org_id`` — a row is
+        # never served to a store whose KB belongs to another org, even if a
+        # buggy caller passed the right kb_ids with wrong payload rows.
+        self.org_id = org_id
         self._relations: list[SemanticRelation] | None = None
         self._workload: dict[str, WorkloadSignal] | None = None
         # P0-1 (OCI offline-enrichment parity): mined table_pair (frequent
         # joins) + table_filter (common predicates) from the workload miner —
         # collected since its introduction but never consumed until now.
         self._mined: dict[str, dict] | None = None
+
+    def _org_conds(self, model) -> list:
+        """org filter for one model (empty when the store is org-agnostic)."""
+        if not self.org_id:
+            return []
+        return [model.org_id == self.org_id]
 
     # -- schema info -------------------------------------------------------
     def relations(self, force: bool = False) -> list[SemanticRelation]:
@@ -301,6 +313,7 @@ class SemanticStore:
             .filter(
                 KBTableMeta.kb_id.in_(list(self.kb_ids)),
                 KBTableMeta.is_deleted.is_(False),
+                *self._org_conds(KBTableMeta),
             )
             .order_by(KBTableMeta.table_name)
             .all()
@@ -312,7 +325,10 @@ class SemanticStore:
         counts: dict[str, int] = {}
         col_rows = (
             self.db.query(KBColumnMeta.table_meta_id)
-            .filter(KBColumnMeta.table_meta_id.in_([r.id for r in rows]))
+            .filter(
+                KBColumnMeta.table_meta_id.in_([r.id for r in rows]),
+                *self._org_conds(KBColumnMeta),
+            )
             .all()
         )
         for (tmid,) in col_rows:
@@ -373,6 +389,7 @@ class SemanticStore:
                 KBTableMeta.kb_id.in_(list(self.kb_ids)),
                 KBTableMeta.table_name == table_name,
                 KBTableMeta.is_deleted.is_(False),
+                *self._org_conds(KBTableMeta),
             )
             .first()
         )
@@ -380,7 +397,10 @@ class SemanticStore:
             return []
         rows = (
             self.db.query(KBColumnMeta)
-            .filter(KBColumnMeta.table_meta_id == tmeta[0])
+            .filter(
+                KBColumnMeta.table_meta_id == tmeta[0],
+                *self._org_conds(KBColumnMeta),
+            )
             .order_by(KBColumnMeta.ordinal)
             .all()
         )
@@ -415,6 +435,7 @@ class SemanticStore:
                 KBTableMeta.kb_id.in_(list(self.kb_ids)),
                 KBTableMeta.table_name == table_name,
                 KBTableMeta.is_deleted.is_(False),
+                *self._org_conds(KBTableMeta),
             )
             .first()
         )
@@ -437,6 +458,7 @@ class SemanticStore:
         q = self.db.query(KBTableMeta.id, KBTableMeta.table_name).filter(
             KBTableMeta.kb_id.in_(list(self.kb_ids)),
             KBTableMeta.is_deleted.is_(False),
+            *self._org_conds(KBTableMeta),
         )
         name_by_id = {tid: tname for tid, tname in q.all()}
         if not name_by_id:
@@ -446,6 +468,7 @@ class SemanticStore:
             .filter(
                 KBTableRelation.source_table_meta_id.in_(list(name_by_id)),
                 KBTableRelation.is_deleted.is_(False),
+                *self._org_conds(KBTableRelation),
             )
             .all()
         )
@@ -480,6 +503,7 @@ class SemanticStore:
             .filter(
                 KBDomain.kb_id.in_(list(self.kb_ids)),
                 KBDomain.is_deleted.is_(False),
+                *self._org_conds(KBDomain),
             )
             .all()
         )
@@ -517,6 +541,7 @@ class SemanticStore:
                 .filter(
                     ProjectCatalogOverlay.project_id == self.project_id,
                     ProjectCatalogOverlay.is_deleted.is_(False),
+                    *self._org_conds(ProjectCatalogOverlay),
                 )
                 .all()
             )
@@ -556,7 +581,9 @@ class SemanticStore:
 
         # 1. terminologies (glossary entries)
         try:
-            q = self.db.query(Terminology).filter(Terminology.enabled.is_(True))
+            q = self.db.query(Terminology).filter(
+                Terminology.enabled.is_(True), *self._org_conds(Terminology)
+            )
             # An agent-scoped term belongs to that agent only; a caller that
             # does not know its agent gets the global vocabulary, never
             # another agent's.
@@ -584,7 +611,10 @@ class SemanticStore:
 
         # 2. approved metrics (project-scoped; kb-scoped rows win)
         try:
-            q = self.db.query(ProjectMetric).filter(ProjectMetric.status == "approved")
+            q = self.db.query(ProjectMetric).filter(
+                ProjectMetric.status == "approved",
+                *self._org_conds(ProjectMetric),
+            )
             if self.project_id:
                 q = q.filter(ProjectMetric.project_id == self.project_id)
             else:
@@ -617,7 +647,8 @@ class SemanticStore:
             from app.models.metric_definition import MetricDefinition
 
             q = self.db.query(MetricDefinition).filter(
-                MetricDefinition.is_enabled.is_(True)
+                MetricDefinition.is_enabled.is_(True),
+                *self._org_conds(MetricDefinition),
             )
             if self.kb_ids:
                 q = q.filter(MetricDefinition.datasource_id.in_(list(self.kb_ids)))
@@ -692,6 +723,7 @@ class SemanticStore:
                 .filter(
                     QueryPlanMemory.kb_id.in_(list(self.kb_ids)),
                     QueryPlanMemory.is_deleted.is_(False),
+                    *self._org_conds(QueryPlanMemory),
                 )
                 .all()
             )
@@ -724,6 +756,7 @@ class SemanticStore:
             )
             rows = (
                 self.db.query(Nl2sqlQueryLog)
+                .filter(*self._org_conds(Nl2sqlQueryLog))
                 .order_by(Nl2sqlQueryLog.created_date.desc())
                 .limit(max(1, limit))
                 .all()
@@ -767,6 +800,7 @@ class SemanticStore:
                 .filter(
                     QueryWorkloadStat.kb_id.in_(list(self.kb_ids)),
                     QueryWorkloadStat.stat_kind == "popular_table",
+                    *self._org_conds(QueryWorkloadStat),
                 )
                 .all()
             )
@@ -811,6 +845,7 @@ class SemanticStore:
                     QueryWorkloadStat.kb_id.in_(list(self.kb_ids)),
                     QueryWorkloadStat.stat_kind.in_(["table_pair", "table_filter"]),
                     QueryWorkloadStat.occurrences > 0,
+                    *self._org_conds(QueryWorkloadStat),
                 )
                 .order_by(QueryWorkloadStat.occurrences.desc())
                 .limit(2000)
@@ -1118,6 +1153,7 @@ class SemanticStore:
                 .filter(
                     SemanticGuideline.is_deleted == False,  # noqa: E712
                     SemanticGuideline.is_enabled.is_(True),
+                    *self._org_conds(SemanticGuideline),
                 )
                 .order_by(SemanticGuideline.kind.asc(), SemanticGuideline.title.asc())
                 .all()
@@ -1175,6 +1211,39 @@ def _settings() -> Any:
     return settings
 
 
+def _resolve_store_org(db: Session, kb_ids: Sequence[str]) -> tuple[tuple[str, ...], str | None]:
+    """Resolve the tenant org for the requested KB set — FAIL CLOSED.
+
+    Every KB in the scope must belong to exactly one org. KBs from a
+    different org are DROPPED (with a warning), never served: the store is
+    the semantic layer, and a semantic layer that crosses tenants is the
+    worst possible leak because its output looks like ordinary schema
+    knowledge. Rows derived from a KB carry that KB's org (migration 100
+    aligned the legacy rows; the indexer stamps writes), so the returned
+    ``org_id`` is also used to filter every store read.
+    """
+    from app.models.knowledge_base import KnowledgeBase
+
+    ids = [k for k in kb_ids if k]
+    if not ids:
+        return (), None
+    rows = db.query(KnowledgeBase).filter(KnowledgeBase.id.in_(ids)).all()
+    if not rows:
+        # Nothing resolvable — serve an empty scope rather than trusting
+        # ids that do not exist.
+        return (), None
+    org = rows[0].org_id
+    kept = [kb.id for kb in rows if (kb.org_id or "") == (org or "")]
+    dropped = [kb.id for kb in rows if (kb.org_id or "") != (org or "")]
+    if dropped:
+        logger.warning(
+            "semantic_store: dropped %d KB(s) from other org(s) — org=%s "
+            "kept=%d dropped=%d",
+            len(dropped), org, len(kept), len(dropped),
+        )
+    return tuple(kept), org or None
+
+
 def get_semantic_store(
     db: Session,
     kb_ids: Sequence[str] | None = None,
@@ -1188,7 +1257,10 @@ def get_semantic_store(
     """
     if not getattr(_settings(), "SEMANTIC_STORE_ENABLED", True):
         return SemanticStore(db, [], project_id=project_id, agent_id=agent_id)
-    return SemanticStore(db, kb_ids, project_id=project_id, agent_id=agent_id)
+    kb_ids, org_id = _resolve_store_org(db, kb_ids or [])
+    return SemanticStore(
+        db, kb_ids, project_id=project_id, agent_id=agent_id, org_id=org_id,
+    )
 
 
 def format_retrieval_hint(

@@ -95,6 +95,18 @@ def save_plan(
     try:
         from app.models.query_plan_memory import QueryPlanMemory
 
+        # Multi-tenant stamping (audit fix): the plan inherits the org of the
+        # source it answers from, so org-scoped reads in the semantic store
+        # see it and other orgs never do. Best-effort — a failed lookup must
+        # never prevent the plan from being saved.
+        _org = None
+        try:
+            from app.models.knowledge_base import KnowledgeBase
+
+            _kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
+            _org = getattr(_kb, "org_id", None)
+        except Exception:
+            _org = None
         sig = question_signature(question)
         row = (
             db.query(QueryPlanMemory)
@@ -117,9 +129,13 @@ def save_plan(
                 hits=0,
                 verified_at=now,
             )
+            if _org:
+                row.org_id = _org
             db.add(row)
         else:
             row.question = (question or "")[:2000]
+            if _org:
+                row.org_id = _org
             row.tables = list(tables or [])
             row.sql = sql
             row.dimensions = list(dimensions or [])

@@ -82,14 +82,28 @@ def _load_catalog_facts(
     db: Session, kb_id: str, names: list[str], project_id: str | None
 ) -> dict[str, dict]:
     """table_name -> {role, grain, authority} for the selected tables."""
+    from app.models.knowledge_base import KnowledgeBase
     from app.models.knowledge_catalog import KBTableMeta, ProjectCatalogOverlay
 
     facts: dict[str, dict] = {}
     if not names:
         return facts
+    org_id = (
+        getattr(
+            db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first(),
+            "org_id",
+            None,
+        )
+        if kb_id
+        else None
+    )
     metas = (
         db.query(KBTableMeta)
-        .filter(KBTableMeta.kb_id == kb_id, KBTableMeta.table_name.in_(names))
+        .filter(
+            KBTableMeta.kb_id == kb_id,
+            KBTableMeta.table_name.in_(names),
+            *([KBTableMeta.org_id == org_id] if org_id else []),
+        )
         .all()
     )
     meta_by_name = {m.table_name: m for m in metas}
@@ -101,6 +115,7 @@ def _load_catalog_facts(
             .filter(
                 ProjectCatalogOverlay.project_id == project_id,
                 ProjectCatalogOverlay.table_name.in_(names),
+                *([ProjectCatalogOverlay.org_id == org_id] if org_id else []),
             )
             .all()
         )
@@ -123,7 +138,7 @@ def _load_catalog_facts(
 
 
 def _approved_metric_binding_tables(
-    db: Session, project_id: str | None, question: str
+    db: Session, project_id: str | None, question: str, kb_id: str | None = None
 ) -> list[tuple[str, str]]:
     """Approved metrics the question actually names → (metric, base_table).
 
@@ -132,8 +147,20 @@ def _approved_metric_binding_tables(
     """
     if not project_id or not question:
         return []
+    from app.models.knowledge_base import KnowledgeBase
     from app.models.knowledge_catalog import ProjectMetric
 
+    org_id = (
+        getattr(
+            db.query(KnowledgeBase)
+            .filter(KnowledgeBase.id == kb_id)
+            .first(),
+            "org_id",
+            None,
+        )
+        if kb_id
+        else None
+    )
     ql = question.lower()
     hits: list[tuple[str, str]] = []
     for metric in (
@@ -141,6 +168,7 @@ def _approved_metric_binding_tables(
         .filter(
             ProjectMetric.project_id == project_id,
             ProjectMetric.status == "approved",
+            *([ProjectMetric.org_id == org_id] if org_id else []),
         )
         .all()
     ):
@@ -190,7 +218,7 @@ def verify_sources(
     # ── 1. Metric-binding auto-repair ──────────────────────────────────────
     # An approved metric the question names is the project's ground truth for
     # that number; its bound base table MUST be in the plan.
-    bound = _approved_metric_binding_tables(db, project_id, question)
+    bound = _approved_metric_binding_tables(db, project_id, question, kb_id=kb_id)
     selected_set = set(names)
     for metric_name, table in bound:
         if table not in selected_set and table not in res.added_tables:

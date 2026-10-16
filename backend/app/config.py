@@ -468,6 +468,12 @@ class Settings(BaseSettings):
     # only from pre-aggregated sources.
     NL2SQL_SOURCE_VERIFICATION_ENABLED: bool = True
 
+    # NL2SQL_LINEAGE_ENABLED: extract per-execution data lineage (tables,
+    # columns, join pairs, filter columns) from the SQL that actually ran —
+    # attached to the answer result ("lineage" key) and persisted on
+    # nl2sql_query_logs.lineage_json. services/db/lineage.py.
+    NL2SQL_LINEAGE_ENABLED: bool = True
+
     # ── Answer figure provenance (routers/agents.py guardrail) ───────────
     # Every SQL-side guard stops at the rows. This checks the PROSE: each
     # data figure in the final answer must exist in the turn's tool results

@@ -190,6 +190,11 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
             await asyncio.to_thread(_persist_relations, db, kb.id, tables)
             if settings.CATALOG_JOIN_EDGES_ENABLED:
                 await asyncio.to_thread(_persist_join_edges, db, kb.id, tables)
+            # Multi-tenant stamping (audit fix): every derived row carries the
+            # owning KB's org_id, so the semantic stores can enforce org
+            # filters without hiding data. One idempotent alignment pass per
+            # index (covers re-indexed rows created before org discipline).
+            await asyncio.to_thread(_align_org, db, kb.id, getattr(kb, "org_id", None))
             await _bootstrap_metrics(db, kb, tables)
             # Lifecycle: ENRICHED — structure + descriptions + relations persisted.
             src_readiness.set_state(
@@ -359,6 +364,40 @@ async def _bootstrap_metrics(
 
 
 # ── internals ──────────────────────────────────────────────────────────────
+
+def _align_org(db: Session, kb_id: str, org_id: str | None) -> None:
+    """Stamp the owning org onto every catalog row derived from this KB.
+
+    Dialect-safe ORM updates (no UPDATE..FROM); idempotent per index run.
+    """
+    if not org_id:
+        return
+    try:
+        meta_ids = [
+            mid for (mid,) in (
+                db.query(KBTableMeta.id)
+                .filter(KBTableMeta.kb_id == kb_id)
+                .all()
+            )
+        ]
+        db.query(KBTableMeta).filter(KBTableMeta.kb_id == kb_id).update(
+            {"org_id": org_id}, synchronize_session=False
+        )
+        if meta_ids:
+            db.query(KBColumnMeta).filter(
+                KBColumnMeta.table_meta_id.in_(meta_ids)
+            ).update({"org_id": org_id}, synchronize_session=False)
+        db.query(KBTableRelation).filter(KBTableRelation.kb_id == kb_id).update(
+            {"org_id": org_id}, synchronize_session=False
+        )
+        db.commit()
+    except Exception:
+        logger.exception("catalog_indexer: org alignment failed kb=%s", kb_id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
 
 def _set_status(db: Session, kb: KnowledgeBase, status: str) -> None:
     kb.catalog_status = status

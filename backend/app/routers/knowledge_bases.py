@@ -734,6 +734,22 @@ async def delete_kb_guideline(
     return {"ok": True}
 
 
+@router.post("/{kb_id}/business-rules/extract")
+async def extract_kb_business_rules(
+    app_id: str, kb_id: str, body: dict = None, db: Session = Depends(get_db)
+):
+    """Business Rule Extractor (P-SV2): mine business rules from the catalog —
+    decode comments, measured enums, data windows, grain, view semantics —
+    and stage them as `[auto]` SemanticGuidelines (disabled by default; a
+    human enables them via the guidelines PATCH endpoint). Idempotent."""
+    from app.services.db.business_rule_extractor import sync_business_rules
+
+    body = body or {}
+    enable = bool(body.get("enable", False))
+    report = sync_business_rules(db, kb_id, enable=enable)
+    return report
+
+
 @router.get("/{kb_id}/catalog/tables")
 async def list_catalog_tables(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     """Return the catalog tables discovered for a database KnowledgeBase.

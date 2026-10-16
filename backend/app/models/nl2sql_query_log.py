@@ -21,6 +21,10 @@ class Nl2sqlQueryLog(TimestampedBase):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     generated_sql: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sql_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    # P-SV2: data lineage of the statement that ran — {tables, columns,
+    # join_tables, filter_columns, dialect} (services/db/lineage.py). NULL =
+    # not computed; never an empty dict pretending "no lineage".
+    lineage_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     validation_errors: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     policy_decision: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     row_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

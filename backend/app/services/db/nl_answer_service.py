@@ -1952,6 +1952,15 @@ class NLAnswerService:
             # "genuinely zero" answer apart from an "answered from the wrong
             # window" one.
             "provenance": _crv,
+            # P-SV2 lineage: tables/columns the FINAL statement actually read
+            # (sqlglot-extracted; None when not computable). Present when
+            # NL2SQL_LINEAGE_ENABLED. Callers surface it as "figures come
+            # from ..." provenance; a discarded SQL candidate never leaks in.
+            **(
+                {"lineage": _lineage}
+                if (_lineage := _safe_lineage(exec_result.get("sql"), self._db, kb_id))
+                is not None else {}
+            ),
             # Coverage self-check (2026-09-22): snapshots from entity-sibling
             # tables the primary SQL never touched. Present only when the
             # self-check ran and produced them; callers (agent narration,
@@ -2959,6 +2968,21 @@ def _validate_against_policy(sql: str, resolved_policy, kb_id: str):
     return validate(sql, allowed_tables=allowed, block_tables=blocked)
 
 
+def _safe_lineage(sql: str | None, db, kb_id: str) -> dict | None:
+    """Lineage of the statement that actually ran (best-effort, flag-gated)."""
+    if not getattr(settings, "NL2SQL_LINEAGE_ENABLED", True):
+        return None
+    try:
+        from app.models.knowledge_base import KnowledgeBase
+        from app.services.db.lineage import extract_lineage
+
+        kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
+        return extract_lineage(sql, kb)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("lineage extraction failed (non-fatal): %s", e)
+        return None
+
+
 def _shadow_validate_and_log(
     kb_id: str,
     question: str,
@@ -2991,11 +3015,38 @@ def _shadow_validate_and_log(
         logger.debug("nl2sql shadow validation failed (non-fatal): %s", e)
         return
 
+    # P-SV2 lineage: extract from the statement that actually ran, so the log
+    # row can answer "which tables/columns produced this" without re-running.
+    _lineage = None
+    if getattr(settings, "NL2SQL_LINEAGE_ENABLED", True):
+        try:
+            from app.services.db.lineage import extract_lineage
+
+            _lineage = extract_lineage(sql)
+        except Exception as e:
+            logger.debug("lineage extraction failed (non-fatal): %s", e)
+
     try:
         import uuid as _uuid
 
         from app.database import SessionLocal
+        from app.models.knowledge_base import KnowledgeBase
         from app.models.nl2sql_query_log import Nl2sqlQueryLog
+
+        # Multi-tenant stamping (audit fix): the log inherits the org of the
+        # datasource it ran against. Best-effort — never blocks the log row.
+        _org = None
+        try:
+            _s0 = SessionLocal()
+            try:
+                _kb = _s0.query(KnowledgeBase).filter(
+                    KnowledgeBase.id == kb_id
+                ).first()
+                _org = getattr(_kb, "org_id", None)
+            finally:
+                _s0.close()
+        except Exception:
+            _org = None
 
         shadow_ok = bool(res.get("is_valid")) and bool(res.get("policy_allowed", True))
         if shadow_ok and live_success:
@@ -3016,6 +3067,8 @@ def _shadow_validate_and_log(
                     question=question,
                     generated_sql=sql or None,
                     sql_hash=res.get("sql_hash") or None,
+                    lineage_json=_lineage,
+                    org_id=_org,
                     validation_errors=(
                         {"errors": res.get("errors")} if res.get("errors") else None
                     ),
