@@ -145,3 +145,71 @@ registry.register(
     emoji="🗂️",
     max_result_size_chars=40_000,
 )
+
+
+# ── P3-6: escalation-with-context ────────────────────────────────────────
+
+async def _escalate_to_human(args: dict, db: Session, user_id: str | None,
+                             context: dict | None = None) -> dict:
+    summary = str(args.get("summary") or "").strip()
+    if not summary:
+        return {"success": False,
+                "reason": "summary is required — what does the human need to know?"}
+    from app.services.ontology.escalation import create_escalation
+
+    return create_escalation(
+        db, _org_id(context), summary,
+        context=args.get("context"),
+        conversation_id=(context or {}).get("conversation_id")
+        or args.get("conversation_id"),
+        agent_name=(context or {}).get("agent_name")
+        or args.get("agent_name"),
+        object_name=args.get("object_name"),
+        sentiment=args.get("sentiment"),
+        created_by=user_id,
+    )
+
+
+ESCALATE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "escalate_to_human",
+        "description": (
+            "Hand off to a human WITH full context. Call when: the user "
+            "is frustrated or asks for a human; the issue cannot be "
+            "resolved with your tools; or the matter is high-stakes and "
+            "needs human judgment. Package WHAT the user needs, what you "
+            "already tried, and any data you collected — never leave a "
+            "dead end."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string",
+                            "description": "What the human needs to know and do."},
+                "context": {
+                    "type": "object",
+                    "description": "What you tried, collected data, relevant IDs.",
+                },
+                "object_name": {"type": "string",
+                                "description": "Optional ontology object (e.g. Ticket) whose linked domains get notified."},
+                "sentiment": {"type": "string",
+                              "description": "frustrated | asks_human | stuck | negative."},
+                "conversation_id": {"type": "string"},
+                "agent_name": {"type": "string"},
+            },
+            "required": ["summary"],
+        },
+    },
+}
+
+registry.register(
+    name="escalate_to_human",
+    schema=ESCALATE_SCHEMA,
+    handler=_escalate_to_human,
+    category="data",
+    toolset="data",
+    description="Structured human handoff with full context transfer.",
+    emoji="🙋",
+    max_result_size_chars=20_000,
+)

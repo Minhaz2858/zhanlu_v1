@@ -544,6 +544,42 @@ def delete_sensor(
     return {"id": sensor_id, "status": "deleted"}
 
 
+class ResolveBody(BaseModel):
+    note: str | None = None
+
+
+@router.get("/ontology/escalations")
+def list_escalations_ep(
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P3-6: the human handoff queue (escalations with full context)."""
+    from app.services.ontology.escalation import list_escalations
+
+    org = getattr(user, "org_id", None) or "default-org"
+    return list_escalations(db, org, status=status)
+
+
+@router.post("/ontology/escalations/{escalation_id}/resolve")
+def resolve_escalation_ep(
+    escalation_id: str,
+    body: ResolveBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """P3-6: close the loop — a human resolved the handoff (audited)."""
+    from app.services.ontology.escalation import resolve_escalation
+
+    try:
+        return resolve_escalation(
+            db, admin.org_id, escalation_id,
+            resolved_by=getattr(admin, "id", None), note=body.note,
+        )
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
 @router.post("/ontology/actions/{action_id}/execute-approved")
 def execute_approved_ontology_action(
     action_id: str,
