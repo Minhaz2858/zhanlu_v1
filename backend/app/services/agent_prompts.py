@@ -2451,6 +2451,19 @@ def get_system_prompt(
     if _grounding:
         prompt = prompt + _grounding
 
+    # P3-6b: sentiment auto-escalation signal — embedding-based, fails
+    # open, advisory only. The agent self-reports frustration via
+    # escalate_to_human; this is the safety net when it misses the tone.
+    try:
+        from app.services.escalation_sentiment import (
+            escalation_nudge_for_message,
+        )
+        _nudge = escalation_nudge_for_message(user_message)
+        if _nudge:
+            prompt = prompt + _nudge
+    except Exception:  # noqa: BLE001 — never break chat on sentiment
+        pass
+
     _log_prompt_token_budget(agent_name, prompt)
 
     return prompt

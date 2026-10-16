@@ -37,3 +37,5 @@ class ProcurementPoDraft(TimestampedBase):
                                         default="approved")
     approval_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     extras_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # P3-12: 'po' | 'quote' — quotes reuse the same approval-gated pipeline
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="po")
