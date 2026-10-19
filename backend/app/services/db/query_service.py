@@ -140,6 +140,7 @@ class QueryService:
 
         t0 = time.time()
         collation_healed = False
+        syntax_healed = False
         with get_connector(kb) as conn:
             # +1 to PROVE truncation (see docstring).
             try:
@@ -148,35 +149,50 @@ class QueryService:
                 )
                 executed_sql = str(getattr(conn, "last_executed_sql", "") or sql)
             except Exception as exc:
-                # ── Collation self-healing (2026-10-10) ──
-                # Cross-table joins over columns with mismatched collations
-                # fail at the database (MySQL ER 1267) before returning rows.
-                # Heal the statement's join predicates with CONVERT(col USING
-                # <charset>) and retry ONCE. Anything else re-raises.
+                # ── Self-healing stage (one attempt per error class) ──
+                # 1. Collation heal (2026-10-10): MySQL ER 1267 — rewrite
+                #    cross-table join predicates with CONVERT(col USING
+                #    <charset>) and retry ONCE.
+                # 2. Syntax heal (2026-10-19): MySQL ER 1064 caused by a
+                #    reserved-word alias (measured live: ``AS lines``) —
+                #    quote the aliases the ENGINE blamed (near-text) plus
+                #    every other reserved-word alias, retry ONCE.
+                # Anything else re-raises.
                 from app.config import settings as _hs
                 from app.services.db import collation_heal as _ch
+                from app.services.db import syntax_heal as _sh
 
-                if not (
+                healed = None
+                healed_kind = None
+                if (
                     getattr(_hs, "COLLATION_HEAL_ENABLED", True)
                     and _ch.is_collation_error(exc)
                 ):
-                    raise
-                healed = _ch.heal_join_collations(
-                    sql, (kb.db_type or "mysql").lower(),
-                    charset=getattr(_hs, "COLLATION_TARGET_CHARSET", "utf8mb4"),
-                )
+                    healed = _ch.heal_join_collations(
+                        sql, (kb.db_type or "mysql").lower(),
+                        charset=getattr(_hs, "COLLATION_TARGET_CHARSET", "utf8mb4"),
+                    )
+                    healed_kind = "collation"
+                if healed is None and getattr(
+                    _hs, "SQL_SYNTAX_HEAL_ENABLED", True
+                ):
+                    healed = _sh.heal_syntax(
+                        sql, exc, (kb.db_type or "").lower()
+                    )
+                    healed_kind = "syntax"
                 if not healed or healed == sql:
                     raise
                 logger.warning(
-                    "query_service: collation mismatch on KB %s (%s) — "
-                    "retrying with healed join predicates",
-                    kb_id, exc,
+                    "query_service: %s self-heal on KB %s (%s) — retrying "
+                    "with healed statement",
+                    healed_kind, kb_id, str(exc)[:160],
                 )
                 fetched = conn.execute(
                     healed, params=params, max_rows=row_cap + 1, timeout_s=timeout_cap
                 )
                 executed_sql = str(getattr(conn, "last_executed_sql", "") or healed)
-                collation_healed = True
+                collation_healed = healed_kind == "collation"
+                syntax_healed = healed_kind == "syntax"
             # The connectors differ in what they hand the driver — MySQL prepends
             # the MAX_EXECUTION_TIME hint, Oracle wraps with ROWNUM, Postgres and
             # the rest execute the authored text verbatim — so the executable
@@ -185,6 +201,8 @@ class QueryService:
         validation = dict(self.last_validation or {})
         if collation_healed:
             validation["collation_healed"] = True
+        if syntax_healed:
+            validation["syntax_healed"] = True
         if validation:
             # Provenance: the authored statement was validated above; the statement
             # the driver actually received is read back from the connector.

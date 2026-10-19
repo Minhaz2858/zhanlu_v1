@@ -504,6 +504,13 @@ class Settings(BaseSettings):
     # statement's cross-table join predicates are rewritten with
     # CONVERT(col USING <charset>) and retried once (MySQL family).
     COLLATION_HEAL_ENABLED: bool = True
+
+    # SQL_SYNTAX_HEAL_ENABLED: MySQL-family ER 1064 self-heal for reserved-
+    # word aliases (measured live: the SQL model wrote "COUNT(*) AS lines" —
+    # `lines` is reserved in MySQL 8). services/db/syntax_heal.py quotes the
+    # aliases the ENGINE blamed (error near-text) plus every other
+    # reserved-word alias, then the statement is retried once.
+    SQL_SYNTAX_HEAL_ENABLED: bool = True
     COLLATION_TARGET_CHARSET: str = "utf8mb4"
 
     # P3: Prompt caching -- apply explicit cache_control markers for providers
