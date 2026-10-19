@@ -414,7 +414,7 @@ class NLAnswerService:
         #     agent relays them through its existing clarify channel and the
         #     user's answer narrows the next turn.
         _planning: dict | None = None
-        if getattr(settings, "NL2SQL_PLANNER_ENABLED", False):
+        if getattr(settings, "NL2SQL_PLANNER_ENABLED", True):
             try:
                 from app.services.db import nl2sql_planner
 
@@ -1771,7 +1771,7 @@ class NLAnswerService:
         # corpus only ever learns answers that passed the deterministic
         # checks. Deduped by sql_hash, capped per datasource, flag-gated.
         if (
-            getattr(settings, "NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED", False)
+            getattr(settings, "NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED", True)
             and _contract.ok
             and exec_rows
             and not _degenerate

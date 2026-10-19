@@ -111,7 +111,8 @@ class QSqlExampleService:
         an unchecked answer would make the platform consistently wrong.
 
         Rules:
-        * Flag-gated (NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED, default False).
+        * Flag-gated (NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED, default True —
+          activated 2026-10-09).
         * Dedupe: one (datasource, sql_hash) row — a re-asked question does
           not multiply examples.
         * A manually authored row is never overwritten by this path.
@@ -121,7 +122,7 @@ class QSqlExampleService:
         Returns True when a new example row was inserted. Never raises.
         """
         try:
-            if not getattr(settings, "NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED", False):
+            if not getattr(settings, "NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED", True):
                 return False
             if not (question or "").strip() or not (sql or "").strip():
                 return False

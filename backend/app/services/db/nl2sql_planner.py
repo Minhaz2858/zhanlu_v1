@@ -25,8 +25,9 @@ follow-up turn in the same conversation starts from what was already resolved
 
 Design rules this module never breaks:
 
-* **Flag-gated and fail-soft.** ``NL2SQL_PLANNER_ENABLED`` (default False);
-  any error degrades to "no plan" — byte-identical legacy behaviour.
+* **Flag-gated and fail-soft.** ``NL2SQL_PLANNER_ENABLED`` (default True —
+  activated 2026-10-09); any error degrades to "no plan" — byte-identical
+  legacy behaviour.
 * **One bounded LLM call** (temperature 0, small max_tokens, JSON in / JSON
   out). The planner never queries data and never writes SQL.
 * **Grounded, not creative.** Metric/entity candidates come from the semantic
@@ -413,7 +414,7 @@ async def plan_question(
             "carried_state": bool,   # turn state was available and used
         }
     """
-    if not getattr(settings, "NL2SQL_PLANNER_ENABLED", False):
+    if not getattr(settings, "NL2SQL_PLANNER_ENABLED", True):
         return None
     if db is None or not (question or "").strip() or not kb_id:
         return None
