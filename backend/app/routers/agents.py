@@ -206,6 +206,12 @@ from app.services.goal_contract import (  # noqa: E402 — Goal-Contract closed 
     is_metadata_only_rows,
     pending_action_phrase,
 )
+# P-SV3: query tools whose outright failures feed the phase-lock remediation
+# criterion (mirrors goal_contract.QUERY_TOOLS minus ask_data_agent — its
+# soft-failures carry no structured engine error).
+_GC_QUERY_TOOLS = frozenset(
+    {"execute_query", "run_sql", "query_database", "execute_sql"}
+)
 from app.services.turn_planner import (  # noqa: E402 — deterministic turn plan
     build_turn_plan,
     mark_final_step_completed,
@@ -13554,6 +13560,7 @@ async def add_message_stream(
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
         _cad_verify_nudges = 0  # CAD verify-on-stop nudges this turn (cap 1)
+        _cad_dfm_nudges = 0  # CAD DFM-on-pass nudges this turn (cap 1)
         _fusion_clear_count = 0  # fusion360_clear calls this turn (cap 1 — see _invoke_v3)
         _fusion_readonly_streak = 0  # consecutive read-only fusion calls (info/ping) — spin guard
         _fusion_lookup_streak = 0  # consecutive fusion360_lookup_api calls — doc-read runaway guard
@@ -15226,6 +15233,41 @@ async def add_message_stream(
                         conversation_id, iteration,
                     )
                     continue
+                # ── CAD DFM-on-pass nudge (2026-10-19, roadmap P1) ─────────
+                # After verify_build PASSES, a manufacturability check is the
+                # next quality gate: "did we build the spec" ≠ "can it be
+                # made". If the model verified but never ran fusion360_dfm_check,
+                # nudge it once (cap 1/turn, same clear+preserve pattern).
+                if (
+                    _is_fusion_agent
+                    and _tool_was_called(tool_calls_for_frontend, "fusion360_verify_build")
+                    and not _tool_was_called(tool_calls_for_frontend, "fusion360_dfm_check")
+                    and _cad_dfm_nudges < 1
+                ):
+                    _cad_dfm_nudges += 1
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your build verified, but manufacturability was never "
+                            "checked. Call fusion360_dfm_check NOW with process "
+                            "(\"cnc\" or \"sheet_metal\"), material, and measurements "
+                            "you actually measured (fusion360_probe / physical "
+                            "properties — pocket depths, corner radii, wall thickness, "
+                            "hole-to-edge distances, bend radius vs thickness). If it "
+                            "returns issues with auto_fixable repairs, apply them and "
+                            "re-verify before finishing."
+                        ),
+                    })
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "cad_dfm"})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.info(
+                        "v3 stream: CAD DFM-on-pass nudge injected (conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+                    continue
                 _verify_nudge = build_verify_on_stop_nudge(llm_messages, attempts=_verify_attempts)
                 if _verify_nudge and _contract is not None and _contract.forces_used >= min(
                     _effective_verify_nudge_max(effective_llm), settings.GOAL_CONTRACT_MAX_FORCES,
@@ -15583,6 +15625,28 @@ async def add_message_stream(
                             "data collection (conv=%s, iter=%d)",
                             _plc["tool_name"], conversation_id, iteration,
                         )
+                        # P-SV3: arm the remediation criterion — the exit
+                        # checker will force REPAIR of the failed datasets
+                        # (with the engine's own errors named) instead of a
+                        # generic pending-action nudge.
+                        if _contract is not None:
+                            _contract.record_phase_lock_block(_plc["tool_name"])
+                        _pl_failed_txt = ""
+                        if _contract is not None and _contract.failed_datasets:
+                            _pl_parts = [
+                                (
+                                    f'"{fd.get("label") or "unnamed"}" '
+                                    f'({fd["error"][:140]})'
+                                    if fd.get("error")
+                                    else f'"{fd.get("label") or "unnamed"}"'
+                                )
+                                for fd in _contract.failed_datasets[:5]
+                            ]
+                            _pl_failed_txt = (
+                                " Datasets that failed to collect: "
+                                + "; ".join(_pl_parts)
+                                + ". Fix and re-run those queries first."
+                            )
                         llm_messages.append({
                             "role": "assistant",
                             "content": None,
@@ -15605,6 +15669,7 @@ async def add_message_stream(
                                 "execute_query), WAIT for the returned rows, then build "
                                 "the deliverable from those rows. Never fabricate data "
                                 "or build on empty results."
+                                + _pl_failed_txt
                             ),
                         })
                         tool_calls_for_frontend.append({
@@ -16976,6 +17041,19 @@ async def add_message_stream(
                                 continue
                             _sub_rows = _sub.get("rows") or []
                             if not _sub_rows:
+                                # P-SV3: a FAILED sub-query (engine error, no
+                                # rows) is evidence the phase-lock remediation
+                                # criterion needs — record it so the forced
+                                # iterations name the actual broken dataset.
+                                if _contract is not None and (
+                                    _sub.get("success") is False
+                                    or _sub.get("error")
+                                ):
+                                    _contract.record_failed_dataset(
+                                        label=str(_sub.get("label") or "") or None,
+                                        error=_sub.get("error"),
+                                        tool_call_id=tool_call_id,
+                                    )
                                 continue
                             _dataset_inputs.append({
                                 "rows": _sub_rows,
@@ -17325,6 +17403,22 @@ async def add_message_stream(
                     _contract.record_tool_executed(
                         tool_name, result_quality=_query_quality
                     )
+                    # P-SV3: a top-level query tool that FAILED outright
+                    # (error payload, no rows) is failed-dataset evidence for
+                    # the phase-lock remediation criterion. fetch_data_batch
+                    # is excluded — its per-sub failures are recorded above.
+                    if (
+                        tool_name != "fetch_data_batch"
+                        and tool_name in _GC_QUERY_TOOLS
+                        and not result.get("success")
+                        and result.get("error")
+                        and not _query_rows
+                    ):
+                        _contract.record_failed_dataset(
+                            label=tool_name,
+                            error=result.get("error"),
+                            tool_call_id=tool_call_id,
+                        )
                     # Query results: only a real rows payload counts (a bare
                     # sql key without rows must not register a zero-row event).
                     if isinstance(result.get("rows"), list):

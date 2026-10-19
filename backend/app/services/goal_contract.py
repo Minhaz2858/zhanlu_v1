@@ -435,6 +435,13 @@ class GoalContract:
     metadata_only_events: int = 0
     artifacts_produced: List[dict] = field(default_factory=list)
     collected_datasets: List[dict] = field(default_factory=list)
+    # P-SV3 phase-lock remediation: datasets whose collection FAILED (with
+    # the engine's own error) and deliverable builds the phase-lock gate
+    # blocked. Together they arm a first-priority remediation criterion so
+    # forced iterations REPAIR the failed data instead of answering from
+    # partials or re-attempting the blocked build.
+    failed_datasets: List[dict] = field(default_factory=list)
+    phase_lock_blocks: List[str] = field(default_factory=list)
     pending_action_phrase: Optional[str] = None
     forces_used: int = 0
     max_forces: int = 3
@@ -514,6 +521,31 @@ class GoalContract:
         deliverable. Latest query wins on synthesis (later queries refine
         earlier ones); ordering matches record order."""
         return [d for d in self.collected_datasets if d.get("purpose") == "answer"]
+
+    def record_failed_dataset(
+        self,
+        label: Optional[str],
+        error: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+    ) -> None:
+        """Record a dataset whose collection FAILED (engine error attached).
+
+        Deduped on (label, error) so batch retries don't inflate the list;
+        the error text is truncated — evidence, not a log dump.
+        """
+        entry = {
+            "label": str(label or "") or None,
+            "error": str(error or "")[:300],
+            "tool_call_id": tool_call_id,
+        }
+        if entry not in self.failed_datasets:
+            self.failed_datasets.append(entry)
+
+    def record_phase_lock_block(self, blocked_tool: Optional[str]) -> None:
+        """Record that the deliverable phase-lock blocked a build call."""
+        tool = str(blocked_tool or "")
+        if tool and tool not in self.phase_lock_blocks:
+            self.phase_lock_blocks.append(tool)
 
     def has_answer_data(self) -> bool:
         """True when >= 1 answer-tagged dataset carries usable rows."""
@@ -687,6 +719,41 @@ class GoalContract:
         )
         return [UnmetCriterion("metadata_only", msg, force_tool=tool)]
 
+    def _unmet_phase_lock_remediation(self, tools: set) -> List[UnmetCriterion]:
+        """The deliverable was BLOCKED on incomplete data, and it still is
+        (no answer-tagged dataset has usable rows). Force REPAIR of the
+        failed datasets — not a rebuild attempt (the gate would block it
+        again) and not "answer with existing data" (the partials are exactly
+        what made the gate refuse). Auto-resolves the moment repaired data
+        lands as an answer-tagged dataset.
+        """
+        if not self.phase_lock_blocks or self.has_answer_data():
+            return []
+        tool = self._pick_query_tool(tools)
+        if not tool:
+            return []
+        blocked = ", ".join(self.phase_lock_blocks)
+        parts: List[str] = []
+        for fd in self.failed_datasets[:5]:
+            err = f' — error: {fd["error"]}' if fd.get("error") else ""
+            parts.append(f'"{fd.get("label") or "unnamed dataset"}"{err}')
+        failed_txt = (
+            " Failed dataset(s): " + "; ".join(parts) + "." if parts else ""
+        )
+        msg = (
+            f"Your {blocked} call was BLOCKED because the data it needs was "
+            f"never successfully collected (no answer-tagged dataset has "
+            f"usable rows).{failed_txt} Re-run the failed dataset query with "
+            f"the `{tool}` tool, FIXING the reported error — a SQL/syntax "
+            f"error must be corrected, not retried verbatim. Only after the "
+            f"rows come back may you re-attempt {blocked}."
+        )
+        return [
+            UnmetCriterion(
+                "phase_lock_remediation", msg, force_tool=tool,
+            )
+        ]
+
     def _unmet_pending_action(self, tools: set) -> List[UnmetCriterion]:
         if not self.pending_action_phrase:
             return []
@@ -714,13 +781,14 @@ class GoalContract:
         return []
 
     def unmet(self, granted_tools: Optional[Iterable[str]] = None) -> List[UnmetCriterion]:
-        """Unmet criteria at exit, priority: deliverable > zero-rows >
-        metadata-only > pending.  Returns [] when the force budget is
-        exhausted."""
+        """Unmet criteria at exit, priority: phase-lock remediation >
+        deliverable > zero-rows > metadata-only > pending.  Returns [] when
+        the force budget is exhausted."""
         if self.forces_used >= self.max_forces:
             return []
         tools = set(granted_tools or [])
         for fn in (
+            self._unmet_phase_lock_remediation,
             self._unmet_deliverable,
             self._unmet_zero_rows,
             self._unmet_metadata_only,
