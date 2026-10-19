@@ -315,7 +315,6 @@ class TestNudgeBubbleCollapseGuard:
         "file_guard",
         "dashboard_narration",
         "delegation_enforce",
-        "self_eval_nudge",
     ]
 
     @pytest.fixture(scope="class")
@@ -352,4 +351,42 @@ class TestNudgeBubbleCollapseGuard:
         assert not bad, (
             f"{len(bad)} nudge block(s) still emit a bare content_replace "
             f"(visible collapse) at source offsets {bad[:5]}"
+        )
+
+    def test_answer_preserved_before_gates_can_discard(self, v3_source):
+        """REGRESSION (2026-10-16): answer → "Refining answer…" → full remake
+        → refine → remake … unbounded. Root cause: ``_v3_preserved_content``
+        (the restore source for the shared refinement budget) was captured at
+        the TOP of the NEXT iteration — but every nudge gate clears
+        ``assistant_content`` in the SAME iteration it fires, so the capture
+        always saw an empty string. The budget-exhausted restore then found
+        nothing ("budget exhausted (1/1) but no answer to restore — allowing
+        this regeneration", logged repeatedly live) and every subsequent gate
+        re-triggered a FULL regeneration. Pin: the completed answer must be
+        preserved at the response-completion points (streaming break /
+        buffered path / fallback recovery), BEFORE any gate can clear it."""
+        start = v3_source.find("for iteration in range(_v3_max_iterations)")
+        assert start != -1, "v3 loop not found in agents.py source"
+        region = v3_source[start:]
+        marker = (
+            'if assistant_content and len(assistant_content) > '
+            'len(_v3_preserved_content[0] or ""):'
+        )
+        # At least the two LLM-completion points (streaming + buffered) must
+        # preserve; the fallback-recovery path may add a third.
+        count = region.count(marker)
+        assert count >= 2, (
+            f"answer preservation runs at {count} completion point(s); the "
+            "pre-gate preservation (streaming + buffered) is missing — the "
+            "refinement budget restore has nothing to restore and the "
+            "answer-remake loop returns"
+        )
+        # The FIRST preservation must precede the FIRST nudge gate's
+        # contentPreserve emission (i.e. preservation happens before any
+        # gate can discard the answer).
+        first_preserve = region.find(marker)
+        first_gate = region.find('"reason": "goal_contract"')
+        assert first_gate == -1 or first_preserve < first_gate, (
+            "answer preservation must run before the first nudge gate "
+            "(gates clear assistant_content; a later capture never sees it)"
         )

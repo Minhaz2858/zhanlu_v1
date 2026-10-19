@@ -14687,6 +14687,18 @@ async def add_message_stream(
                                         "call(s) (conv=%s)",
                                         len(raw_tool_calls), conversation_id,
                                     )
+                            # 2026-10-16: preserve the completed answer BEFORE
+                            # the post-answer gates can discard it. The old
+                            # capture ran at the top of the NEXT iteration —
+                            # after every gate had already cleared
+                            # assistant_content — so the refinement-budget
+                            # restore always found nothing and each gate
+                            # re-triggered a full regeneration (the visible
+                            # answer → "Refining answer…" → remake → refine →
+                            # remake loop). Grow-only: keep the longest answer
+                            # produced this turn.
+                            if assistant_content and len(assistant_content) > len(_v3_preserved_content[0] or ""):
+                                _v3_preserved_content[0] = assistant_content
                             break  # stream completed cleanly
                         except Exception as stream_err:
                             ce_stream = classify_api_error(stream_err)
@@ -14721,6 +14733,12 @@ async def add_message_stream(
                     assistant_content = llm_response.get("content", "")
                     raw_tool_calls = llm_response.get("tool_calls", [])
                     final_reasoning = llm_response.get("reasoning", "") or ""
+                    # 2026-10-16: pre-gate preservation (see the streaming
+                    # path for the full rationale) — the refinement-budget
+                    # restore must have the completed answer available even
+                    # when a gate discards it in this same iteration.
+                    if assistant_content and len(assistant_content) > len(_v3_preserved_content[0] or ""):
+                        _v3_preserved_content[0] = assistant_content
             except Exception as e:
                 # P1.1: Structured error classification
                 ce = classify_api_error(e)
@@ -14759,6 +14777,10 @@ async def add_message_stream(
                         logger.info("stream: fallback to model %s succeeded", _fb_model)
                         if assistant_content:
                             content_streamed = True
+                            # 2026-10-16: pre-gate preservation (see the
+                            # streaming path for the full rationale).
+                            if len(assistant_content) > len(_v3_preserved_content[0] or ""):
+                                _v3_preserved_content[0] = assistant_content
                             if _nudge_replacement_pending:
                                 # D1/D2: full-content emit must replace the
                                 # bubble when a re-synthesis is in flight.
