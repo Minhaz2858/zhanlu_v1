@@ -136,6 +136,9 @@ from app.services.prompt_caching import apply_cache_control
 # fallback text live in ``app.services.agent_loop``; we re-import them here
 # so every existing call site and ``from app.routers.agents import ...``
 # consumer keeps working unchanged.
+from app.services.agent_loop.answer_dedupe import (  # noqa: E402 — duplicate-answer guard
+    collapse_duplicate_tail,
+)
 from app.services.agent_loop import (
     # tool_executor
     emit_tool_progress_while_waiting,
@@ -18638,6 +18641,22 @@ async def add_message_stream(
                     conversation_id, len(accumulated_content), len(_sql_stripped),
                 )
                 accumulated_content = _sql_stripped
+
+        # ── Duplicate-answer guard (2026-10-19) ──────────────────────────
+        # Measured live: the persisted message contained the SAME full
+        # report twice, concatenated with no separator — the user saw the
+        # whole answer rendered twice. Multiple assembly layers (streamed
+        # deltas, forced re-synthesis, post-loop synthesis) each hold a
+        # full copy; whatever duplicated it, collapse an identical repeated
+        # tail ONCE here, before persist + done. A normal answer whose
+        # second half is genuinely different text is never touched
+        # (whitespace-normalized identity + 400-char minimum block).
+        try:
+            accumulated_content, _dup_fired = collapse_duplicate_tail(
+                accumulated_content or ""
+            )
+        except Exception as _dup_err:  # noqa: BLE001 — guard must never break the turn
+            logger.debug("duplicate-answer guard skipped: %s", _dup_err)
 
         # ── Deferred deliverable: single post-loop synthesis + finalize ──
         # Bug 1 fix: cards are built ONCE at the end of the turn, from the
