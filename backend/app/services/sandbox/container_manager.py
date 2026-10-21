@@ -67,6 +67,7 @@ def run_sandbox_container(
     timeout: int = 120,
     memory: str = "1g",
     cpus: str = "1",
+    pids_limit: int = 64,
     env_vars: Optional[dict] = None,
     host_input_dir: Optional[str] = None,
     host_output_dir: Optional[str] = None,
@@ -137,6 +138,8 @@ def run_sandbox_container(
         "--memory", memory,        # Memory limit
         "--cpus", cpus,            # CPU limit
         "--cap-drop", "ALL",       # Drop all capabilities
+        "--security-opt", "no-new-privileges",  # prevent privilege escalation
+        "--pids-limit", str(pids_limit),  # fork-bomb / PID-exhaustion protection
         "--tmpfs", "/tmp:rw,size=256m",  # Writable /tmp
         "-v", f"{mount_input}:/input:ro",   # Input mounted read-only
         "-v", f"{mount_output}:/output:rw", # Output writable

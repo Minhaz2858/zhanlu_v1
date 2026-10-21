@@ -6,6 +6,7 @@ from sqlalchemy import String, Text, Integer, DateTime, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
+from app.services.crypto import decrypt_value, encrypt_value
 
 
 class KnowledgeBase(TimestampedBase):
@@ -29,8 +30,32 @@ class KnowledgeBase(TimestampedBase):
     database_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     schema: Mapped[str | None] = mapped_column(String(255), nullable=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    password: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 2026-10-21 CREDENTIAL-AT-REST (audit E1): the underlying column is
+    # `password`, but access goes through the `password` property below, which
+    # transparently decrypts on read and encrypts (fail-closed) on write, so
+    # plaintext never reaches the database or the API response.
+    _password: Mapped[str | None] = mapped_column("password", String(255), nullable=True)
     api_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    @property
+    def password(self) -> str | None:
+        """Decrypted credential for in-memory use (connections, tests)."""
+        return decrypt_value(self._password) if self._password else None
+
+    @password.setter
+    def password(self, value: str | None) -> None:
+        """Encrypt on write. Fail-closed: a crypto failure refuses the write
+        instead of silently persisting plaintext (fixes the crypto fail-open
+        gap). Already-encrypted values pass through unchanged."""
+        if not value or value.startswith("enc:v1:"):
+            self._password = value
+            return
+        enc = encrypt_value(value)
+        if not enc or not enc.startswith("enc:v1:"):
+            raise RuntimeError(
+                "Refusing to persist KnowledgeBase password: encryption failed"
+            )
+        self._password = enc
 
     # File source fields
     file_type: Mapped[str | None] = mapped_column(String(100), nullable=True)

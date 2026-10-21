@@ -1033,6 +1033,19 @@ class SynexiaFSM:
                         "name": n.name,
                         "node_type": n.node_type,
                         "status": n.status,
+                        # 2026-10-20: carry the real failure reason. Tool-level
+                        # callers (query_database) previously lost WHY the
+                        # pipeline failed — plan_nodes rows had the truth
+                        # ("Can't connect ... timed out", "Model did not
+                        # produce a SQL statement") while observations carried
+                        # neither rows nor errors, so the tool misreported a
+                        # network outage as a binding failure. Additive key;
+                        # extra data in a summary dict is safe for consumers.
+                        **(
+                            {"error": str(getattr(n, "error", "") or "")[:300]}
+                            if n.status == "failed"
+                            else {}
+                        ),
                     }
                     for n in self.plan.nodes
                 ],

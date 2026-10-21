@@ -802,39 +802,43 @@ def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None, endpoint=Non
                 error_message=f"Data source query failed: {e}",
             )
 
-    # ── Fallback: no bound KBs → schema-only SQL generation ────────────
+    # ── No bound KBs → there is NO data source to execute against ──────────
+    # 2026-10-21 HONESTY FIX (audit B1): the legacy schema-only path generated
+    # SQL text and recorded success=True, which let the agent narrate
+    # unexecuted SQL as a real answer ("0 rows" for a query that was never
+    # run — the same class of bug fixed in query_database_tool). A node with
+    # no bound data source cannot answer a data question; report it as a
+    # FAILURE with an honest hint to bind a project/data source, never as a
+    # successful observation. We still generate best-effort SQL for the
+    # detail/transparency but mark success=False and never claim execution.
     service = DataSnapshotService(db)
     schema_desc = (node.inputs or {}).get("schema_description", "No schema available")
+    generated_sql = None
     try:
         nl2sql_result = service.nl2sql(question=question, schema_description=schema_desc)
+        if isinstance(nl2sql_result, dict) and nl2sql_result.get("valid"):
+            generated_sql = nl2sql_result.get("sql")
+    except Exception as e:  # noqa: BLE001 — non-fatal; we report the binding failure
+        logger.debug("schema-only SQL gen failed (non-fatal): %s", e)
 
-        if not nl2sql_result["valid"]:
-            return _record_observation(
-                db, execution, node,
-                observation_type="nl2sql",
-                tool_name="nl2sql",
-                request_args={"question": question},
-                success=False,
-                error_message=f"SQL validation failed: {nl2sql_result['errors']}",
-            )
-
-        return _record_observation(
-            db, execution, node,
-            observation_type="nl2sql",
-            tool_name="nl2sql",
-            request_args={"question": question, "sql": nl2sql_result["sql"]},
-            result_data=nl2sql_result,
-            result_text=f"Generated SQL: {nl2sql_result['sql']}",
-            success=True,
-        )
-    except Exception as e:
-        return _record_observation(
-            db, execution, node,
-            observation_type="nl2sql",
-            tool_name="nl2sql",
-            success=False,
-            error_message=str(e),
-        )
+    return _record_observation(
+        db, execution, node,
+        observation_type="nl2sql",
+        tool_name="nl2sql",
+        request_args={"question": question},
+        result_data={"sql": generated_sql, "executed": False},
+        result_text=(
+            "No bound data source reached this node — the query was NOT "
+            "executed against any database. Bind a project or data source "
+            "so the live NL2SQL pipeline can run."
+        ),
+        success=False,
+        error_message=(
+            "NL2SQL node had no bound data source (bound_kb_ids empty); "
+            "schema-only SQL was generated but never executed, so this is a "
+            "pipeline/binding failure, not empty data."
+        ),
+    )
 
 
 def _get_previous_observation(

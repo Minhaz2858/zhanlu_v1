@@ -2494,14 +2494,50 @@ export default function Chat() {
               m.id === aiMsg.id ? { ...m, content: fullContent } : m
             ));
           }
+        } else if (evt.type === 'paused') {
+          // 2026-10-21 audit C1: the backend emits `paused` when a turn is
+          // awaiting a decision/approval. Without a handler the desktop chat
+          // left an empty assistant bubble and never showed the approval UI.
+          // Populate from the authoritative conversation content if present,
+          // else a localized placeholder, and clear streaming state so the
+          // input unblocks.
+          const _pConv = evt.conversation?.messages || [];
+          const _pLast = [..._pConv].reverse().find((m) => m?.role === 'assistant');
+          const _pContent = (typeof evt.content === 'string' && evt.content.trim())
+            ? evt.content
+            : (_pLast?.content && String(_pLast.content).trim()
+              ? _pLast.content
+              : (lang === 'en'
+                ? 'The agent is awaiting your approval to continue.'
+                : '智能体正在等待您的批准以继续。'));
+          fullContent = _pContent;
+          if (Array.isArray(_pLast?.tool_calls) && _pLast.tool_calls.length) {
+            toolCalls = _pLast.tool_calls;
+          }
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id
+                ? { ...m, content: fullContent, tool_calls: toolCalls, refining: false, paused: true }
+                : m
+            ));
+            stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, toolCalls, loading: false });
+          }
+          if (gen === genRef.current) stream.complete();
+          if (gen === genRef.current) setStreamingId(null);
         } else if (evt.type === 'done') {
-          // Defensive merge (2026-08-20): the `done` event's content is the
-          // server-authoritative message, but in multi-iteration turns it can
-          // carry only the LAST iteration's prose. Prefer the LONGER of
-          // (locally-streamed delta accumulation, server content) so earlier
-          // iterations' text (tables, findings, recommendations) is never
-          // wiped from the visible bubble.
-          if (typeof evt.content === 'string' && evt.content.length > (fullContent?.length || 0)) {
+          // 2026-10-19 FIX (answer duplicated): the old "whichever text is
+          // longer wins" merge let a client-side double
+          // append of an earlier iteration's deltas WIN over the server's
+          // authoritative text, and the final ChatMessage.update then wrote
+          // the doubled copy over the server's correct row (measured live:
+          // server done=4,994 chars, client persisted 9,949 = report twice).
+          // The server's done content is the post-dedupe, post-hygiene join
+          // of ALL iteration prose (multi-iter capture, agents.py post-loop)
+          // — it is a superset of anything the client streamed, minus
+          // intentional nudge-discarded rewrites. Server content wins
+          // whenever it is non-empty; keep the local accumulation only as a
+          // fallback for degenerate/aborted streams.
+          if (typeof evt.content === 'string' && evt.content.trim()) {
             fullContent = evt.content;
           }
           // The done event carries the authoritative assistant message
@@ -2548,7 +2584,15 @@ export default function Chat() {
                 : m
             ));
             // Persist final content so it survives page navigation
-            stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, toolCalls, loading: false });
+            // 2026-10-21 audit C1: never persist an empty assistant bubble —
+            // a 0-byte row survives a refresh as a blank card. Fall back to a
+            // localized placeholder when the turn genuinely produced nothing.
+            const _finalContent = fullContent && String(fullContent).trim()
+              ? fullContent
+              : (lang === 'en'
+                ? 'The agent did not return a response. Please retry.'
+                : '智能体未返回内容，请重试。');
+            stream.updatePendingMessage(sid, { id: aiMsg.id, content: _finalContent, toolCalls, loading: false });
             // P2 (conversational dashboards): scan the freshly-pushed
             // tool_calls for a completed dashboard tool. Completed live
             // dashboards are surfaced as first-class artifacts, sharing the

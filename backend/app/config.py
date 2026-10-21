@@ -305,6 +305,22 @@ class Settings(BaseSettings):
     TURN_WALL_CLOCK_CAP_S: float = 600.0
     # Report/data/document turns run multi-query pipelines; was 180s literal.
     REPORT_TURN_WALL_CLOCK_CAP_S: float = 900.0
+    # ── Dynamic turn complexity (2026-10-20, ReAct-style budget) ─────────
+    # TURN_COMPLEXITY_ENABLED: classify each turn's intention (quick lookup /
+    # standard analysis / deep multi-part analysis) and scale the wall-clock
+    # target to it, replacing the fixed general/report caps for ordinary chat
+    # turns. CRITICAL PROPERTY (user mandate: "big data must not be cut off"):
+    # the cap never truncates work mid-flight — when it is reached, the loop
+    # may EXTEND itself (up to TURN_WALL_MAX_EXTENSIONS times) as long as the
+    # last iteration made NEW progress (a tool call with arguments not used
+    # before this turn); only a stagnant loop hands over to post-loop
+    # synthesis. Dashboard/CAD builds keep their own long caps.
+    TURN_COMPLEXITY_ENABLED: bool = True
+    TURN_WALL_TARGET_QUICK_S: float = 100.0
+    TURN_WALL_TARGET_STANDARD_S: float = 180.0
+    TURN_WALL_TARGET_DEEP_S: float = 330.0
+    TURN_WALL_MAX_EXTENSIONS: int = 2
+    TURN_WALL_EXTENSION_S: float = 90.0
     # Forced-synthesis LLM call (empty/weak answer rescue). Was 60s literal.
     SYNTHESIS_TIMEOUT_S: float = 180.0
     # NL2SQL planner LLM call: SQL JSON for complex questions was truncated
@@ -428,6 +444,18 @@ class Settings(BaseSettings):
 
     # Delegate Task
     DELEGATE_MAX_ITERATIONS: int = 5
+    # 2026-10-22 P1 (audit: no central tool timeout): hard wall-clock ceiling
+    # for a single delegate_task sub-agent. The audit noted a worst-case >2h
+    # runaway with no wait_for anywhere — this caps total sub-agent time while
+    # still allowing long multi-step subtasks. Partial results are returned on
+    # timeout (truncated=True), not a hard failure.
+    DELEGATE_WALL_SECONDS: float = 600.0
+    # 2026-10-22 P1 (audit): QUERY_TIMEOUT_DISABLED=True drops per-STATEMENT
+    # SQL timeouts for trusted warehouses, but must NOT also lift the
+    # data-agent LOOP wall-clock (it previously became float("inf"), allowing a
+    # single data turn to run unbounded). This keeps a generous-but-finite
+    # ceiling so long aggregations aren't truncated while runaways are bounded.
+    DATA_AGENT_MAX_WALL_SECONDS: float = 600.0
     # 2026-10-10: DELEGATE_TIMEOUT (120) was DEAD CONFIG — defined but never
     # referenced by any enforcement path. Removed to stop it misleading
     # operators into thinking a per-sub-conversation timeout exists.
@@ -484,6 +512,15 @@ class Settings(BaseSettings):
     # Relative tolerance for a match (0.005 = 0.5%), which absorbs rounding
     # ("≈3.46亿" for 345,678,912) without letting a wrong count through.
     ANSWER_GROUNDING_TOLERANCE: float = 0.005
+    # Pass thresholds for the figure-grounding gate (2026-10-20). Requiring
+    # ZERO unverified figures made near-perfect rich reports (100+ figures,
+    # 1-2 legitimate derived numbers the normaliser misses) pay a full
+    # second generation as "refinement" — doubling finalize latency for no
+    # accuracy gain. An answer passes when the residual is small in absolute
+    # terms OR as a share of all figures checked; the residual is logged
+    # loudly, never silent. Materially ungrounded answers still rewrite.
+    ANSWER_GROUNDING_MAX_UNVERIFIED_ABS: int = 3
+    ANSWER_GROUNDING_MAX_UNVERIFIED_RATIO: float = 0.02
 
     # ── Hard execution caps (non-bypassable) ─────────────────────────────
     # The model supplies max_rows/timeout_s on the tool args; these clamp what
@@ -504,6 +541,14 @@ class Settings(BaseSettings):
     # statement's cross-table join predicates are rewritten with
     # CONVERT(col USING <charset>) and retried once (MySQL family).
     COLLATION_HEAL_ENABLED: bool = True
+
+    # Pre-flight datasource reachability probe (query_database tool, 2026-10-20):
+    # a cached 2.5s TCP probe + circuit breaker runs BEFORE the NL2SQL pipeline
+    # so a flapping/unreachable warehouse (live evidence: 10.10.10.49 timed out
+    # through conv c341f610/eaa1bfba, 5-6 min hangs) fails in seconds with an
+    # honest "unreachable — check network/VPN" error instead of burning minutes
+    # of LLM calls against a dead host.
+    NL2SQL_PREFLIGHT_PROBE_ENABLED: bool = True
 
     # SQL_SYNTAX_HEAL_ENABLED: MySQL-family ER 1064 self-heal for reserved-
     # word aliases (measured live: the SQL model wrote "COUNT(*) AS lines" —
@@ -1495,6 +1540,14 @@ class Settings(BaseSettings):
     ENTITY_MASTER_FILTER_ENABLED: bool = False
     TABLE_ROLE_AUTO_CLASSIFY_ENABLED: bool = False
     ENTITY_MASTER_MAX_ROW_COUNT: int = 50000
+
+    # FINAL_ANSWER_DELIVERY_ENABLED (2026-10-20): append the Final Answer
+    # Delivery Contract to every db-bound agent's system prompt — fast
+    # finalization (one synthesis pass), narrative-first answers (never a raw
+    # table/CSV/SQL dump), raw artifacts collapsed by default, fixed answer
+    # structure separating the synthesis from sources. Default ON: this is the
+    # approved UX contract; set False to roll back.
+    FINAL_ANSWER_DELIVERY_ENABLED: bool = True
 
     # ── Business Semantic Layer (Approach A) ────────────────────────────
     # KG_COVERAGE_PROBE_ENABLED: probe min_date/max_date per table at index

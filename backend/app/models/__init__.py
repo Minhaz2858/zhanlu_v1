@@ -30,6 +30,7 @@ from app.models.a2a_task import A2aTask
 from app.models.user_setting import UserSetting
 from app.models.agent_conversation import AgentConversation
 from app.models.cad_build_contract import CadBuildContract
+from app.models.cad_revision import CadRevision
 from app.models.analytics_event import AnalyticsEvent
 from app.models.otp_code import OtpCode
 from app.models.password_reset_token import PasswordResetToken
@@ -157,6 +158,7 @@ __all__ = [
     "UserSetting",
     "AgentConversation",
     "CadBuildContract",
+    "CadRevision",
     "AnalyticsEvent",
     "OtpCode",
     "PasswordResetToken",

@@ -363,6 +363,16 @@ async def _run_sub_agent_inner(
     guard_ctrl = ToolLoopGuardController()
     conv_budget = IterationBudget(max_total=max_iterations)
 
+    # 2026-10-22 P1 (audit: no central tool timeout): hard wall-clock ceiling
+    # so a single delegate_task sub-agent can never run unbounded (the audit
+    # noted a worst-case >2h hang with no wait_for anywhere). On timeout we
+    # break and return whatever response text was accumulated (truncated=True)
+    # rather than failing hard or hanging.
+    import time as _time
+
+    _wall_start = _time.monotonic()
+    _wall_s = float(getattr(settings, "DELEGATE_WALL_SECONDS", 600))
+
     # P1-4 ReWOO light mode: research-shaped sub-agent tasks run as
     # plan→execute→solve (2 LLM calls instead of one per tool step).
     # Fail-open: any failure/invalid plan falls through to ReAct below.
@@ -392,6 +402,14 @@ async def _run_sub_agent_inner(
             logger.info(
                 "Sub-agent (delegate) iteration budget exhausted (%d/%d), breaking",
                 conv_budget.used, conv_budget.max_total,
+            )
+            break
+
+        # P1: hard wall-clock cap (prevents runaway sub-agents).
+        if _time.monotonic() - _wall_start > _wall_s:
+            logger.warning(
+                "Sub-agent (delegate) wall-clock budget exceeded (%.1fs > %.1fs), truncating",
+                _time.monotonic() - _wall_start, _wall_s,
             )
             break
 
@@ -534,13 +552,16 @@ async def _run_sub_agent_inner(
 
     metrics.record_budget(conv_budget.used, conv_budget.max_total)
 
-    # Exceeded max iterations or guardrail halt — return last content
+    # Exceeded max iterations, wall-clock budget, or guardrail halt — return
+    # last content. Flag wall-clock truncation so the parent can re-plan.
+    _wall_exceeded = (_time.monotonic() - _wall_start) > _wall_s
     return {
         "success": True,
         "task": task,
         "response": content or "Sub-agent completed but did not produce a final response.",
         "iterations": max_iterations,
-        "note": "Reached max iterations",
+        "truncated": _wall_exceeded,
+        "note": "Reached max iterations or wall-clock budget",
     }
 
 

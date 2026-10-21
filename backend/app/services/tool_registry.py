@@ -544,15 +544,14 @@ DEFAULT_USER_AGENT_TOOLS: list[str] = [
     "edit_artifact",
     "load_skill_body",
     "Skill",
-    # Self-extension: an agent that can load skills but never author one is
-    # only half autonomous. `skill_manager` writes an LLM-authored SKILL.md
-    # into ~/.zhanlu/skills/<category>/<name>/ and reloads the registry, so a
-    # skill the agent writes on one turn is reusable on the next — no
-    # hardcoded skill name, no code change, no operator. `skills_sync` lets it
-    # pull skills from a configured source repo. Both were previously reserved
-    # for the hardcoded `skill_agent` role, which is exactly the kind of static
-    # per-agent tool list that stops an agent solving a novel task itself.
-    "skill_manager",
+    # 2026-10-21 audit D1: `skill_manager` is intentionally REMOVED from this
+    # broad default. It writes an LLM-authored SKILL.md into the GLOBAL
+    # ~/.zhanlu/skills and reloads the shared registry, which lets any tenant's
+    # agent author a skill that executes in every other tenant's context — a
+    # cross-tenant prompt/code-injection channel. Skill authoring stays
+    # available on the dedicated `skill_agent` role (create_skill/update_skill).
+    # Self-extension for the general user agent is limited to loading existing
+    # skills (the `Skill` tool / `skills_sync`), never authoring new ones.
     "skills_sync",
     "create_dashboard",
     "update_dashboard",

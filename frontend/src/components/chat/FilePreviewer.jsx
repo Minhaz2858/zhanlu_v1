@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Download, FileText, Eye, ExternalLink } from 'lucide-react';
+import { Download, FileText, Eye } from 'lucide-react';
 import DocxBrowserRenderer from './DocxBrowserRenderer';
+import Model3DViewer, { MODEL_EXTS, isModelFile } from './Model3DViewer';
 import { authFetch } from '@/api/authFetch';
 
 const IMG = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'];
@@ -245,6 +246,12 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
         </video>
       </div>
     );
+  }
+
+  // CAD exports (STL / OBJ from fusion360_export_geometry) → interactive
+  // three.js 3D viewer (roadmap P0: models were download-only before).
+  if (MODEL_EXTS.includes(ext) || isModelFile(name)) {
+    return <Model3DViewer url={effectiveUrl} name={name} className={className} />;
   }
 
   // Plain text / data files → iframe (browser renders natively). Falls

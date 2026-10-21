@@ -315,6 +315,10 @@ def _fusion360_make_drawing(args: dict, db, user_id: str | None) -> dict:
     if not isinstance(spec, dict):
         return _bad("spec (object) is required")
 
+    fmt = (args.get("format") or "dxf").lower()
+    if fmt not in ("dxf", "pdf"):
+        return _bad("format must be one of ['dxf', 'pdf']")
+
     title = str(spec.get("title") or "Part")
     views = spec.get("views") or []
     dims = spec.get("dims") or []
@@ -365,14 +369,34 @@ def _fusion360_make_drawing(args: dict, db, user_id: str | None) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    name = (args.get("name") or f"{title.replace(' ', '_')}.dxf").strip()
-    if not name.lower().endswith(".dxf"):
-        name += ".dxf"
-    url, size = _save_file(db, user_id, name, "dxf", dxf_bytes)
+    if fmt == "pdf":
+        # Roadmap P0: quote packages need an embeddable drawing. Render the
+        # same DXF via ezdxf's drawing add-on (matplotlib backend, headless).
+        try:
+            os.environ.setdefault("MPLBACKEND", "Agg")
+            from ezdxf.addons.drawing import matplotlib as _ezmpl
+            pdf_path = tempfile.mktemp(suffix=".pdf")
+            _ezmpl.qsave(doc.modelspace(), pdf_path, bg="#FFFFFF")
+            with open(pdf_path, "rb") as f:
+                out_bytes = f.read()
+            try:
+                os.remove(pdf_path)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as e:  # noqa: BLE001 — rendering is best-effort
+            return _bad(f"PDF rendering failed: {e}")
+    else:
+        out_bytes = dxf_bytes
+
+    name = (args.get("name") or f"{title.replace(' ', '_')}.{fmt}").strip()
+    if not name.lower().endswith(f".{fmt}"):
+        name += f".{fmt}"
+    url, size = _save_file(db, user_id, name, fmt, out_bytes)
     return {
         "success": True,
         "file_url": url,
         "filename": name,
+        "format": fmt,
         "size_bytes": size,
         "views": [v[0] for v in view_meta],
     }
@@ -487,11 +511,12 @@ registry.register(
     name="fusion360_make_drawing",
     schema=_schema(
         "fusion360_make_drawing",
-        "Generate a dimensioned 2D engineering drawing (DXF) from a structured spec. Build the "
+        "Generate a dimensioned 2D engineering drawing from a structured spec. Build the "
         "spec from the dimensions you already know (your tool-call history). "
         "spec.views = [{name, shapes:[{type:'rect'|'circle'|'line'|'polygon', ...}]}], "
         "spec.dims = [{type:'linear', p1:[x,y], p2:[x,y], label, offset}]. "
-        "Returns a download URL to the DXF.",
+        "Returns a download URL to the DXF (default) or PDF (use PDF for quote packages "
+        "and anything a human must review).",
         {
             "spec": {
                 "type": "object",
@@ -501,6 +526,11 @@ registry.register(
                     "\"label\":str,\"offset\":num}]}. Shapes: rect{x,y,w,h}, circle{cx,cy,r}, "
                     "line{x1,y1,x2,y2}, polygon{points:[[x,y],...]}."
                 ),
+            },
+            "format": {
+                "type": "string",
+                "enum": ["dxf", "pdf"],
+                "description": "Output format. Default 'dxf'. Use 'pdf' for human review / quote packages.",
             },
             "name": {
                 "type": "string",

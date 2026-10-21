@@ -3,6 +3,10 @@
 # Environment secrets
 .env
 
+# Per-service env files with real credentials (must never be tracked)
+backend/.env
+.env.production
+
 # MinIO local data
 infra/minio/data/
 

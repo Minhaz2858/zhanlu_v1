@@ -525,6 +525,69 @@ _DYNAMIC_BUDGET_MIN = 4
 _DYNAMIC_BUDGET_MAX = 10
 
 
+def classify_turn_complexity(
+  user_question: str = "",
+  is_automation: bool = False,
+) -> dict:
+  """ReAct-style turn complexity tier (2026-10-20, user mandate: dynamic time
+  by intention and workload — never a fixed timeout).
+
+  Returns {"tier", "wall_target_s", "budget_iters"}:
+  - quick:    one metric, one entity, one lookup ("how much was X") → tight
+              wall target, minimal exploration.
+  - deep:     multi-part / comparative / trend / report-shaped asks ("sales
+              overview by product and customer", "why did revenue drop",
+              "compare … and …") → larger wall target, more iterations.
+  - standard: everything else.
+  Deterministic keyword heuristic — no LLM call, sub-millisecond. The wall
+  target is a SOFT budget: the loop may EXTEND it while it demonstrably makes
+  new progress (see the wall-clock extension in agents.py), and it never
+  truncates an in-flight answer — hitting the cap only moves the loop to
+  synthesis with the data already gathered.
+  """
+  lowered = (user_question or "").lower()
+
+  deep_markers = [
+      # multi-part / multi-dimension
+      " and ", " also ", "both", "by product", "by customer", "by region",
+      "by category", "per product", "per customer", "per region",
+      "breakdown", "split by", "segment", "drill", "dimension",
+      # comparative / temporal
+      "compare", "versus", " vs ", "week over week", "month over month",
+      "yoy", "trend", "why", "reason", "anomaly", "forecast", "outlook",
+      # report-shaped
+      "report", "overview", "summary", "comprehensive", "deep dive",
+      "dashboard", "analysis", "analyze", "analyse",
+  ]
+  quick_markers = [
+      "how much", "how many", "what is", "what was", "count of", "total of",
+      "show me the total", "average", "avg", "latest", "current",
+  ]
+
+  is_deep = any(m in lowered for m in deep_markers)
+  is_quick = (not is_deep) and any(m in lowered for m in quick_markers)
+
+  if is_automation:
+      # No human is waiting interactively; give the full exploration budget.
+      tier = "deep" if is_deep else "standard"
+  elif is_deep:
+      tier = "deep"
+  elif is_quick:
+      tier = "quick"
+  else:
+      tier = "standard"
+
+  return {
+      "tier": tier,
+      "wall_target_s": _TURN_TIER_WALL_S[tier],
+      "budget_iters": _TURN_TIER_ITERS[tier],
+  }
+
+
+_TURN_TIER_WALL_S = {"quick": 100, "standard": 180, "deep": 330}
+_TURN_TIER_ITERS = {"quick": 4, "standard": 6, "deep": 10}
+
+
 def calculate_agent_budget(
   schema_graph_edges: list | None = None,
   user_question: str = "",
@@ -535,6 +598,8 @@ def calculate_agent_budget(
   Base: 4 iterations for simple single-table queries.
   +2 per high-confidence related table (FK or value-overlap >= 0.8).
   +2 if the query implies multi-table intent (dashboard/report/join keywords).
+  +2 for deep complexity tiers (multi-part/comparative/report asks —
+  classify_turn_complexity, 2026-10-20).
   +2 for automation runs (no human available to approve or clarify).
   Returns a value in [_DYNAMIC_BUDGET_MIN, _DYNAMIC_BUDGET_MAX].
   """
@@ -549,6 +614,8 @@ def calculate_agent_budget(
   if user_question:
       lowered = user_question.lower()
       if any(kw in lowered for kw in _MULTI_TABLE_KEYWORDS):
+          budget += 2
+      if classify_turn_complexity(user_question, is_automation)["tier"] == "deep":
           budget += 2
 
   if is_automation:
@@ -2255,6 +2322,61 @@ def workflow_builder_system_prompt() -> str:
     )
 
 
+_FINAL_ANSWER_DELIVERY_BLOCK = """
+
+FINAL ANSWER DELIVERY CONTRACT (HARD RULES — apply to every turn):
+
+1. FINALIZATION TIME BUDGET
+- The user must see the final synthesized answer promptly. Gather data with at
+  most 2-3 tool calls; do NOT re-run a query that already returned usable rows —
+  work with what you have.
+- Write exactly ONE final synthesis pass. Never regenerate, verify, or "polish"
+  the answer after it is written unless a figure is demonstrably wrong.
+- If data is incomplete, ship the best answer now and state the gap in one
+  sentence. Never keep the user waiting for another pass.
+- NEVER surface internal step status in the answer ("Verification failed",
+  "some steps did not complete", step counters, tool names, retry notes).
+
+2. ALWAYS ANSWER WITH A SYNTHESIS — NEVER WITH RAW DATA
+- The final message is a coherent narrative for a business reader: the headline
+  finding first, then the numbers that support it, then 2-3 implications or
+  recommended actions.
+- NEVER end the turn with only a data table, a CSV dump, a column list, or a
+  one-line status like "Pulling the data…". If you have rows, you have enough
+  to write the narrative — write it.
+- NEVER expose pipeline internals in prose: no SQL text, no raw column names
+  as nouns, no "WHERE clause"/"aggregation"/"record count"/tool names.
+  Translate them into business language ("revenue", "order date").
+- Sanity-check the result BEFORE writing: if the result is degenerate (0 or 1
+  rows, a date window the user did not ask for, numbers that contradict the
+  request), say so plainly in one sentence, state what data actually exists,
+  and answer from the correct available data — never narrate a degenerate
+  result as if it were the real answer.
+
+3. RAW ARTIFACTS: HIDDEN BY DEFAULT, ACCESSIBLE ON REQUEST
+- SQL queries, full row sets, and intermediate probe results must NEVER appear
+  inline in the answer body. They belong behind collapsed affordances only
+  (a "View SQL" expander, a collapsed raw-data table, or an attached file) —
+  never pasted into the message text.
+- At most a small labeled preview (5 rows or fewer) inside the answer when a
+  table genuinely helps. Everything else stays collapsed or attached.
+- If the user explicitly asks to see the SQL / raw data / an export, provide
+  it in that turn — but still lead with the one-paragraph synthesis.
+
+4. SEPARATE THE ANSWER FROM ITS SOURCES
+- Structure every data answer exactly like this:
+  1. One-line headline (the answer, not the process).
+  2. Key numbers — the essential figures, formatted for humans.
+  3. What it means — 2-4 bullets of interpretation or implications.
+  4. Notes & gaps — data-quality caveats in user language, only if real.
+  5. Sources line (source name, row counts, freshness) as metadata/chips —
+     never as part of the prose.
+- The narrative must stand alone: a reader who never opens the SQL or the raw
+  table still gets the complete answer. Raw artifacts are evidence, not the
+  deliverable.
+"""
+
+
 def get_system_prompt(
     agent_name: str | None,
     agent_app=None,
@@ -2437,6 +2559,17 @@ def get_system_prompt(
             ENTERPRISE_BUSINESS_DATA_PROTOCOL,
         )
         prompt = prompt + ENTERPRISE_BUSINESS_DATA_PROTOCOL
+
+    # Final Answer Delivery Contract (2026-10-20). Appended to EVERY db-bound
+    # agent: fast finalization (one synthesis pass, no post-answer churn),
+    # narrative-first answers (never a raw table/CSV/SQL dump), raw artifacts
+    # collapsed by default, and a fixed answer structure separating the
+    # synthesis from sources. Default ON — this encodes the approved UX
+    # contract; roll back via FINAL_ANSWER_DELIVERY_ENABLED=False.
+    if _agent_is_db_bound(agent_name, agent_app) and getattr(
+        settings, "FINAL_ANSWER_DELIVERY_ENABLED", True
+    ):
+        prompt = prompt + _FINAL_ANSWER_DELIVERY_BLOCK
 
     # 4. If the user message is time-sensitive, contains a URL, or asks for
     #    a file, append the matching [GROUNDING REQUIRED] / [FILE

@@ -68,6 +68,25 @@ DATA_AGENT_BUDGET_SECONDS = float(
 )
 
 
+def _resolve_data_agent_budget(args: dict, settings) -> float:
+    """Resolve the data-agent loop wall-clock budget in seconds.
+
+    2026-10-22 (audit P1): when ``QUERY_TIMEOUT_DISABLED`` is on and no
+    explicit ``budget_seconds`` is supplied, the per-statement SQL timeouts are
+    intentionally dropped for trusted warehouses — but the *loop* wall-clock
+    must stay bounded. We return ``DATA_AGENT_MAX_WALL_SECONDS`` (generous but
+    finite) rather than ``float("inf")`` so a single data turn can never run
+    unbounded. An explicit ``budget_seconds`` from the orchestrator always
+    wins.
+    """
+    if (
+        getattr(settings, "QUERY_TIMEOUT_DISABLED", False)
+        and "budget_seconds" not in (args or {})
+    ):
+        return float(getattr(settings, "DATA_AGENT_MAX_WALL_SECONDS", 600))
+    return float((args or {}).get("budget_seconds") or DATA_AGENT_BUDGET_SECONDS)
+
+
 # Tools the Data Agent sub-loop is allowed to use.
 _DATA_AGENT_TOOLS = [
     "list_data_sources",
@@ -577,17 +596,14 @@ async def _ask_data_agent(
     # module constant.
     #
     # 2026-10-10 (timeout-policy removal): when QUERY_TIMEOUT_DISABLED is on
-    # and the caller did NOT explicitly pass budget_seconds, the wall-clock
-    # budget is lifted too — a month-scale aggregation on a very large
-    # warehouse legitimately runs past 60s. An explicit budget_seconds from
-    # the orchestrator is still honoured.
-    if (
-        getattr(settings, "QUERY_TIMEOUT_DISABLED", False)
-        and "budget_seconds" not in (args or {})
-    ):
-        _budget_s = float("inf")
-    else:
-        _budget_s = float(args.get("budget_seconds") or DATA_AGENT_BUDGET_SECONDS)
+    # and the caller did NOT explicitly pass budget_seconds, the per-STATEMENT
+    # SQL timeouts are dropped (trusted, resource-bounded warehouses). But the
+    # agent-loop WALL-CLOCK must remain bounded — it previously became
+    # float("inf"), letting a single data turn run unbounded (audit P1). We now
+    # fall back to a generous-but-finite ceiling (DATA_AGENT_MAX_WALL_SECONDS)
+    # instead of infinity. An explicit budget_seconds from the orchestrator is
+    # still honoured.
+    _budget_s = _resolve_data_agent_budget(args, settings)
     # P0: wall-clock + per-phase timing for the delegation.
     _delegation_start = time.monotonic()
     _llm_total_s = 0.0

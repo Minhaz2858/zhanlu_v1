@@ -111,7 +111,31 @@ async def execute_in_sandbox(
             input_package=input_package,
         )
 
-    # --- Fallback: run in subprocess (existing behavior) ---
+    # --- No Docker available ---
+    # 2026-10-21 SECURITY FIX (audit D2): in a PRODUCTION deployment
+    # (SANDBOX_ENABLED=True) a container-runtime outage must NOT silently
+    # degrade to running LLM-generated code on the backend host — that is
+    # remote code execution with backend privileges. Refuse instead. Only
+    # the dev path (SANDBOX_ENABLED=False) keeps the subprocess fallback.
+    from app.config import settings as _sb_settings
+    if getattr(_sb_settings, "SANDBOX_ENABLED", False):
+        logger.error(
+            "Sandbox: Docker unavailable but SANDBOX_ENABLED=True — "
+            "refusing host-fallback code execution (RCE risk)"
+        )
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": (
+                "Sandbox execution unavailable: the container runtime is "
+                "down and host execution is disabled for security."
+            ),
+            "exit_code": -1,
+            "execution_mode": "refused",
+            "runtime": runtime or "python",
+            "duration_ms": None,
+            "output_files": None,
+        }
     logger.info("Docker not available — using subprocess fallback for sandbox execution")
     return await _run_fallback(code=code, runtime=runtime, timeout=effective_timeout)
 
@@ -155,6 +179,7 @@ async def _run_docker(
                 timeout=timeout,
                 memory=limits.memory,
                 cpus=limits.cpus,
+                pids_limit=limits.pids_limit,
                 env_vars=env_vars,
             )
 

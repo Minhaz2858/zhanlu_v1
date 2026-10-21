@@ -228,10 +228,12 @@ export default function MobileChatPage() {
             ));
           }
         } else if (evt.type === 'done') {
-          // Defensive merge (2026-08-20): prefer the LONGER of
-          // (locally-streamed deltas, server `done` content) so multi-iter
-          // turns keep earlier iterations' prose in the visible bubble.
-          if (typeof evt.content === 'string' && evt.content.length > (fullContent?.length || 0)) {
+          // 2026-10-19 FIX (answer duplicated): server done content is the
+          // post-dedupe join of ALL iteration prose — authoritative. The old
+          // "prefer the LONGER" merge let a client-side double append of an
+          // earlier iteration's deltas win and get persisted over the
+          // server's correct row. See Chat.jsx done handler for detail.
+          if (typeof evt.content === 'string' && evt.content.trim()) {
             fullContent = evt.content;
           }
           const convMsgs = evt.conversation?.messages || [];

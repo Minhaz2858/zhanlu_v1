@@ -55,6 +55,7 @@ from app.services.agent_prompts import (
     parse_decision_summary_block,
     strip_decision_summary_block,
     calculate_agent_budget,
+    classify_turn_complexity,
 )
 # execute_tool_with_retry wraps execute_tool with result-level retry +
 # one-shot argument reformulation (Phase B). All ReAct-loop call sites in
@@ -5908,6 +5909,49 @@ _DATA_TOOL_NAMES = frozenset({
 })
 
 
+def _call_sig(tc: dict) -> str:
+    """Stable signature of one tool call (name + canonical arguments).
+
+    Used by the dynamic wall budget: two calls with the same signature are the
+    same exploration; a NEW signature means the loop is genuinely progressing
+    (new table, new window, new breakdown) and deserves more time.
+    """
+    try:
+        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+        name = fn.get("name") or tc.get("name") or ""
+        raw_args = fn.get("arguments") or tc.get("arguments") or "{}"
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args)
+            except Exception:
+                args = {"_raw": raw_args}
+        else:
+            args = raw_args
+        canon = json.dumps(args, sort_keys=True, default=str)[:2000]
+        return f"{name}::{canon}"
+    except Exception:
+        return f"unparsable::{len(repr(tc))}"
+
+
+def _classify_turn_tier(user_question: str, is_automation: bool) -> dict:
+    """Turn complexity tier with settings-backed wall targets.
+
+    Wraps classify_turn_complexity: the tier decision is the deterministic
+    keyword heuristic; the wall targets come from settings so operators can
+    retune latency without a deploy. quick → TURN_WALL_TARGET_QUICK_S etc.
+    """
+    info = classify_turn_complexity(user_question, is_automation)
+    tier = info["tier"]
+    info["wall_target_s"] = float(
+        {
+            "quick": getattr(settings, "TURN_WALL_TARGET_QUICK_S", 100.0),
+            "standard": getattr(settings, "TURN_WALL_TARGET_STANDARD_S", 180.0),
+            "deep": getattr(settings, "TURN_WALL_TARGET_DEEP_S", 330.0),
+        }.get(tier, getattr(settings, "TURN_WALL_TARGET_STANDARD_S", 180.0))
+    )
+    return info
+
+
 def _check_figure_grounding(
     user_message: str,
     assistant_text: str,
@@ -5948,6 +5992,28 @@ def _check_figure_grounding(
         logger.debug("Figure grounding skipped: %s", e)
         return _GuardrailResult("none", "")
     if report.ok:
+        return _GuardrailResult("none", "")
+    # 2026-10-20 LATENCY FIX ("Finalizing your answer" stalls): a rich report
+    # states 100+ figures, and requiring ZERO unverified made near-perfect
+    # answers (104/106 = 98.1% verified — residuals are usually legitimate
+    # derivations the normaliser misses: computed shares, rounded ex-tax
+    # totals) pay a FULL second generation as "refinement". That doubled the
+    # finalize latency for zero accuracy gain — exactly the false-positive
+    # outcome this module's design doc warns against ("a checker that flags
+    # CORRECT output is worse than no checker"). Pass small residuals with a
+    # loud log; only a materially ungrounded answer is rewritten.
+    _max_abs = int(getattr(settings, "ANSWER_GROUNDING_MAX_UNVERIFIED_ABS", 3))
+    _max_ratio = float(getattr(settings, "ANSWER_GROUNDING_MAX_UNVERIFIED_RATIO", 0.02))
+    _ratio = len(report.unverified) / max(1, report.figures_checked)
+    if len(report.unverified) <= _max_abs or _ratio <= _max_ratio:
+        logger.warning(
+            "Figure grounding: %d/%d figure(s) unverified (%s) — within the "
+            "pass threshold (abs<=%d or ratio<=%.0f%%); accepting with log, "
+            "no re-synthesis",
+            len(report.unverified), report.figures_checked,
+            ", ".join(f.raw for f in report.unverified[:6]),
+            _max_abs, _max_ratio * 100,
+        )
         return _GuardrailResult("none", "")
     if guardrail_retries >= MAX_GUARDRAIL_RETRIES:
         log_ungrounded(report)
@@ -6160,6 +6226,18 @@ def _prior_user_turn_was_live_dashboard(
     if not llm_messages or not current_content:
         return False
     cur = (current_content or "").strip().lower()
+    # 2026-10-19 FIX (unwanted artifact creation, conv f9712bfd): the TURN
+    # PLAN block is injected into llm_messages as role="user" (vLLM
+    # rejects mid-list system messages) BEFORE the loop runs. This scan
+    # used to read that scaffold as the user's previous chat message — a
+    # plan whose build step said "Build the live dashboard" made
+    # is_live_dashboard_request(plan_block) True for EVERY data question,
+    # forcing tool_choice=create_fullstack_dashboard on a plain
+    # "give me last week sales overview". The force 400'd on DeepSeek and
+    # the retried model call, still steered by the build-oriented plan,
+    # produced create_artifact(type="html") instead of an inline answer.
+    # Skip all known scaffold prefixes here — only REAL user turns count.
+    _SCAFFOLD_PREFIXES = ("TURN PLAN",)
     for m in reversed(llm_messages):
         if m.get("role") != "user":
             continue
@@ -6168,6 +6246,9 @@ def _prior_user_turn_was_live_dashboard(
             continue
         if content.lower() == cur:
             # The current user message — keep scanning for the PREVIOUS one.
+            continue
+        if any(content.startswith(p) for p in _SCAFFOLD_PREFIXES):
+            # Injected scaffold (turn plan etc.) — not a user turn.
             continue
         return is_live_dashboard_request(content)
     return False
@@ -9641,6 +9722,52 @@ async def confirm_decision(
     }
 
 
+async def _bg_reconcile_messages(conversation_id: str, messages: list) -> None:
+    """Best-effort reconciliation of a failed final commit (audit A6).
+
+    If the turn's assistant message failed to persist (transient DB error
+    at stream end), retry the persist on a fresh session after the stream
+    closes so the user's answer is not silently lost on reload. Never
+    raises — failures are logged only.
+    """
+    import asyncio as _asyncio
+    from app.database import SessionLocal
+
+    await _asyncio.sleep(1.0)  # let the stream fully close first
+    for _attempt in range(3):
+        session = None
+        try:
+            session = SessionLocal()
+            conv = session.query(AgentConversation).filter(
+                AgentConversation.id == conversation_id
+            ).first()
+            if conv is None:
+                logger.warning("bg reconcile: conversation %s gone", conversation_id)
+                return
+            conv.messages = list(messages)
+            conv.updated_date = datetime.now(timezone.utc)
+            session.commit()
+            logger.info(
+                "bg reconcile committed %d messages for %s",
+                len(messages), conversation_id,
+            )
+            return
+        except Exception as _err:  # noqa: BLE001
+            logger.error("bg reconcile attempt %d failed: %s", _attempt + 1, _err)
+            try:
+                if session:
+                    session.rollback()
+            except Exception:
+                pass
+        finally:
+            try:
+                if session:
+                    session.close()
+            except Exception:
+                pass
+        await _asyncio.sleep(2.0 * (_attempt + 1))
+
+
 async def _bg_extract_memories(
     agent_app_id: str,
     messages: list[dict],
@@ -10857,6 +10984,14 @@ async def _stream_llm_with_tools(
                 full_content = ""
                 reasoning_acc = ""
                 tc_buffer.clear()
+                # 2026-10-20 ROOT-CAUSE FIX (duplicate answers): the consumer
+                # has already accumulated (and streamed to the user) whatever
+                # the failed attempt produced before the 400. Resetting only
+                # the GENERATOR's buffers left the consumer appending the
+                # retry's full text on top of the partial first attempt — the
+                # glued no-separator duplication. Announce the reset so every
+                # consumer discards the void attempt before the retry.
+                yield ("content_reset", "")
                 retry_payload = {**base_payload}
                 retry_payload.pop("tool_choice", None)
                 async for ev in _attempt(client, retry_payload):
@@ -10876,6 +11011,10 @@ async def _stream_llm_with_tools(
                     full_content = ""
                     reasoning_acc = ""
                     tc_buffer.clear()
+                    # Same root-cause fix as the injected-client path above:
+                    # announce the reset so the consumer discards the void
+                    # attempt before the retry re-streams.
+                    yield ("content_reset", "")
                     retry_payload = {**base_payload}
                     retry_payload.pop("tool_choice", None)
                     async for ev in _attempt(prod_client, retry_payload):
@@ -13983,15 +14122,44 @@ async def add_message_stream(
                 settings.FUSION_BUILD_WALL_CLOCK_CAP_S
                 if _is_fusion_agent
                 else (
-                    # 2026-10-10: were 180/60s PLAIN LITERALS — the 60s
-                    # general-turn cap was LESS than a single LLM_TIMEOUT_S
-                    # call, so one slow model call killed the whole turn.
-                    # Now settings-backed defaults.
-                    settings.REPORT_TURN_WALL_CLOCK_CAP_S
-                    if (_orch_doc_format or _is_plan_report_or_data)
-                    else settings.TURN_WALL_CLOCK_CAP_S
+                    # 2026-10-20 ReAct-style dynamic budget (user mandate:
+                    # "dynamic time according to user intention and work").
+                    # Ordinary chat turns get a tier target from the question's
+                    # complexity — quick lookup / standard / deep multi-part —
+                    # and the loop can EXTEND the cap while it makes new
+                    # progress (see the wall-clock check in the loop). Explicit
+                    # file deliverables keep the long report cap unchanged.
+                    _classify_turn_tier(
+                        user_content or "", _auto_flag,
+                    )["wall_target_s"]
+                    if (
+                        settings.TURN_COMPLEXITY_ENABLED
+                        and not _orch_doc_format
+                    )
+                    else (
+                        settings.REPORT_TURN_WALL_CLOCK_CAP_S
+                        if _is_plan_report_or_data
+                        else settings.TURN_WALL_CLOCK_CAP_S
+                    )
                 )
             )
+        )
+        # Wall-extension state (progress-aware ReAct loop): signatures of
+        # every tool call issued this turn; when the wall cap is reached the
+        # loop may buy more time ONLY if the latest iteration issued a call
+        # signature not seen before (genuinely new exploration — possibly
+        # against big data). A stagnant loop hands over to post-loop
+        # synthesis immediately.
+        _seen_call_sigs: set = set()
+        _last_iter_call_sigs: list = []
+        _iter_new_sigs: list = []
+        _wall_extensions_used = 0
+        _wall_max_extensions = int(getattr(settings, "TURN_WALL_MAX_EXTENSIONS", 2))
+        _wall_extension_s = float(getattr(settings, "TURN_WALL_EXTENSION_S", 90.0))
+        _turn_tier_info = (
+            _classify_turn_tier(user_content or "", _auto_flag)
+            if settings.TURN_COMPLEXITY_ENABLED
+            else {"tier": "standard"}
         )
         for iteration in range(_v3_max_iterations):
             # ── G1: user-requested mid-turn cancellation ─────────────────
@@ -14046,18 +14214,54 @@ async def add_message_stream(
                         _refinement_used, _refinement_max,
                         conversation_id, iteration,
                     )
-            # 2026-08-25: wall-clock cap. If we've been looping >60s, break
+            # 2026-08-25: wall-clock cap. If we've been looping too long, break
             # and let the post-loop synthesizer produce a final answer from
             # whatever we have. Prevents the "228s connection interrupted"
             # failure mode.
+            # 2026-10-20 ReAct-style dynamic budget: the cap is the TIER
+            # target (quick/standard/deep by user intention), and reaching it
+            # does NOT blindly break the loop. While the loop is making NEW
+            # progress (this iteration issued a tool call with arguments not
+            # seen before this turn — new table, new window, new breakdown,
+            # possibly against big data), it EXTENDS its own budget up to
+            # TURN_WALL_MAX_EXTENSIONS times. A stagnant loop (repeating the
+            # same calls, or already in synthesis) hands over to post-loop
+            # synthesis immediately. The cap never truncates an in-flight
+            # answer; it only decides when to stop asking for MORE data.
             _now = _time_outer.monotonic()
             if _now - _loop_t0 > _LOOP_WALL_CLOCK_CAP_S:
-                logger.warning(
-                    "v3 stream: wall-clock cap %.0fs hit on conv %s (iter=%d) — "
-                    "breaking loop to let post-loop synthesis save the response",
-                    _LOOP_WALL_CLOCK_CAP_S, conversation_id, iteration,
-                )
-                break
+                # _iter_new_sigs was computed at capture time: signatures this
+                # iteration issued that no earlier iteration used.
+                _new_sigs = _iter_new_sigs
+                if (
+                    settings.TURN_COMPLEXITY_ENABLED
+                    and _new_sigs
+                    and _wall_extensions_used < _wall_max_extensions
+                ):
+                    _wall_extensions_used += 1
+                    _LOOP_WALL_CLOCK_CAP_S += _wall_extension_s
+                    logger.info(
+                        "v3 stream: wall target reached on conv %s (tier=%s, "
+                        "iter=%d) but the loop made NEW progress (%d new call "
+                        "signature(s)) — extending budget +%.0fs "
+                        "(extension %d/%d, cap now %.0fs)",
+                        conversation_id, _turn_tier_info.get("tier"),
+                        iteration, len(_new_sigs), _wall_extension_s,
+                        _wall_extensions_used, _wall_max_extensions,
+                        _LOOP_WALL_CLOCK_CAP_S,
+                    )
+                else:
+                    logger.warning(
+                        "v3 stream: wall-clock cap %.0fs hit on conv %s "
+                        "(tier=%s, iter=%d, extensions used %d/%d, new "
+                        "progress this iter: %s) — breaking loop to let "
+                        "post-loop synthesis save the response",
+                        _LOOP_WALL_CLOCK_CAP_S, conversation_id,
+                        _turn_tier_info.get("tier"), iteration,
+                        _wall_extensions_used, _wall_max_extensions,
+                        bool(_new_sigs),
+                    )
+                    break
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
                 logger.info(
@@ -14457,6 +14661,7 @@ async def add_message_stream(
             final_reasoning = ""
             content_streamed = False  # tracks whether deltas were sent live
             _plan_step_seen: set = set()  # 2026-08-25: dedup plan_step_added events
+            _iter_new_sigs = []  # dynamic wall budget: reset per iteration
 
             try:
                 # P1.3: Pre-API deterministic tool result pruning
@@ -14504,6 +14709,19 @@ async def add_message_stream(
                                 temperature=llm_overrides.get("temperature"),
                                 max_tokens=llm_overrides.get("max_tokens"),
                             ):
+                                if ev_type == "content_reset":
+                                    # 2026-10-20: the generator retried after a
+                                    # mid-stream failure (e.g. tool_choice 400)
+                                    # — everything accumulated from the void
+                                    # attempt, here AND in the client's bubble,
+                                    # must be discarded before the retry's
+                                    # tokens arrive, or the retry's text glues
+                                    # onto the partial first attempt (the
+                                    # original duplicate-answer root cause).
+                                    assistant_content = ""
+                                    if content_streamed:
+                                        yield f'data: {json.dumps({"type": "content_replace", "content": ""})}\n\n'
+                                    continue
                                 if ev_type == "delta":
                                     assistant_content += ev_data
                                     content_streamed = True
@@ -14573,6 +14791,19 @@ async def add_message_stream(
                                             assistant_content = cleaned
                                             if not _suppress_chat_deltas:
                                                 yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                    # Progress tracking for the dynamic wall
+                                    # budget: record THIS iteration's call
+                                    # signatures; ones not issued earlier this
+                                    # turn are NEW exploration (extend-worthy),
+                                    # repeats are not.
+                                    _last_iter_call_sigs = [
+                                        _call_sig(tc) for tc in (ev_data or [])
+                                    ]
+                                    _iter_new_sigs = [
+                                        s for s in _last_iter_call_sigs
+                                        if s not in _seen_call_sigs
+                                    ]
+                                    _seen_call_sigs.update(_last_iter_call_sigs)
                                 elif ev_type == "done":
                                     # Generator's authoritative full text — use
                                     # it if we didn't accumulate (defensive; in
@@ -14671,7 +14902,13 @@ async def add_message_stream(
                                         ),
                                         reasoning_effort="minimal",
                                     ):
-                                        if _r_type == "delta":
+                                        if _r_type == "content_reset":
+                                            # Generator retried after a mid-stream
+                                            # failure — discard the void attempt.
+                                            assistant_content = ""
+                                            if content_streamed and not _suppress_chat_deltas:
+                                                yield f'data: {json.dumps({"type": "content_replace", "content": ""})}\n\n'
+                                        elif _r_type == "delta":
                                             assistant_content += _r_data
                                             content_streamed = True
                                             if not _suppress_chat_deltas:
@@ -18378,7 +18615,11 @@ async def add_message_stream(
                             max_tokens=llm_overrides.get("max_tokens"),
                         )
                         async for _ev_type, _ev_data in _rescue_stream:
-                            if _ev_type == "delta":
+                            if _ev_type == "content_reset":
+                                # Generator retried after a mid-stream failure —
+                                # discard the void attempt (root-cause fix).
+                                assistant_content = ""
+                            elif _ev_type == "delta":
                                 assistant_content += _ev_data
                                 content_streamed = True
                                 if not _suppress_chat_deltas:
@@ -19600,22 +19841,43 @@ async def add_message_stream(
         # Offload the final commit to a worker thread: the DB write can take
         # tens of milliseconds (JSON column + flush), and blocking the event
         # loop here starves the SSE heartbeat pings exactly when the client
-        # most needs them (right before `done`). NEVER re-raise on failure —
-        # a persistence error must not abort the stream before `done` is
-        # emitted; the user still sees their answer, and the row can be
-        # reconciled later.
+        # most needs them (right before `done`). A persistence error must not
+        # abort the stream before `done` is emitted — the user still sees
+        # their answer. We retry transient failures, and if the commit still
+        # fails, schedule a background reconciliation so the message is not
+        # silently lost on reload (audit A6: "done emitted but row never
+        # persisted").
         def _final_commit() -> None:
             conv.messages = list(messages)
             db.commit()
 
-        try:
-            await asyncio.to_thread(_final_commit)
-        except Exception as _commit_err:
-            logger.error("v3 stream final commit failed (non-fatal): %s", _commit_err)
+        _committed = False
+        for _attempt in range(3):
             try:
-                db.rollback()
-            except Exception:
-                pass
+                await asyncio.to_thread(_final_commit)
+                _committed = True
+                break
+            except Exception as _commit_err:  # noqa: BLE001
+                logger.error(
+                    "v3 stream final commit attempt %d failed: %s",
+                    _attempt + 1, _commit_err,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        if not _committed:
+            logger.error(
+                "v3 stream final commit FAILED after 3 attempts; scheduling "
+                "background reconciliation of %d messages",
+                len(messages),
+            )
+            try:
+                asyncio.create_task(
+                    _bg_reconcile_messages(conversation_id, list(messages))
+                )
+            except Exception as _sched_err:  # noqa: BLE001
+                logger.error("v3 stream bg reconcile schedule failed: %s", _sched_err)
         # The checkpoint block above may have expunged the instance;
         # re-query a fresh one so the final to_dict() reflects the
         # freshly-committed row.

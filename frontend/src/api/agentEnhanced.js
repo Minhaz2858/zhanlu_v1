@@ -128,9 +128,42 @@ export async function* streamAgentResponse(conversationId, message, signal) {
   const decoder = new TextDecoder();
   let buffer = '';
 
+  // 2026-10-21 WATCHDOG (audit C1): the bare read loop below would hang the
+  // spinner forever if the backend process died mid-stream (no terminal
+  // event, no bytes). The backend sends heartbeats every ~15s during long
+  // tool calls, so any gap longer than this with zero bytes means the
+  // connection is dead — yield a clean error instead of spinning forever.
+  const WATCHDOG_MS = 90000;
+  // Local AbortController so we can cancel the underlying fetch on watchdog
+  // timeout without depending on the caller's signal.
+  const localController = new AbortController();
+
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const readPromise = reader.read();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('stream_watchdog_timeout')), WATCHDOG_MS)
+      );
+      let done = false;
+      let value;
+      try {
+        ({ done, value } = await Promise.race([readPromise, timeoutPromise]));
+      } catch {
+        // No bytes (incl. heartbeat) for WATCHDOG_MS — connection is dead.
+        yield {
+          type: 'error',
+          message:
+            'The connection to the agent was interrupted (no data for 90s). ' +
+            'Please retry your message.',
+        };
+        try {
+          localController.abort();
+          await reader.cancel().catch(() => {});
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });

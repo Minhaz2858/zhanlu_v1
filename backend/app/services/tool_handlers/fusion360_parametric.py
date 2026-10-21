@@ -144,8 +144,90 @@ def _fusion360_declare_spec(args, db, user_id):
         "message": (
             f"Contract {prefix[1:]} stored. Define parameters with the "
             f"'{prefix}_<name>' prefix (e.g. {prefix}_head_width) via "
-            "fusion360_user_parameter, then verify with "
-            "fusion360_verify_build(contract_id='use_last')."
+            "fusion360_user_parameter; change existing ones later with "
+            "fusion360_parameter_set (then re-verify with "
+            "fusion360_verify_build(contract_id='use_last'))."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# fusion360_parameter_set — dedicated UPDATE tool (roadmap P0)
+# ---------------------------------------------------------------------------
+
+def _param_set_code(name: str, expression: str) -> str:
+    """Fusion snippet: UPDATE an existing user parameter's expression.
+
+    Update-only by design: ``itemByName`` returning None prints
+    ``PARAM_SET_ERR not_found`` — unlike ``fusion360_user_parameter`` this
+    tool never creates. The read-back line (``PARAM_SET_OK name=<cm>``) is
+    parsed by the handler into mm.
+    """
+    return (
+        MM
+        + f"p = design.userParameters.itemByName({name!r})\n"
+        + "if p is None:\n"
+        + "    print('PARAM_SET_ERR not_found')\n"
+        + "else:\n"
+        + f"    p.expression = {expression!r}\n"
+        + "    print('PARAM_SET_OK ' + p.name + '=' + str(p.value))\n"
+    )
+
+
+def _fusion360_parameter_set(args, db, user_id):
+    """UPDATE an existing user parameter by name (P0 roadmap foundation).
+
+    Accepts exactly one of ``value_mm`` (number, sent as ``"<v> mm"``) or
+    ``expression`` (a Fusion expression string, e.g. ``40 + stroke_pos * 110``).
+    Update-only: a missing parameter is a retryable error pointing at
+    ``fusion360_params_list``. The new value is read back from Fusion and
+    converted cm → mm so the agent never guesses whether the change landed.
+    """
+    name = str(args.get("name") or "").strip()
+    if not name:
+        return _bad("name is required")
+    if "'" in name:
+        return _bad("name must not contain a single quote")
+    value_mm = args.get("value_mm")
+    expression = args.get("expression")
+    if (value_mm is None) == (expression is None):
+        return _bad("provide exactly one of value_mm or expression")
+    if value_mm is not None:
+        try:
+            v = float(value_mm)
+            if v != v or v in (float("inf"), float("-inf")):
+                raise ValueError("non-finite")
+        except (TypeError, ValueError):
+            return _bad("value_mm must be a finite number")
+        expression = f"{v:g} mm"  # integral floats render as "4", not "4.0"
+    code = _apply_component(
+        _param_set_code(name, str(expression).strip()),
+        args.get("component_index"),
+    )
+    r = _run(code, db)
+    if not r.get("success"):
+        return r
+    stdout = r.get("stdout", "") or ""
+    if "PARAM_SET_ERR not_found" in stdout:
+        return _bad(
+            f"parameter '{name}' not found — call fusion360_params_list to "
+            "see existing parameters (this tool never creates)"
+        )
+    value = None
+    for line in stdout.splitlines():
+        if line.startswith("PARAM_SET_OK "):
+            _, _, raw = line[len("PARAM_SET_OK "):].partition("=")
+            try:
+                value = round(float(raw) * 10.0, 4)  # Fusion internal cm → mm
+            except (TypeError, ValueError):
+                value = raw
+    return {
+        "success": True,
+        "name": name,
+        "value_mm": value,
+        "message": (
+            f"Parameter '{name}' updated to {expression}. Re-run "
+            "fusion360_verify_build to re-validate against the contract."
         ),
     }
 
@@ -231,4 +313,56 @@ registry.register(
     enabled_by_default=True,
     description="Store the design-intent contract for the current build.",
     emoji="📐",
+)
+
+FUSION360_PARAMETER_SET_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "fusion360_parameter_set",
+        "description": (
+            "UPDATE an EXISTING user parameter by name (this tool never "
+            "creates — use fusion360_user_parameter to create). Provide "
+            "exactly one of value_mm (number, e.g. 5) or expression (a "
+            "Fusion expression string, e.g. '40 + stroke_pos * 110'). The "
+            "new value is read back from Fusion in mm. ALWAYS re-run "
+            "fusion360_verify_build after a parameter change — the geometry "
+            "re-solves and the contract must still hold."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Existing user parameter name (see fusion360_params_list).",
+                },
+                "value_mm": {
+                    "type": "number",
+                    "description": "New value in mm (sent to Fusion as '<v> mm'). Mutually exclusive with expression.",
+                },
+                "expression": {
+                    "type": "string",
+                    "description": "Fusion expression string (e.g. '40 + stroke_pos * 110'). Mutually exclusive with value_mm.",
+                },
+                "component_index": {
+                    "type": "integer",
+                    "description": "Optional: update a parameter inside a component (index from fusion360_component) instead of root.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+}
+
+registry.register(
+    name="fusion360_parameter_set",
+    schema=FUSION360_PARAMETER_SET_SCHEMA,
+    handler=_fusion360_parameter_set,
+    category="cad",
+    toolset="cad",
+    enabled_by_default=True,
+    description=(
+        "UPDATE an existing user parameter by name (mm value or expression); "
+        "never creates; parsed mm read-back."
+    ),
+    emoji="✏️",
 )

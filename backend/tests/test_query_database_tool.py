@@ -96,7 +96,13 @@ def test_handler_honest_empty(tmp_path, monkeypatch):
             pass
 
         def run(self, req, *a, **k):
-            return SimpleNamespace(observations=[_mk_obs([])])
+            # 2026-10-20 contract: the live nl2sql branch carries a "data"
+            # key (even empty) — the query WAS executed and matched nothing.
+            return SimpleNamespace(observations=[SimpleNamespace(
+                observation_type="nl2sql", success=True,
+                result_data={"sql": "SELECT 1", "data": [],
+                             "source_name": "warehouse"},
+            )])
 
     import app.services.synexia.fsm as fsm_mod
 

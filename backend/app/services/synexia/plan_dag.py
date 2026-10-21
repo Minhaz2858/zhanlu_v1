@@ -9,6 +9,7 @@ modified before execution (at the GATE state).
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 from uuid import uuid4
@@ -222,6 +223,32 @@ def _build_report_decomposition_steps(task_spec: dict) -> list | None:
             if str(d).strip()
         ]
         if not dimensions:
+            return None
+        # 2026-10-20 LATENCY FIX (measured: a "top 10 customer list" turn ran
+        # FOUR full NL2SQL pipelines — totals + "break down by customer_code"
+        # + "break down by customer_name" + prior-period ≈ 8 minutes — for a
+        # question ONE query answers). The TaskSpec's `dimensions` here were
+        # just the query's GROUP-BY columns, not report dimensions. A ranked
+        # / limited / single-metric ask must use the standard single-node
+        # plan; decomposition is for genuinely multi-dimension reports
+        # ("sales by product AND customer AND region").
+        entities = task_spec.get("entities", {}) or {}
+        group_by = [str(g).strip().lower() for g in (entities.get("group_by") or [])]
+        lowered_q = (task_spec.get("user_message") or "").lower()
+        is_ranked_ask = bool(
+            entities.get("limit")
+            or re.search(r"\btop\s*\d+\b", lowered_q)
+            or re.search(r"\brank", lowered_q)
+        )
+        dims_are_groupby = group_by and all(
+            d.lower() in group_by for d in dimensions
+        )
+        if is_ranked_ask and dims_are_groupby:
+            logger.info(
+                "plan: decomposition skipped — ranked/limited ask whose "
+                "'dimensions' are just the query's group-by columns (%s)",
+                dimensions,
+            )
             return None
         question = (
             task_spec.get("user_message")

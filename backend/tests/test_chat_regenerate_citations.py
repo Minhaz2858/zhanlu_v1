@@ -310,6 +310,7 @@ class TestNudgeBubbleCollapseGuard:
         "empty_answer_force",
         "hallucination_guardrail",
         "cad_verify",
+        "cad_dfm",
         "verify_nudge",
         "pptx_guard",
         "file_guard",

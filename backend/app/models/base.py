@@ -78,4 +78,7 @@ class TimestampedBase(Base):
         # Remove internal fields from API output
         result.pop("is_deleted", None)
         result.pop("password_hash", None)
+        # 2026-10-21 audit E1: never serialize credential columns.
+        result.pop("password", None)
+        result.pop("_password", None)
         return result
