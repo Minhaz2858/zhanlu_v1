@@ -473,12 +473,14 @@ async def _run_sub_agent_inner(
                 results = [json.loads(synthetic_blocked_result(_gd))]
         else:
             async def _exec_one(call):
-                _gd = guard_ctrl.before_call(call["tool_name"], call["tool_args"])
-                if _gd.allows_execution:
-                    return await execute_tool(
-                        call["tool_name"], call["tool_args"], db, user_id,
-                    )
-                return json.loads(synthetic_blocked_result(_gd))
+                from app.database import tool_session
+                with tool_session() as _s:
+                    _gd = guard_ctrl.before_call(call["tool_name"], call["tool_args"])
+                    if _gd.allows_execution:
+                        return await execute_tool(
+                            call["tool_name"], call["tool_args"], _s, user_id,
+                        )
+                    return json.loads(synthetic_blocked_result(_gd))
             raw_results = await asyncio.gather(
                 *[_exec_one(c) for c in parsed_calls],
                 return_exceptions=True,

@@ -89,6 +89,40 @@ def get_db():
         db.close()
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def tool_session():
+    """Per-call DB session for tool execution.
+
+    2026-10-22 (audit: shared SQLAlchemy session across parallel tool paths).
+    A single ``Session`` is NOT concurrency-safe: the agent loop runs parallel
+    tool calls via ``asyncio.gather`` AND wraps sync handlers in
+    ``asyncio.to_thread``. Sharing one session across those coroutines/threads
+    races the connection and can interleave transactions. This yields an
+    isolated ``SessionLocal`` per tool call — each sibling gets its own — so a
+    long tool call can never corrupt a concurrent one's transaction.
+
+    The tenant ``ContextVar`` (app.services.tenant_context) propagates into
+    the child coroutine/thread, so each session's ``after_begin`` listener
+    re-pins RLS correctly — isolation does NOT weaken multi-tenant scoping.
+
+    Handlers commit their own writes, so the nested ``commit`` is a no-op
+    unless a handler forgot to; the guarantee is: commit on success, rollback
+    on error, always close.
+    """
+    s = SessionLocal()
+    try:
+        yield s
+        s.commit()
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
+
+
 class Base(DeclarativeBase):
     """Declarative base for all SQLAlchemy models."""
     pass

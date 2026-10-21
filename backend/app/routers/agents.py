@@ -7887,9 +7887,11 @@ async def add_message(
             # P0: guardrail before_call checks for loop patterns before executing.
             # P2-12: shared core in app.services.agent_loop.tool_executor.
             async def _invoke(tool_name, args):
-                return await execute_tool(
-                    tool_name, args, db, user.id if user else None, context=ctx,
-                )
+                from app.database import tool_session
+                with tool_session() as _s:
+                    return await execute_tool(
+                        tool_name, args, _s, user.id if user else None, context=ctx,
+                    )
 
             results = await execute_tool_batch(
                 parsed_calls,
@@ -9320,7 +9322,11 @@ async def resume_conversation(
 
         # P2-12: shared core in app.services.agent_loop.tool_executor.
         async def _invoke_resume(tool_name, args):
-            return await execute_tool(tool_name, args, db, user.id if user else None, context=ctx)
+            from app.database import tool_session
+            with tool_session() as _s:
+                return await execute_tool(
+                    tool_name, args, _s, user.id if user else None, context=ctx,
+                )
 
         results = await execute_tool_batch(
             parsed_calls,
@@ -16934,10 +16940,12 @@ async def add_message_stream(
                             ),
                             "guardrail": {"code": "clarify_duplicate_block"},
                         }
-                    return await execute_tool(
-                        tool_name, args, db,
-                        user.id if user else None, context=ctx,
-                    )
+                    from app.database import tool_session
+                    with tool_session() as _s:
+                        return await execute_tool(
+                            tool_name, args, _s,
+                            user.id if user else None, context=ctx,
+                        )
 
                 return await execute_tool_batch(
                     parsed_calls,
