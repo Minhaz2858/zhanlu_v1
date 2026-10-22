@@ -80,14 +80,29 @@ class TestShadowHook:
         monkeypatch.setattr(app_db, "SessionLocal", Session)
         nas._shadow_validate_and_log(**kw)
 
-    def test_flag_off_writes_nothing(self, db, monkeypatch):
+    def test_flag_off_still_writes_log(self, db, monkeypatch):
+        """Audit B7 (2026-10-22): the log must populate even with
+        NL2SQL_SHADOW_MODE_ENABLED=False (default deploy) so workload mining
+        and query-log retrieval have data. Shadow *validation* is skipped, so
+        the row carries the real execution outcome + row_count/duration_ms but
+        no validation fields."""
         monkeypatch.setattr(settings, "NL2SQL_SHADOW_MODE_ENABLED", False)
         self._run_hook(
             db, monkeypatch,
             kb_id="kb-1", question="q", sql="SELECT 1",
-            live_success=True,
+            live_success=True, row_count=42, duration_ms=123.4,
         )
-        assert db.query(Nl2sqlQueryLog).count() == 0
+        rows = db.query(Nl2sqlQueryLog).all()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r.outcome == "success"
+        assert r.datasource_id == "kb-1"
+        assert r.row_count == 42
+        assert r.duration_ms is not None
+        # No shadow validation ran -> no validation_errors; policy_decision
+        # defaults to "allowed" (we never denied) rather than a real verdict.
+        assert r.validation_errors is None
+        assert r.policy_decision == "allowed"
 
     def test_valid_sql_live_success_agree_pass(self, db, monkeypatch):
         monkeypatch.setattr(settings, "NL2SQL_SHADOW_MODE_ENABLED", True)
@@ -95,16 +110,19 @@ class TestShadowHook:
             db, monkeypatch,
             kb_id="kb-1", question="how many users?",
             sql="SELECT count(*) FROM users",
-            live_success=True,
+            live_success=True, row_count=7, duration_ms=55.0,
         )
         rows = db.query(Nl2sqlQueryLog).all()
         assert len(rows) == 1
         r = rows[0]
-        assert r.outcome == "shadow"
+        # Recorded the real execution outcome (2026-10-11 fix), not "shadow".
+        assert r.outcome == "success"
         assert r.datasource_id == "kb-1"
         assert "agree_pass" in (r.explanation or "")
         assert r.generated_sql == "SELECT count(*) FROM users"
         assert r.policy_decision == "allowed"
+        assert r.row_count == 7
+        assert r.duration_ms is not None
 
     def test_shadow_rejects_but_live_succeeded_divergence(self, db, monkeypatch):
         """The key risk metric: validator over-rejection of working SQL."""

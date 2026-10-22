@@ -14,26 +14,50 @@ from app.utils.query_parser import parse_query
 from app.utils.sort_parser import parse_sort
 
 
-def _tenant_filters(model):
+def _tenant_filters(model, org_id: str | None = None, app_id: str | None = None):
     """Return org_id/app_id filter conditions for multi-tenant isolation.
 
-    Applied to every query so a tenant can never see another tenant's
-    rows, even if the auth layer is bypassed. Models that lack these
-    columns (pre-migration) are unaffected.
+    2026-10-22 (audit P1: entity API tenant scoping hardcoded ``default-org``):
+    the effective tenant now comes from the *authenticated* principal — the
+    router passes ``user.org_id``/``user.app_id`` — instead of the platform
+    default. For single-tenant (default-org) deployments the caller passes
+    ``default-org``/``default-app``, so behavior is byte-for-byte unchanged.
+    Models without these columns (pre-migration) are unaffected.
+
+    This also closes a client-tampering vector: because ``_filter_data`` strips
+    ``org_id``/``app_id`` from client payloads, the tenant is always assigned
+    server-side from the caller's identity — a client can never scope itself
+    into another org's rows.
     """
     conditions = []
     if hasattr(model, "org_id"):
-        conditions.append(model.org_id == settings.DEFAULT_ORG_ID)
+        conditions.append(model.org_id == (org_id or settings.DEFAULT_ORG_ID))
     if hasattr(model, "app_id"):
-        conditions.append(model.app_id == settings.DEFAULT_APP_ID)
+        conditions.append(model.app_id == (app_id or settings.DEFAULT_APP_ID))
     return conditions
 
 
-def _apply_tenant(model, query):
+def _apply_tenant(model, query, org_id: str | None = None, app_id: str | None = None):
     """Apply tenant isolation filters to a SQLAlchemy query."""
-    for cond in _tenant_filters(model):
+    for cond in _tenant_filters(model, org_id, app_id):
         query = query.filter(cond)
     return query
+
+
+def _stamp_tenant(model, filtered: dict, org_id: str | None, app_id: str | None) -> None:
+    """Server-side tenant stamping for create paths.
+
+    Writes the authenticated org/app onto the row (falling back to the
+    platform default for single-tenant deployments) when the model carries
+    those columns. ``_filter_data`` has already stripped any client-supplied
+    values, so this is the sole authority for tenant assignment. No-op for
+    models without the columns.
+    """
+    valid = _get_valid_fields(model)
+    if "org_id" in valid:
+        filtered["org_id"] = org_id or settings.DEFAULT_ORG_ID
+    if "app_id" in valid:
+        filtered["app_id"] = app_id or settings.DEFAULT_APP_ID
 
 
 def _apply_owner(model, query, owner_id, include_shared=False, db=None):
@@ -320,6 +344,8 @@ def list_records(
     include_shared: bool = False,
     is_admin: bool = False,
     fields: list[str] | None = None,
+    org_id: str | None = None,
+    app_id: str | None = None,
 ) -> list:
     """List non-deleted records with optional sorting and pagination.
 
@@ -329,13 +355,17 @@ def list_records(
     ``include_shared`` (optional) adds rows shared with the owner via
     ResourceShare — only for shareable models (Project, AgentApp) on reads.
 
+    ``org_id``/``app_id`` (optional) scope to the authenticated tenant. The
+    router passes ``user.org_id``/``user.app_id``; when omitted the platform
+    default is used (single-tenant backward compatibility).
+
     ``fields`` (optional) trims each returned row to the requested column
     subset (plus ``id``). List views that only need a few columns — e.g. a
     chat skill picker rendering the full catalog — use this to avoid
     shipping heavy body columns (Tool.skill_md is ~14KB/row) over the wire.
     """
     query = db.query(model).filter(model.is_deleted == False)
-    query = _apply_tenant(model, query)
+    query = _apply_tenant(model, query, org_id, app_id)
     query = _apply_owner(model, query, owner_id,
                          include_shared=include_shared, db=db)
     query = query.order_by(*parse_sort(model, sort))
@@ -355,6 +385,8 @@ def filter_records(
     include_shared: bool = False,
     is_admin: bool = False,
     fields: list[str] | None = None,
+    org_id: str | None = None,
+    app_id: str | None = None,
 ) -> list:
     """Filter non-deleted records by MongoDB-style query with sorting and pagination.
 
@@ -362,9 +394,11 @@ def filter_records(
 
     ``include_shared`` (optional) adds rows shared with the owner via
     ResourceShare — only for shareable models (Project, AgentApp) on reads.
+
+    ``org_id``/``app_id`` (optional) scope to the authenticated tenant.
     """
     query = db.query(model).filter(model.is_deleted == False)
-    query = _apply_tenant(model, query)
+    query = _apply_tenant(model, query, org_id, app_id)
     query = _apply_owner(model, query, owner_id,
                          include_shared=include_shared, db=db)
     conditions = parse_query(model, q)
@@ -396,7 +430,8 @@ def _project_fields(records: list, fields: list[str] | None) -> list:
 
 
 def get_record(model, record_id: str, db: Session, owner_id: str | None = None,
-                include_shared: bool = False, is_admin: bool = False) -> dict | None:
+                include_shared: bool = False, is_admin: bool = False,
+                org_id: str | None = None, app_id: str | None = None) -> dict | None:
     """Get a single non-deleted record by ID.
 
     ``owner_id`` (optional) scopes the lookup to the identity's own rows —
@@ -404,10 +439,12 @@ def get_record(model, record_id: str, db: Session, owner_id: str | None = None,
 
     ``include_shared`` (optional) also matches records shared with the
     owner via ResourceShare — only for shareable models (Project, AgentApp).
+
+    ``org_id``/``app_id`` (optional) scope to the authenticated tenant.
     """
     record = _apply_owner(model, _apply_tenant(model, db.query(model).filter(
         model.id == record_id, model.is_deleted == False
-    )), owner_id, include_shared=include_shared, db=db).first()
+    ), org_id, app_id), owner_id, include_shared=include_shared, db=db).first()
     if not record:
         return None
     result = record.to_dict()
@@ -416,19 +453,28 @@ def get_record(model, record_id: str, db: Session, owner_id: str | None = None,
 
 
 def create_record(model, data: dict, db: Session, created_by_id: str | None = None,
-                  extra_fields: dict | None = None) -> dict:
+                  extra_fields: dict | None = None,
+                  org_id: str | None = None, app_id: str | None = None) -> dict:
     """Create a new record, filtering to valid columns only.
 
     ``extra_fields`` (optional) are injected server-side AFTER filtering
     (they bypass _filter_data).  Used to stamp ``resource_type`` on Project
     and AgentApp from the creator's role without the client needing to know
     about the column.
+
+    ``org_id``/``app_id`` (optional) stamp the authenticated tenant onto the
+    row. Because ``_filter_data`` strips these from client payloads, the
+    tenant is assigned server-side from the caller's identity — a client can
+    never place a row into another org. For single-tenant (default-org)
+    deployments the caller passes the platform default, so existing behavior
+    is preserved.
     """
     filtered = _filter_data(model, data)
     if created_by_id and "created_by_id" in _get_valid_fields(model):
         filtered["created_by_id"] = created_by_id
     if extra_fields:
         filtered.update(extra_fields)
+    _stamp_tenant(model, filtered, org_id, app_id)
 
     record = model(**filtered)
     db.add(record)
@@ -438,11 +484,15 @@ def create_record(model, data: dict, db: Session, created_by_id: str | None = No
 
 
 def update_record(model, record_id: str, data: dict, db: Session, owner_id: str | None = None,
-                  claim_user_id: str | None = None) -> dict | None:
+                  claim_user_id: str | None = None,
+                  org_id: str | None = None, app_id: str | None = None) -> dict | None:
     """Update a non-deleted record by ID.
 
     ``owner_id`` (optional) scopes the update to the identity's own rows —
     a non-owner gets None (record hidden → router returns 404).
+
+    ``org_id``/``app_id`` (optional) scope the lookup to the authenticated
+    tenant so a caller can only update rows in their own tenant.
 
     ``claim_user_id`` (optional, default None) is the authenticated user's
     id used by ``_apply_claim_updates`` to enforce claim semantics on
@@ -454,7 +504,7 @@ def update_record(model, record_id: str, data: dict, db: Session, owner_id: str 
     """
     record = _apply_owner(model, _apply_tenant(model, db.query(model).filter(
         model.id == record_id, model.is_deleted == False
-    )), owner_id).first()
+    ), org_id, app_id), owner_id).first()
     if not record:
         return None
 
@@ -473,11 +523,15 @@ def update_record(model, record_id: str, data: dict, db: Session, owner_id: str 
     return record.to_dict()
 
 
-def soft_delete_record(model, record_id: str, db: Session, owner_id: str | None = None) -> bool:
+def soft_delete_record(model, record_id: str, db: Session, owner_id: str | None = None,
+                       org_id: str | None = None, app_id: str | None = None) -> bool:
     """Soft-delete a record by ID (set is_deleted=True).
 
     ``owner_id`` (optional) scopes the delete to the identity's own rows —
     a non-owner gets False (record hidden → router returns 404).
+
+    ``org_id``/``app_id`` (optional) scope to the authenticated tenant, so a
+    caller can only delete rows in their own tenant (IDOR closure).
 
     If the record has ``is_system=True`` on a model that carries the
     column, the delete is refused and ``False`` is returned. System
@@ -489,7 +543,7 @@ def soft_delete_record(model, record_id: str, db: Session, owner_id: str | None 
     """
     record = _apply_owner(model, _apply_tenant(model, db.query(model).filter(
         model.id == record_id, model.is_deleted == False
-    )), owner_id).first()
+    ), org_id, app_id), owner_id).first()
     if not record:
         return False
     if getattr(record, "is_system", False) is True:
@@ -500,19 +554,22 @@ def soft_delete_record(model, record_id: str, db: Session, owner_id: str | None 
     return True
 
 
-def delete_many_records(model, query_data: dict, db: Session, owner_id: str | None = None) -> int:
+def delete_many_records(model, query_data: dict, db: Session, owner_id: str | None = None,
+                        org_id: str | None = None, app_id: str | None = None) -> int:
     """Soft-delete multiple records matching the query. Returns count deleted.
 
     ``owner_id`` (optional) scopes the delete to the identity's own rows —
     a non-owner's matching rows are invisible (never deleted). This closes
     the mass-IDOR gap on user-scoped entities.
 
+    ``org_id``/``app_id`` (optional) scope to the authenticated tenant.
+
     Records with ``is_system=True`` are silently excluded from the bulk
     delete — they are platform-managed and the count returned does not
     include them. (See soft_delete_record for the full rationale.)
     """
     query = db.query(model).filter(model.is_deleted == False)
-    query = _apply_tenant(model, query)
+    query = _apply_tenant(model, query, org_id, app_id)
     query = _apply_owner(model, query, owner_id)
 
     if query_data and isinstance(query_data, dict):
@@ -535,13 +592,16 @@ def delete_many_records(model, query_data: dict, db: Session, owner_id: str | No
     return count
 
 
-def bulk_create_records(model, data_list: list, db: Session, created_by_id: str | None = None) -> list:
-    """Create multiple records at once."""
+def bulk_create_records(model, data_list: list, db: Session, created_by_id: str | None = None,
+                        org_id: str | None = None, app_id: str | None = None) -> list:
+    """Create multiple records at once. Each row is stamped with the
+    authenticated tenant (see ``create_record`` for the rationale)."""
     results = []
     for data in data_list:
         filtered = _filter_data(model, data)
         if created_by_id and "created_by_id" in _get_valid_fields(model):
             filtered["created_by_id"] = created_by_id
+        _stamp_tenant(model, filtered, org_id, app_id)
         record = model(**filtered)
         db.add(record)
         results.append(record)
@@ -553,11 +613,13 @@ def bulk_create_records(model, data_list: list, db: Session, created_by_id: str 
     return [r.to_dict() for r in results]
 
 
-def bulk_update_records(model, data_list: list, db: Session, owner_id: str | None = None) -> list:
+def bulk_update_records(model, data_list: list, db: Session, owner_id: str | None = None,
+                        org_id: str | None = None, app_id: str | None = None) -> list:
     """Update multiple records by ID. Each item must include 'id'.
 
     ``owner_id`` (optional) scopes each update to the identity's own rows —
     a non-owner's record is skipped (invisible). Closes the mass-IDOR gap.
+    ``org_id``/``app_id`` (optional) scope to the authenticated tenant.
     """
     results = []
     for data in data_list:
@@ -566,7 +628,7 @@ def bulk_update_records(model, data_list: list, db: Session, owner_id: str | Non
             continue
         record = _apply_owner(model, _apply_tenant(model, db.query(model).filter(
             model.id == record_id, model.is_deleted == False
-        )), owner_id).first()
+        ), org_id, app_id), owner_id).first()
         if not record:
             continue
 
@@ -587,14 +649,16 @@ def bulk_update_records(model, data_list: list, db: Session, owner_id: str | Non
 def update_many_records(
     model, query_data: dict, update_data: dict, db: Session,
     owner_id: str | None = None,
+    org_id: str | None = None, app_id: str | None = None,
 ) -> int:
     """Update multiple records matching query. Supports $set, $inc, $push, $pull.
 
     ``owner_id`` scopes writes to the caller's own rows (prevents mass-IDOR).
+    ``org_id``/``app_id`` scope to the authenticated tenant.
     Returns count of updated records.
     """
     query = db.query(model).filter(model.is_deleted == False)
-    query = _apply_tenant(model, query)
+    query = _apply_tenant(model, query, org_id, app_id)
     query = _apply_owner(model, query, owner_id)
     import json
     q_str = json.dumps(query_data) if isinstance(query_data, dict) else query_data
@@ -641,15 +705,17 @@ def update_many_records(
     return count
 
 
-def restore_record(model, record_id: str, db: Session, owner_id: str | None = None) -> dict | None:
+def restore_record(model, record_id: str, db: Session, owner_id: str | None = None,
+                   org_id: str | None = None, app_id: str | None = None) -> dict | None:
     """Restore a soft-deleted record by ID (set is_deleted=False).
 
     ``owner_id`` (optional) scopes the restore to the identity's own rows —
     a non-owner gets None (record hidden → router returns 404).
+    ``org_id``/``app_id`` (optional) scope to the authenticated tenant.
     """
     record = _apply_owner(model, _apply_tenant(model, db.query(model).filter(
         model.id == record_id, model.is_deleted == True
-    )), owner_id).first()
+    ), org_id, app_id), owner_id).first()
     if not record:
         return None
     record.is_deleted = False

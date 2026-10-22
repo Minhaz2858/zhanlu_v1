@@ -241,6 +241,23 @@ def _include_shared(entity_name: str) -> bool:
     return entity_name in _SHAREABLE_ENTITIES
 
 
+def _tenant_ids(user, app_id_url: str | None = None) -> tuple[str, str]:
+    """Resolve the authenticated tenant (org, app) for entity scoping.
+
+    2026-10-22 (audit P1: entity API tenant scoping hardcoded ``default-org``):
+    every entity read/write is now scoped to the *authenticated* principal's
+    org/app instead of the platform default, so a tenant can never read or
+    write another tenant's rows through the generic CRUD API. Single-tenant
+    (default-org) deployments resolve to the default, so behavior is
+    unchanged there. The client-supplied ``app_id`` in the URL is only a
+    fallback when the user has no app binding — the auth principal wins.
+    """
+    from app.config import settings
+    org = getattr(user, "org_id", None) or settings.DEFAULT_ORG_ID
+    app = getattr(user, "app_id", None) or app_id_url or settings.DEFAULT_APP_ID
+    return org, app
+
+
 def _resource_type_for_creator(user) -> str:
     """Derive resource_type from the creator's role (admin→'company', else 'personal')."""
     return "company" if getattr(user, "role", "user") == "admin" else "personal"
@@ -248,6 +265,7 @@ def _resource_type_for_creator(user) -> str:
 
 def _check_shareable_write(
     model_class, entity_name: str, record_id: str, user, db: Session,
+    org_id: str | None = None, app_id: str | None = None,
 ) -> None:
     """Pre-check write access for shareable entities (Project, AgentApp).
 
@@ -268,6 +286,7 @@ def _check_shareable_write(
         model_class, record_id, db,
         owner_id=_owner_id(entity_name, user),
         include_shared=True,
+        org_id=org_id, app_id=app_id,
     )
     if visible is None:
         raise HTTPException(status_code=404, detail=f"{entity_name} not found")
@@ -318,6 +337,7 @@ def register_entity_router(
     ):
         owner = _owner_id(entity_name, user)
         is_admin = getattr(user, "role", "user") == "admin"
+        org_id, app_id = _tenant_ids(user, app_id)
         # Cap unbounded reads: when the caller omits ``limit`` (Base44 SDK
         # default), apply a sane default so a giant table can't be pulled into
         # memory in one shot. Explicit limits are clamped to a hard max.
@@ -333,11 +353,13 @@ def register_entity_router(
                 model_class, db, q, sort, effective_limit, skip,
                 owner_id=owner, include_shared=inc_shared,
                 is_admin=is_admin, fields=field_list,
+                org_id=org_id, app_id=app_id,
             )
         return entity_service.list_records(
             model_class, db, sort, effective_limit, skip,
             owner_id=owner, include_shared=inc_shared,
             is_admin=is_admin, fields=field_list,
+            org_id=org_id, app_id=app_id,
         )
 
     # --- POST / (create) ---
@@ -349,6 +371,7 @@ def register_entity_router(
         user=Depends(get_current_user_required),
     ):
         created_by = user.id if user else None
+        org_id, app_id = _tenant_ids(user, app_id)
         extra = {}
         if _include_shared(entity_name) and user:
             extra["resource_type"] = _resource_type_for_creator(user)
@@ -360,6 +383,7 @@ def register_entity_router(
         result = entity_service.create_record(
             model_class, data, db, created_by,
             extra_fields=extra if extra else None,
+            org_id=org_id, app_id=app_id,
         )
         # Auto-trigger catalog discovery for database KnowledgeBases
         if entity_name == "KnowledgeBase":
@@ -374,7 +398,11 @@ def register_entity_router(
         db: Session = Depends(get_db),
         user=Depends(get_current_user_required),
     ):
-        count = entity_service.delete_many_records(model_class, query_data, db, owner_id=_owner_id(entity_name, user))
+        org_id, app_id = _tenant_ids(user, app_id)
+        count = entity_service.delete_many_records(
+            model_class, query_data, db, owner_id=_owner_id(entity_name, user),
+            org_id=org_id, app_id=app_id,
+        )
         return {"deleted_count": count}
 
     # --- POST /bulk (bulk create) ---
@@ -386,7 +414,11 @@ def register_entity_router(
         user=Depends(get_current_user_required),
     ):
         created_by = user.id if user else None
-        return entity_service.bulk_create_records(model_class, data_list, db, created_by)
+        org_id, app_id = _tenant_ids(user, app_id)
+        return entity_service.bulk_create_records(
+            model_class, data_list, db, created_by,
+            org_id=org_id, app_id=app_id,
+        )
 
     # --- PUT /bulk (bulk update) ---
     @router.put("/bulk")
@@ -396,7 +428,11 @@ def register_entity_router(
         db: Session = Depends(get_db),
         user=Depends(get_current_user_required),
     ):
-        return entity_service.bulk_update_records(model_class, data_list, db, owner_id=_owner_id(entity_name, user))
+        org_id, app_id = _tenant_ids(user, app_id)
+        return entity_service.bulk_update_records(
+            model_class, data_list, db, owner_id=_owner_id(entity_name, user),
+            org_id=org_id, app_id=app_id,
+        )
 
     # --- PATCH /update-many (update many by query) ---
     @router.patch("/update-many")
@@ -408,7 +444,12 @@ def register_entity_router(
     ):
         query_data = body.get("query", {})
         update_data = body.get("data", {})
-        count = entity_service.update_many_records(model_class, query_data, update_data, db, owner_id=_owner_id(entity_name, user))
+        org_id, app_id = _tenant_ids(user, app_id)
+        count = entity_service.update_many_records(
+            model_class, query_data, update_data, db,
+            owner_id=_owner_id(entity_name, user),
+            org_id=org_id, app_id=app_id,
+        )
         return {"updated_count": count}
 
     # --- PUT /{id}/restore (must be before /{id} routes) ---
@@ -419,7 +460,11 @@ def register_entity_router(
         db: Session = Depends(get_db),
         user=Depends(get_current_user_required),
     ):
-        result = entity_service.restore_record(model_class, record_id, db, owner_id=_owner_id(entity_name, user))
+        org_id, app_id = _tenant_ids(user, app_id)
+        result = entity_service.restore_record(
+            model_class, record_id, db, owner_id=_owner_id(entity_name, user),
+            org_id=org_id, app_id=app_id,
+        )
         if not result:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
         return result
@@ -434,11 +479,13 @@ def register_entity_router(
         user=Depends(get_current_user_required),
     ):
         is_admin = getattr(user, "role", "user") == "admin"
+        org_id, app_id = _tenant_ids(user, app_id)
         result = entity_service.get_record(
             model_class, record_id, db,
             owner_id=_owner_id(entity_name, user),
             include_shared=_include_shared(entity_name),
             is_admin=is_admin,
+            org_id=org_id, app_id=app_id,
         )
         if not result:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
@@ -453,7 +500,9 @@ def register_entity_router(
         db: Session = Depends(get_db),
         user=Depends(get_current_user_required),
     ):
-        _check_shareable_write(model_class, entity_name, record_id, user, db)
+        org_id, app_id = _tenant_ids(user, app_id)
+        _check_shareable_write(model_class, entity_name, record_id, user, db,
+                               org_id=org_id, app_id=app_id)
         # Snapshot pre-update record for diff-driven hooks (KnowledgeBase
         # catalog reindex; AutomationTask schedule re-parse). Owner-scoped so a
         # caller can't probe another user's row through the hook.
@@ -462,6 +511,7 @@ def register_entity_router(
             prev = entity_service.get_record(
                 model_class, record_id, db,
                 owner_id=_owner_id(entity_name, user),
+                org_id=org_id, app_id=app_id,
             )
         if entity_name == "AutomationTask" and prev is not None:
             # Re-parse when schedule/timezone changed or cron_expression is
@@ -480,6 +530,7 @@ def register_entity_router(
             model_class, record_id, data, db,
             owner_id=_owner_id(entity_name, user),
             claim_user_id=claim_user_id,
+            org_id=org_id, app_id=app_id,
         )
         if not result:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
@@ -496,8 +547,13 @@ def register_entity_router(
         db: Session = Depends(get_db),
         user=Depends(get_current_user_required),
     ):
-        _check_shareable_write(model_class, entity_name, record_id, user, db)
-        success = entity_service.soft_delete_record(model_class, record_id, db, owner_id=_owner_id(entity_name, user))
+        org_id, app_id = _tenant_ids(user, app_id)
+        _check_shareable_write(model_class, entity_name, record_id, user, db,
+                               org_id=org_id, app_id=app_id)
+        success = entity_service.soft_delete_record(
+            model_class, record_id, db, owner_id=_owner_id(entity_name, user),
+            org_id=org_id, app_id=app_id,
+        )
         if not success:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
         return {"deleted": True, "id": record_id}
@@ -571,8 +627,13 @@ def register_project_kb_router() -> APIRouter:
             KnowledgeBase.is_deleted == False,
         )
 
-        # 4. Apply tenant filter
-        org_filter = entity_service._tenant_filters(KnowledgeBase)
+        # 4. Apply tenant filter — scope to the authenticated principal's org,
+        #    not the hardcoded platform default (2026-10-22 audit P1 fix).
+        org_filter = entity_service._tenant_filters(
+            KnowledgeBase,
+            org_id=getattr(user, "org_id", None),
+            app_id=getattr(user, "app_id", None),
+        )
         for cond in org_filter:
             q = q.filter(cond)
 

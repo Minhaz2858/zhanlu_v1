@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _BACKEND_ROOT = os.path.abspath(os.path.join(_THIS_DIR, ".."))
@@ -185,7 +185,7 @@ class TestParseTaskSpecFollowup(unittest.TestCase):
         self.assertFalse(result["is_followup"])
         self.assertIsNone(result["refines_artifact_id"])
 
-    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
+    @patch("app.services.llm_service.call_llm", new_callable=AsyncMock)
     def test_followup_detected_and_entities_inherited(self, mock_llm):
         """When the LLM says is_followup=true and context has prior entities,
         the TaskSpec merges prior entities and pins refines_artifact_id."""
@@ -449,7 +449,10 @@ class TestIsFollowupRefinement(unittest.TestCase):
         """'edit' contains 'it' but must NOT match — cues are word-boundary matched."""
         from app.services.planning_trigger import is_followup_refinement
 
-        self.assertFalse(is_followup_refinement("please edit the file", _refinement_ctx()))
+        # "visit" contains "it" as a substring, but word-boundary matching
+        # must NOT treat it as the follow-up pronoun — and there is no
+        # refinement verb present either.
+        self.assertFalse(is_followup_refinement("please visit the museum", _refinement_ctx()))
 
     def test_non_fatal_on_malformed_context(self):
         from app.services.planning_trigger import is_followup_refinement

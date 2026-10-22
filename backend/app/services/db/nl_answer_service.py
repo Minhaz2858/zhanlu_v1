@@ -1284,7 +1284,15 @@ class NLAnswerService:
         if _exec_error is not None:
             logger.warning("NLAnswer: execute failed: %s", _exec_error)
             _shadow_validate_and_log(
-                kb_id, question, sql, live_success=False, live_error=str(_exec_error)
+                kb_id, question, sql, live_success=False, live_error=str(_exec_error),
+                row_count=(
+                    exec_result.get("row_count")
+                    if isinstance(exec_result, dict) else None
+                ),
+                duration_ms=(
+                    exec_result.get("duration_ms")
+                    if isinstance(exec_result, dict) else None
+                ),
             )
             failure = {
                 "success": False,
@@ -1331,7 +1339,11 @@ class NLAnswerService:
         if exec_result is None:  # unreachable: the loop either sets it or records an error
             exec_result = {"rows": [], "sql": sql, "source_id": kb_id}
 
-        _shadow_validate_and_log(kb_id, question, sql, live_success=True)
+        _shadow_validate_and_log(
+            kb_id, question, sql, live_success=True,
+            row_count=exec_result.get("row_count"),
+            duration_ms=exec_result.get("duration_ms"),
+        )
 
         # 3b. Zero-row / degenerate auto-correction: if the SQL returned 0
         # rows (or degenerate data — metadata-only probe rows / all-null
@@ -2990,30 +3002,38 @@ def _shadow_validate_and_log(
     *,
     live_success: bool,
     live_error: str = "",
+    row_count: int | None = None,
+    duration_ms: float | None = None,
 ) -> None:
-    """NL2SQL shadow mode: validate the generated SQL with the governed
-    nl2sql pipeline and log divergence to ``nl2sql_query_logs``.
+    """NL2SQL observability: log every served query to ``nl2sql_query_logs``.
 
-    NEVER alters the served result — this is observe-only. Runs after the
-    live path produced its outcome so divergence can be classified:
+    NEVER alters the served result — observe-only. Runs after the live path
+    produced its outcome so divergence can be classified:
       agree_pass            — shadow valid, live succeeded
       shadow_pass_live_fail — shadow valid, live failed
       shadow_fail_live_pass — shadow rejected, live succeeded (over-rejection risk)
       agree_fail            — both failed
-    """
-    # Observability only (P5-A): this switch decides whether the divergence is
-    # LOGGED. Enforcement does not live here — it lives at the execution boundary
-    # (services/db/execution_gate.py), which runs on every execution regardless of
-    # this flag, the caller, or the context.
-    if not getattr(settings, "NL2SQL_SHADOW_MODE_ENABLED", False):
-        return
-    try:
-        from app.services.nl2sql import validate_sql
 
-        res = validate_sql(sql)
-    except Exception as e:
-        logger.debug("nl2sql shadow validation failed (non-fatal): %s", e)
-        return
+    Audit B7 (2026-10-22): the log MUST populate in default deployments so
+    workload mining + query-log retrieval (both flagged ON) actually have data.
+    The row is therefore written UNCONDITIONALLY. The shadow *validation*
+    (validate_sql) stays gated by ``NL2SQL_SHADOW_MODE_ENABLED`` to avoid adding
+    the governed-validator latency to every live data turn — enforcement never
+    lived here anyway (it runs in services/db/execution_gate.py on every
+    execution). ``row_count``/``duration_ms`` are stamped from the real
+    execution so the mining consumers have the fields they consume.
+    """
+    # Validation is optional (shadow-mode only); the LOG below is unconditional.
+    res = None
+    if getattr(settings, "NL2SQL_SHADOW_MODE_ENABLED", False):
+        try:
+            from app.services.nl2sql import validate_sql
+
+            res = validate_sql(sql)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("nl2sql shadow validation failed (non-fatal): %s", e)
+            res = None
+    res = res or {}
 
     # P-SV2 lineage: extract from the statement that actually ran, so the log
     # row can answer "which tables/columns produced this" without re-running.
@@ -3069,6 +3089,8 @@ def _shadow_validate_and_log(
                     sql_hash=res.get("sql_hash") or None,
                     lineage_json=_lineage,
                     org_id=_org,
+                    row_count=row_count,
+                    duration_ms=duration_ms,
                     validation_errors=(
                         {"errors": res.get("errors")} if res.get("errors") else None
                     ),

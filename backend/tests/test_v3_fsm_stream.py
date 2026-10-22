@@ -95,7 +95,9 @@ def test_fsm_in_sse_path_emits_fsm_state_events_unit():
 
     # The new v3 route returns a StreamingResponse when the trigger fires.
     assert "def _fsm_event_stream():" in src
-    assert "return StreamingResponse(\n                _sse_with_heartbeat(_fsm_event_stream())" in src
+    # Post stable-stream refactor the FSM event stream is wrapped in
+    # _disconnect_safe_stream before the heartbeat pump.
+    assert "return StreamingResponse(\n                _sse_with_heartbeat(_disconnect_safe_stream(_fsm_event_stream))" in src
     # The callback wires state into the SSE envelope.
     assert "collected.append(_emit_fsm_state(state))" in src
     # The callback is plumbed into the FSM run.

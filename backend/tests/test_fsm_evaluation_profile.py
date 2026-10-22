@@ -9,13 +9,13 @@ from pathlib import Path
 
 
 def test_fsm_run_verify_calls_verify_grounding():
-    src = Path("/root/zhanlu/backend/app/services/synexia/fsm.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "app" / "services" / "synexia" / "fsm.py").read_text()
     assert "verify_grounding" in src
     assert "verify_grounding(self.execution, evaluation_profile)" in src
 
 
 def test_fsm_loads_evaluation_profile_from_agent():
-    src = Path("/root/zhanlu/backend/app/services/synexia/fsm.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "app" / "services" / "synexia" / "fsm.py").read_text()
     assert "def _load_evaluation_profile" in src
     assert "AgentApp" in src
     assert "evaluation_profile" in src
@@ -23,7 +23,7 @@ def test_fsm_loads_evaluation_profile_from_agent():
 
 
 def test_fsm_run_verify_swallows_grounding_exceptions():
-    src = Path("/root/zhanlu/backend/app/services/synexia/fsm.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "app" / "services" / "synexia" / "fsm.py").read_text()
     call_idx = src.find("verify_grounding(self.execution, evaluation_profile)")
     assert call_idx != -1
     pre = src[max(0, call_idx - 500):call_idx]
@@ -31,7 +31,7 @@ def test_fsm_run_verify_swallows_grounding_exceptions():
 
 
 def test_fsm_run_verify_persists_grounding_in_verification_payload():
-    src = Path("/root/zhanlu/backend/app/services/synexia/fsm.py").read_text()
+    src = (Path(__file__).resolve().parent.parent / "app" / "services" / "synexia" / "fsm.py").read_text()
     assert 'factors["verification"] = result.to_dict()' in src
 
 
