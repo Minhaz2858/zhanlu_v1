@@ -1,5 +1,13 @@
 # D1 Caller Trace — RESULTS: there is no duplicate FSM entry
 
+> **FURTHER CORRECTION (see `2026-10-27-sse-early-termination-trace.md` §3 H2).**
+> The claim in §4 below that *"the SSE response ended at 03:11:09, seven seconds before the
+> first execution was created"* is **WRONG**. The `200 OK` access-log line is emitted when
+> the `StreamingResponse` is *returned*, not when its body completes — proven by turn 2
+> (`200 OK` at 03:18:03, executions running until 03:23:10, answer delivered fine).
+> The response was open the whole time. The real defect is a **missing terminal `done`
+> frame** on the FSM route, which lacks `_guarantee_done` (the ReAct route has it).
+
 **Date:** 2026-10-27 · **Mode:** READ-ONLY (no code changed, nothing committed, no restart)
 **Supersedes:** the D1 hypothesis in `2026-10-27-answer-regeneration-investigation.md` §3
 **Method:** instrumented `SynexiaFSM.__init__` in an isolated process (the live process was not
