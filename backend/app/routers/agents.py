@@ -12867,7 +12867,24 @@ async def add_message_stream(
                         pass
 
             return StreamingResponse(
-                _sse_with_heartbeat(_disconnect_safe_stream(_fsm_event_stream)),
+                # R1 (2026-10-27): the FSM route was missing _guarantee_done,
+                # which the ReAct route has (see the similar wrapper near the
+                # end of this function). When _fsm_event_stream terminates
+                # before yielding its "done" frame — an exception in the
+                # post-work section, or a silent early return — the client
+                # received a clean response with NO terminal event and the
+                # optimistically-created empty assistant bubble was never
+                # filled (live: conv 1414bb16, turn 1 persisted content_len=0;
+                # agent_invocations has no row for it, proving the generator
+                # never reached the code after `yield done_payload`).
+                # _guarantee_done tracks terminal frame types, so a normal
+                # completion still produces exactly ONE done; it only adds a
+                # terminal event when the inner generator ends without one.
+                # Protocol completion only — this does NOT supply answer
+                # content (that is R3's grounded fallback).
+                _sse_with_heartbeat(
+                    _guarantee_done(_disconnect_safe_stream(_fsm_event_stream))
+                ),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
