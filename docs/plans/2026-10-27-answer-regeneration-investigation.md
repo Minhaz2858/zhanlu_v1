@@ -1,5 +1,14 @@
 # Investigation: "Agent answers, collapses, then generates the answer again"
 
+> **CORRECTION (see `2026-10-27-d1-caller-trace-results.md`).**
+> **D1 in this document is WRONG.** The duplicate executions are **not** a duplicate turn
+> entry or a re-plan of the same question — each `Execution` row is one `query_database`
+> *tool call* running its own FSM for a **distinct sub-question** (verified by instrumenting
+> `SynexiaFSM.__init__`: 1 tool call → exactly 1 FSM, stack `query_database_tool._run_pipeline`).
+> The real trigger is that the **SSE response ended at 03:11:09, seven seconds before the
+> first execution was even created**, so all work ran detached from the response.
+> **D2 and D3 below remain confirmed and unchanged** — they are the real persistence defect.
+
 **Date:** 2026-10-27 · **Mode:** READ-ONLY (no code changed, nothing committed, no restart)
 **Conversation:** `1414bb16-dcd1-43ed-8477-41f1b35534e9` (session `b39f6a62-…`, "give me last week sales report please")
 **Constraint honored:** no assumption of a fixed schema; the engine is schema-agnostic and stays so.
