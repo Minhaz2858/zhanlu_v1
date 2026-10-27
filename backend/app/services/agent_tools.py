@@ -324,6 +324,12 @@ def _is_retryable(result: dict) -> bool:
 
     - ``success: True`` and ``requires_approval: True`` are never retryable
       (approval is a pending user action, not a failure).
+    - A typed ``failure_kind`` takes PRECEDENCE over every heuristic below
+      (2026-10-27, approved design A3): retry safety must not depend on how
+      an error happens to be worded. ``result_extraction_failure`` and
+      ``permanent_binding_failure`` never re-execute the SQL pipeline —
+      re-running it reproduces the failure identically while burning a full
+      NL2SQL generation per attempt (the 4.5-minute-turn bug).
     - An explicit ``retryable: True`` flag (set by handlers that know the
       failure is transient, e.g. DB OperationalError) wins.
     - Known permanent markers (permission denied, unknown tool, not found,
@@ -340,6 +346,16 @@ def _is_retryable(result: dict) -> bool:
         # Retrying it would burn the turn's iteration budget on a decision the
         # model cannot change by calling again.
         return False
+    # ── Typed classification wins over message heuristics (A3) ──────────
+    kind = result.get("failure_kind")
+    if kind:
+        try:
+            from app.services.db.result_contract import NON_RETRYABLE_FAILURE_KINDS
+
+            if str(kind) in NON_RETRYABLE_FAILURE_KINDS:
+                return False
+        except Exception:  # noqa: BLE001 — contract module is optional here
+            pass
     if result.get("retryable") is True:
         return True
     err = (result.get("error") or "").lower()

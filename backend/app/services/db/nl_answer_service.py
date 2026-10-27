@@ -1290,8 +1290,7 @@ class NLAnswerService:
                     if isinstance(exec_result, dict) else None
                 ),
                 duration_ms=(
-                    exec_result.get("duration_ms")
-                    if isinstance(exec_result, dict) else None
+                    _elapsed_ms(exec_result)
                 ),
             )
             failure = {
@@ -1342,7 +1341,7 @@ class NLAnswerService:
         _shadow_validate_and_log(
             kb_id, question, sql, live_success=True,
             row_count=exec_result.get("row_count"),
-            duration_ms=exec_result.get("duration_ms"),
+            duration_ms=_elapsed_ms(exec_result),
         )
 
         # 3b. Zero-row / degenerate auto-correction: if the SQL returned 0
@@ -2993,6 +2992,27 @@ def _safe_lineage(sql: str | None, db, kb_id: str) -> dict | None:
     except Exception as e:  # noqa: BLE001
         logger.debug("lineage extraction failed (non-fatal): %s", e)
         return None
+
+
+def _elapsed_ms(exec_result) -> float | None:
+    """DB execution duration from a ``QueryService.execute`` result.
+
+    2026-10-27 ROOT-CAUSE FIX (RC-2): the logging path read
+    ``exec_result["duration_ms"]`` while ``QueryService.execute`` returns
+    ``elapsed_ms`` (query_service.py:250). The key never existed, so
+    ``nl2sql_query_logs.duration_ms`` was NULL on 100% of rows — which is why
+    the slow-turn investigation could not tell a slow database from slow
+    orchestration without manual log archaeology.
+
+    Accepts either key so this cannot silently regress if one side renames.
+    """
+    if not isinstance(exec_result, dict):
+        return None
+    for key in ("elapsed_ms", "duration_ms"):
+        value = exec_result.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
 
 
 def _shadow_validate_and_log(

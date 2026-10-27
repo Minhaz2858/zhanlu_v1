@@ -291,6 +291,13 @@ async def _query_database(
         result = await asyncio.to_thread(
             fsm.run, req, None, False, None
         )
+        # Assemble INSIDE the try: the contract's recovery path reads the
+        # durable ``observation_records`` by execution id, so the session must
+        # still be open here. (Normalizing after the ``finally`` closed it
+        # would make every recovery lookup fail.)
+        from app.services.db.result_contract import normalize_query_result
+
+        normalized = normalize_query_result(result, fsm_db, question=question)
     except Exception as exc:  # noqa: BLE001 — tool contract: report, don't raise
         logger.warning("query_database: FSM run failed: %s", exc)
         return {
@@ -298,6 +305,9 @@ async def _query_database(
             "question": question,
             "error": f"data pipeline failed: {exc}",
             "hint": "Tell the user the query could not be completed — never invent data.",
+            # Typed: an FSM-level crash before any execution is not a
+            # transient condition worth re-running the pipeline for (A3).
+            "failure_kind": "permanent_binding_failure",
         }
     finally:
         if own_session:
@@ -306,160 +316,37 @@ async def _query_database(
             except Exception:  # noqa: BLE001
                 pass
 
-    # ── Extract grounded rows from the pipeline observations ────────────
-    observations = list(getattr(result, "observations", None) or [])
-    if not observations:
-        execution = getattr(result, "execution", None)
-        observations = list(getattr(execution, "observations", None) or [])
+    # ── Assemble the result through the ONE shared contract ─────────────
+    # 2026-10-27 ROOT-CAUSE FIX (RC-1). The previous code read
+    # ``getattr(result, "observations", None)`` — but ``ExecutionResult``
+    # (the FSM's return type) has NEITHER ``observations`` NOR ``execution``,
+    # so both lookups silently returned None, ``observations`` was always
+    # empty, and this tool reported "The NL2SQL pipeline did not execute any
+    # query" while the SQL had actually run and returned rows. The live DB
+    # proved it: every nl2sql observation for the affected turn was
+    # ``success = t`` with 10 rows. That false failure is retryable by
+    # default (RC-3), so the whole pipeline re-ran the same question six
+    # times over 4.5 minutes.
+    #
+    # The contract module owns the authoritative success decision and reads
+    # the durable ``observation_records`` by execution id. Recovery never
+    # re-executes SQL (approved design A2); ``failure_kind`` is always
+    # emitted so the reliability layer classifies it typed-first (A3).
+    # (``normalized`` was computed INSIDE the try block above so the
+    # observation lookup ran against the still-open session.)
+    tool_result = normalized.to_tool_result()
+    tool_result["question"] = question
 
-    # 2026-10-20 FIX: the REAL failure reasons live on PLAN NODES, not on
-    # observations. Live evidence (conv c341f610, plan_nodes table): 14
-    # "Can't connect to MySQL ... timed out" + 8 "Model did not produce a
-    # SQL statement" node failures, while observations carried neither rows
-    # nor errors — so the tool misreported a network outage as "no bound
-    # data source reached the pipeline". plan_summary.nodes now carries
-    # failed-node errors (fsm.py); merge them into the failure report.
-    plan_node_errors: list[str] = []
-    _ps = getattr(result, "plan_summary", None) or {}
-    for _nd in (_ps.get("nodes") or []):
-        try:
-            if _nd.get("status") == "failed" and _nd.get("error"):
-                plan_node_errors.append(str(_nd["error"])[:300])
-        except AttributeError:  # malformed node entry — skip, never raise
-            continue
-
-    rows: list = []
-    sql: str | None = None
-    source: str | None = None
-    generated_sql_only: str | None = None  # SQL text that was NEVER executed
-    executed_empty = False  # a live query ran and genuinely matched 0 rows
-    failed_obs_errors: list[str] = []
-    for obs in reversed(observations):  # latest data first
-        rd = getattr(obs, "result_data", None)
-        otype = getattr(obs, "observation_type", "") or ""
-        if getattr(obs, "success", None) is False or (
-            isinstance(rd, dict) and rd.get("success") is False
-        ):
-            _err = getattr(obs, "error_message", None) or (
-                rd.get("error") if isinstance(rd, dict) else None
-            )
-            if _err:
-                failed_obs_errors.append(str(_err)[:300])
-        if otype == "nl2sql" and isinstance(rd, dict) and rd.get("sql"):
-            # The live branch always carries a "data" key (even empty — the
-            # query WAS executed); the schema-only fallback branch never
-            # does (SQL text only, nothing was executed).
-            if "data" in rd and isinstance(rd.get("data"), list):
-                if not rd.get("data"):
-                    executed_empty = True
-                    sql = sql or rd.get("sql")
-                    source = rd.get("source_name") or source
-            else:
-                generated_sql_only = generated_sql_only or rd.get("sql")
-        if not isinstance(rd, dict):
-            continue
-        data = rd.get("rows") or rd.get("data")
-        if isinstance(data, list) and data:
-            rows = data
-            sql = rd.get("sql") or sql
-            source = rd.get("source_name") or source
-            break
-
-    if not rows:
-        # 2026-10-20 HONESTY FIX: distinguish "the query ran and matched
-        # nothing" from "the pipeline never executed any SQL". The old
-        # message ("Say the data has no matching rows") was a lie when the
-        # nl2sql nodes only GENERATED SQL (no bound KBs reached the
-        # pipeline) — it told the model to tell the user something false
-        # and sent it wandering into retries. Live evidence: 3× "0 rows"
-        # while the same turn's ask_data_agent returned real rows.
-        if executed_empty:
-            # Honest empty: SQL executed against the bound source and
-            # genuinely matched no rows.
-            return {
-                "success": True,
-                "question": question,
-                "rows": [],
-                "row_count": 0,
-                "sql": sql,
-                "source": source,
-                "verified": False,
-                "note": (
-                    "The query executed against the bound data source and "
-                    "returned no rows for this window. Say the data has no "
-                    "matching rows — never invent figures."
-                ),
-            }
-        _all_failure_errors = failed_obs_errors + plan_node_errors
-        # Environmental failure (network/database down): report the REAL
-        # cause instead of a binding failure — retrying or replanning a
-        # dead host reproduces the error identically.
-        _env_error = next(
-            (
-                _e
-                for _e in _all_failure_errors
-                if _is_non_actionable_error(_e)
-            ),
-            None,
-        )
-        if _env_error:
-            logger.warning(
-                "query_database: pipeline failed on an ENVIRONMENTAL error "
-                "for question %r: %s",
-                question[:80], _env_error[:200],
-            )
-            return {
-                "success": False,
-                "question": question,
-                "rows": [],
-                "row_count": 0,
-                "sql": generated_sql_only,
-                "source": source,
-                "verified": False,
-                "unreachable": True,
-                "error": (
-                    "The data source could not be reached — the pipeline "
-                    f"failed on a connection/timeout error: {_env_error}"
-                ),
-                "detail": "; ".join(_all_failure_errors[:5])[:1500],
-                "hint": (
-                    "This is an environment problem (network/VPN/database "
-                    "down), NOT empty data and NOT a binding failure. Do "
-                    "NOT retry the same call and never invent figures — "
-                    "tell the user the data source is unreachable right "
-                    "now and to check connectivity."
-                ),
-            }
-        _detail = generated_sql_only or "; ".join(_all_failure_errors[:3])
+    if not normalized.success:
         logger.warning(
-            "query_database: pipeline produced NO executed SQL "
-            "(generated-only=%s, failed_obs=%d, failed_nodes=%d) for "
-            "question %r",
-            bool(generated_sql_only), len(failed_obs_errors),
-            len(plan_node_errors), question[:80],
+            "query_database: %s (%s/%s) for question %r — execution_id=%s",
+            normalized.failure_kind.value,
+            normalized.execution_status.value,
+            normalized.result_status.value,
+            question[:80],
+            normalized.provenance.get("execution_id"),
         )
-        return {
-            "success": False,
-            "question": question,
-            "rows": [],
-            "row_count": 0,
-            "sql": generated_sql_only,
-            "source": source,
-            "verified": False,
-            "error": (
-                "The NL2SQL pipeline did not execute any query — "
-                "no bound data source reached the pipeline "
-                f"(bound_kb_ids={data_ctx_extras.get('bound_kb_ids') or []})."
-            ),
-            "detail": str(_detail)[:1500],
-            "hint": (
-                "This is a pipeline/binding failure, NOT empty data. "
-                "Do NOT tell the user there are no matching rows. Retry "
-                "with ask_data_agent, which resolves the bound source "
-                "independently, or tell the user the query could not be "
-                "completed."
-            ),
-        }
+        return tool_result
 
     verify_passed = None
     verify_detail = None
@@ -471,20 +358,26 @@ async def _query_database(
     except Exception:  # noqa: BLE001
         pass
 
-    return {
-        "success": True,
-        "question": question,
-        "rows": rows[:_MAX_ROWS_IN_RESULT],
-        "row_count": len(rows),
-        "sql": sql,
-        "source": source,
-        "verified": verify_passed,
-        "verify_detail": verify_detail,
-        "note": (
-            "Grounded rows from the NL2SQL pipeline — render the answer "
-            "from these rows; do not add figures that are not in them."
-        ),
-    }
+    rows = normalized.rows
+    tool_result.update(
+        {
+            "rows": rows[:_MAX_ROWS_IN_RESULT],
+            "source": normalized.source_name or normalized.source_id,
+            "verified": verify_passed,
+            "verify_detail": verify_detail,
+            # Keep the agent-facing guidance that already worked, but only
+            # when rows actually exist (a zero-row success gets its own note
+            # from the contract so the model never invents figures).
+            "note": (
+                "Grounded rows from the NL2SQL pipeline — render the answer "
+                "from these rows; do not add figures that are not in them."
+                if rows
+                else "The query executed successfully and matched no rows. "
+                "Say the data has no matching rows — never invent figures."
+            ),
+        }
+    )
+    return tool_result
 
 
 QUERY_DATABASE_SCHEMA = {
