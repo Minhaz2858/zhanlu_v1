@@ -296,7 +296,72 @@ required. Existing flags are unaffected.
 
 ## 11. Status
 
-Approved for implementation. P0 first; P1 only after P0's gate passes.
+**IMPLEMENTED — P0 and P1 committed; live verification PASSED (2026-10-27).**
 
-> This document records the *design and delivery direction*. It does not assert that the
-> repository has been changed or that any test has passed.
+| Commit | Scope |
+|---|---|
+| `409b992d2` | Design document (this file) |
+| `d458832ad` | **P0** — result contract, extraction, retry typing, timing key fix |
+| `52b3511ea` | **P1** — failure-aware loop guard, in-flight dedup, staged timing |
+
+### 11.1 Live release-gate verification
+
+Both containers restarted per repo policy
+(`docker restart zhanlu-backend zhanlu-sandbox-worker`); new code confirmed loaded
+in the running process (`result_contract` present, `success` is a property,
+`query_dedup` importable).
+
+A **fresh** controlled query was executed against the bound warehouse
+(`aipdp_data_warehouse_prod`), producing a **new** execution id
+`96e87bea-c5b9-4701-a72c-0ecdbf61144f` (created 2026-10-27 02:35:58) — no reliance on
+old observation records.
+
+| Check | Expected | Observed | Verdict |
+|---|---|---|---|
+| Container health | Both start | backend + sandbox-worker Up; `/docs` 200 | PASS |
+| Result extraction | SUCCESS + row count | `success=True`, `row_count=2`, `succeeded/assembled` | PASS |
+| Execution timing | `duration_ms` populated | 3/3 new logs populated (490–608 ms) vs **0/612 before** | PASS |
+| Retry behaviour | No false retry | **0** occurrences of `attempt 1/2 failed` / `did not execute` / `no bound data source` | PASS |
+| Loop guard | Repeated identical failures detected | 3 identical failures → tripped; 3 *different* failures → not tripped | PASS |
+| Database activity | No duplicate executions | 3 runs = 3 genuinely distinct sub-questions (not duplicates) | PASS |
+| Agent response | Reflects canonical result | synthesise observation: "Retrieved 9 rows from the bound data source." | PASS |
+| Logs | Latency distinguishable | Timing captured in tool result (`db_execution_ms`, `total_ms`, `orchestration_ms`, `db_share_pct`) | PASS (see 11.2) |
+
+Concurrent-dedup confirmed in the live process: three concurrent identical requests →
+**1 pipeline run**, roles `leader/follower/follower`.
+
+### 11.2 Known limitation found during verification
+
+The structured `query_timing` **log line** does not appear in container output because the
+root logger effective level is `WARNING`, so `logger.info` is filtered. The timing **data
+itself is correct and reaches the tool result** (`to_tool_result()["timing"]` and
+`provenance.timing`), which is what the agent and future diagnostics consume.
+
+Fix, if console visibility is wanted: raise the level for
+`app.services.db.result_contract` (or `app.*`) in the runtime logging configuration, or
+emit the timing line at `WARNING`→`INFO` via an explicitly-leveled logger. Deliberately
+**not** changed in this patch — it is a logging-configuration concern, not a result-contract
+defect, and the approved scope was correctness + orchestration.
+
+### 11.3 Original failure mode — reproduced resolution
+
+The 4.5-minute turn produced 18 executions over 253 s with the same three questions run
+6× each, every one reported as "no query executed". With the contract in place, the
+identical SQL/rows now resolve to `SUCCESS` on the first execution, and a repeat of that
+shape can no longer start a pipeline re-run:
+- extraction/binding failures are typed non-retryable (RC-3), so no re-execution cascade;
+- three repeated identical failures now trip the loop guard (RC-4).
+
+### 11.4 Follow-ups (approved sequence, not part of this patch)
+
+1. `agents.py:_detect_tool_call_loop` — a **second**, independent loop detector. Three
+   pre-existing test failures live there (verified pre-existing by stashing this patch and
+   re-running). Investigate whether it shares the failure-blindness defect, then fix in a
+   separate commit with its own tests. Do not modify merely because tests fail.
+2. `ask_data_agent` — integrate onto the same contract (execution semantics, provenance,
+   error classification, dedup) **without** changing its current user-visible behaviour.
+3. Resume semantic source selection / broader NL2SQL reliability work once execution and
+   orchestration are trustworthy.
+
+> 272 passing tests are regression coverage, not proof of post-deployment behaviour; the
+> fresh-query gate above is the release evidence.
