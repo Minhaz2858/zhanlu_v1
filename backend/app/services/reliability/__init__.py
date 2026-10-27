@@ -99,31 +99,44 @@ class LoopState:
     def is_loop(self, cfg: ReliabilityConfig) -> tuple[bool, str]:
         """Return (is_loop, reason).
 
-        A "loop" is defined as: the same tool called with the same args
-        has succeeded and been re-issued, *at least* ``threshold`` times
-        in the last ``window`` calls.  Failures don't count toward the
-        loop signal (they're a real bug to surface, not a loop to
-        suppress).
+        2026-10-27 (approved design, P1): this used to count ONLY successful
+        calls. Its docstring justified that with "failures are a real bug to
+        surface, not a loop to suppress" — but the effect was that the single
+        worst loop in production was invisible to it: the same
+        ``query_database`` call failed 6× with identical args (a false
+        failure from RC-1) and the guard never tripped, so 18 executions ran
+        over 253 s. Success and failure tallies are now tracked SEPARATELY so
+        a legitimate retry storm of genuinely-transient errors still gets its
+        bounded retries, while a repeated identical FAILURE trips the guard.
         """
         if len(self.history) < cfg.loop_guard_threshold:
             return False, ""
         window = self.history[-cfg.loop_guard_window :]
-        # Count (tool, args) pairs that succeeded at least once.
-        # A loop is "same call succeeded multiple times" — not the same
-        # call failing repeatedly (which is a different bug class).
         from collections import Counter
-        success_keys = [
+
+        success_counts = Counter(
             f"{t}|{a}" for (t, a, ok) in window if ok
-        ]
-        counts = Counter(success_keys)
-        if not counts:
-            return False, ""
-        most_common_key, most_common_count = counts.most_common(1)[0]
-        if most_common_count >= cfg.loop_guard_threshold:
-            return True, (
-                f"Loop detected: tool={most_common_key.split('|', 1)[0]} "
-                f"re-issued {most_common_count}× with identical args"
-            )
+        )
+        failure_counts = Counter(
+            f"{t}|{a}" for (t, a, ok) in window if not ok
+        )
+        if success_counts:
+            key, n = success_counts.most_common(1)[0]
+            if n >= cfg.loop_guard_threshold:
+                return True, (
+                    f"Loop detected: tool={key.split('|', 1)[0]} "
+                    f"re-issued {n}× with identical args (succeeded each time)"
+                )
+        if failure_counts:
+            key, n = failure_counts.most_common(1)[0]
+            # Failures trip at the same threshold: an identical failing call
+            # repeated this many times is a deterministic defect, not a blip.
+            if n >= cfg.loop_guard_threshold:
+                return True, (
+                    f"Loop detected: tool={key.split('|', 1)[0]} failed {n}× "
+                    f"with identical args — the failure is deterministic; "
+                    f"retrying it cannot succeed"
+                )
         return False, ""
 
 

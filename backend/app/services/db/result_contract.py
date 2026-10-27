@@ -108,6 +108,10 @@ class NormalizedQueryResult:
     #: True when the source was unreachable (environment problem). Kept as an
     #: explicit flag because callers branch on it.
     unreachable: bool = False
+    #: Staged timings (ms). Distinguishes a slow DATABASE from slow
+    #: ORCHESTRATION — the question the 2026-10-27 investigation could not
+    #: answer from logs because duration_ms was always NULL (RC-2).
+    timing: dict[str, Any] = field(default_factory=dict)
 
     @property
     def success(self) -> bool:
@@ -144,6 +148,7 @@ class NormalizedQueryResult:
             "result_status": self.result_status.value,
             "failure_kind": self.failure_kind.value,
             "provenance": self.provenance,
+            "timing": dict(self.timing),
         }
         if self.warnings:
             base["warnings"] = self.warnings
@@ -267,16 +272,14 @@ def extract_plan_node_errors(result: Any) -> list[str]:
     return errors
 
 
-def normalize_query_result(
+def _normalize_impl(
     result: Any,
     db: Any,
     *,
     question: str = "",
+    timing: dict[str, Any] | None = None,
 ) -> NormalizedQueryResult:
-    """Map an FSM ``ExecutionResult`` onto the contract.
-
-    This is the ONLY place a data-tool outcome becomes success/failure.
-    """
+    """Map an FSM ``ExecutionResult`` onto the contract (inner form)."""
     observations, execution_id = extract_observations(result, db)
     plan_errors = extract_plan_node_errors(result)
 
@@ -313,6 +316,8 @@ def normalize_query_result(
     generated_only_sql: str | None = None
     failure_messages: list[str] = []
     obs_seqs: list[Any] = []
+    #: DB-side execution time reported by the connector, when present.
+    db_elapsed_ms: float | None = None
 
     for obs in observations:
         obs_seqs.append(getattr(obs, "seq", None))
@@ -338,6 +343,15 @@ def normalize_query_result(
         if rd.get("source_name") and not source_name:
             source_name = rd.get("source_name")
 
+        for _k in ("elapsed_ms", "duration_ms"):
+            _v = rd.get(_k)
+            if isinstance(_v, (int, float)):
+                db_elapsed_ms = (db_elapsed_ms or 0.0) + float(_v)
+                break
+        for _obs_ms in (getattr(obs, "duration_ms", None),):
+            if isinstance(_obs_ms, (int, float)):
+                db_elapsed_ms = (db_elapsed_ms or 0.0) + float(_obs_ms)
+
         data = rd.get("data")
         if isinstance(data, list):
             # The live branch ALWAYS carries "data" — even empty — because the
@@ -356,6 +370,12 @@ def normalize_query_result(
             warnings.append("Result was truncated at the row cap.")
 
     provenance["observation_seqs"] = obs_seqs
+    timing = {
+        "db_execution_ms": db_elapsed_ms,
+        "observation_count": len(observations),
+        "sql_generated": bool(sql or generated_only_sql),
+    }
+    provenance["timing"] = timing
 
     # ── Execution succeeded and rows were assembled ──────────────────────
     if executed_any and rows:
@@ -391,6 +411,64 @@ def normalize_query_result(
     # ── Nothing executed: classify WHY (typed, A3) ───────────────────────
     return _classify_no_execution(
         failure_messages + plan_errors, generated_only_sql, provenance, question
+    )
+
+
+def normalize_query_result(
+    result: Any,
+    db: Any,
+    *,
+    question: str = "",
+    started_at: float | None = None,
+) -> NormalizedQueryResult:
+    """Map an FSM ``ExecutionResult`` onto the contract.
+
+    This is the ONLY place a data-tool outcome becomes success/failure.
+    ``started_at`` (a ``time.monotonic()`` stamp taken by the caller) lets the
+    contract report total wall time next to DB time, so a future investigation
+    can tell slow-orchestration from slow-database without log archaeology.
+    """
+    import time as _time
+
+    t0 = started_at if started_at is not None else _time.monotonic()
+    normalized = _normalize_impl(result, db, question=question)
+    try:
+        total_ms = int((_time.monotonic() - t0) * 1000)
+    except Exception:  # noqa: BLE001
+        total_ms = None
+    if isinstance(normalized.provenance, dict):
+        timing = dict(normalized.provenance.get("timing") or {})
+        timing["total_ms"] = total_ms
+        db_ms = timing.get("db_execution_ms")
+        if isinstance(db_ms, (int, float)) and total_ms:
+            timing["orchestration_ms"] = max(0, total_ms - int(db_ms))
+            timing["db_share_pct"] = round(100.0 * db_ms / max(total_ms, 1), 1)
+        normalized.provenance["timing"] = timing
+        # to_tool_result() reads .timing; keep the dataclass field in sync.
+        object.__setattr__(normalized, "timing", timing)
+        _log_timing(normalized, question)
+    return normalized
+
+
+def _log_timing(normalized: NormalizedQueryResult, question: str) -> None:
+    """One structured line per data-tool execution (no rows, no secrets)."""
+    t = normalized.timing or {}
+    logger.info(
+        "query_timing: status=%s/%s kind=%s rows=%d complete=%s "
+        "db_ms=%s total_ms=%s orchestration_ms=%s db_share_pct=%s "
+        "obs=%s execution_id=%s q=%r",
+        normalized.execution_status.value,
+        normalized.result_status.value,
+        normalized.failure_kind.value,
+        normalized.row_count,
+        normalized.complete,
+        t.get("db_execution_ms"),
+        t.get("total_ms"),
+        t.get("orchestration_ms"),
+        t.get("db_share_pct"),
+        t.get("observation_count"),
+        (normalized.provenance or {}).get("execution_id"),
+        (question or "")[:80],
     )
 
 

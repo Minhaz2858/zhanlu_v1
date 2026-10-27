@@ -270,9 +270,6 @@ async def _query_database(
     # the thread via the contextvar set by database.py's after_begin hook.
     from app.database import SessionLocal as _SessionLocal
 
-    fsm_db = _SessionLocal()
-    own_session = True
-
     req = ExecutionRequest(
         conversation_id=ctx.get("conversation_id") or "",
         agent_name=agent_name,
@@ -286,18 +283,61 @@ async def _query_database(
         endpoint=endpoint,
     )
 
-    try:
-        fsm = SynexiaFSM(fsm_db)
-        result = await asyncio.to_thread(
-            fsm.run, req, None, False, None
-        )
-        # Assemble INSIDE the try: the contract's recovery path reads the
-        # durable ``observation_records`` by execution id, so the session must
-        # still be open here. (Normalizing after the ``finally`` closed it
-        # would make every recovery lookup fail.)
-        from app.services.db.result_contract import normalize_query_result
+    # ── Run the pipeline, coalescing duplicate concurrent requests ───────
+    # 2026-10-27 (P1, approved design A4): the model issued query_database
+    # THREE times concurrently with variants of the same question, and each
+    # call drove a full NL2SQL pipeline. Dedup keys on a REQUEST fingerprint
+    # computed BEFORE any generation (a SQL fingerprint doesn't exist yet),
+    # scoped to org/app/conversation/bound sources so distinct tenants never
+    # share rows. Same-turn only — the key is dropped when the leader ends,
+    # so a later turn always re-reads the database.
+    from app.services.db.query_dedup import get_inflight_dedup, request_fingerprint
+    from app.services.db.result_contract import normalize_query_result
 
-        normalized = normalize_query_result(result, fsm_db, question=question)
+    async def _run_pipeline():
+        """Leader-only work. Owns its session; callers never share it."""
+        from app.database import SessionLocal as _SessionLocalLocal
+
+        fsm_db = _SessionLocalLocal()
+        try:
+            fsm = SynexiaFSM(fsm_db)
+            result = await asyncio.to_thread(fsm.run, req, None, False, None)
+            # Normalize BEFORE closing: the contract's recovery path reads the
+            # durable observation_records by execution id.
+            return normalize_query_result(result, fsm_db, question=question)
+        finally:
+            try:
+                fsm_db.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    dedup = get_inflight_dedup()
+    fingerprint = request_fingerprint(
+        "query_database",
+        {"question": question},
+        org_id=ctx.get("org_id"),
+        app_id=ctx.get("app_id") or "default-app",
+        conversation_id=ctx.get("conversation_id") or "",
+        bound_kb_ids=list((data_ctx_extras or {}).get("bound_kb_ids") or bound_kb_ids),
+    )
+
+    try:
+        if dedup is not None:
+            shared = await dedup.run(fingerprint, _run_pipeline)
+            normalized = shared.value
+            if shared.shared:
+                logger.info(
+                    "query_database: served duplicate request %s from the "
+                    "in-flight leader (%d follower(s)) — no second pipeline run",
+                    fingerprint[:12],
+                    shared.followers,
+                )
+                if isinstance(
+                    getattr(normalized, "provenance", None), dict
+                ):
+                    normalized.provenance["deduplicated"] = True
+        else:
+            normalized = await _run_pipeline()
     except Exception as exc:  # noqa: BLE001 — tool contract: report, don't raise
         logger.warning("query_database: FSM run failed: %s", exc)
         return {
@@ -309,12 +349,6 @@ async def _query_database(
             # transient condition worth re-running the pipeline for (A3).
             "failure_kind": "permanent_binding_failure",
         }
-    finally:
-        if own_session:
-            try:
-                fsm_db.close()
-            except Exception:  # noqa: BLE001
-                pass
 
     # ── Assemble the result through the ONE shared contract ─────────────
     # 2026-10-27 ROOT-CAUSE FIX (RC-1). The previous code read
