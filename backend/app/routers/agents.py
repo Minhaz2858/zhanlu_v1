@@ -11794,6 +11794,40 @@ async def add_message_stream(
     # LLM context and the conversation history stay clean, and the new
     # assistant reply REPLACES the previous one (handled at persist time
     # via ``_replace_last_assistant``).
+    # Stage 2B Commit 4A (2026-10-27): TURN IDENTITY TRANSPORT.
+    #
+    # Read (and validate) the client-supplied correlation fields. This commit
+    # only RECORDS them — nothing here changes persistence, ownership or
+    # concurrency. Commit 3 will consume them for exact-row finalization.
+    #
+    #   assistant_message_id : the chat_messages row the client created for
+    #                          this turn (the ONLY id backed by a real row).
+    #   request_id           : stable across transport/auth retries; a fresh
+    #                          value per new turn or regeneration.
+    #
+    # Possession of an id is NOT authorization — Commit 3 re-validates tenant,
+    # session, role and ownership before any write.
+    _TURN_ID_RE = re.compile(r"^[0-9A-Za-z_-]{8,64}$")
+
+    def _identity_field(key):
+        _raw = body.get(key)
+        if not isinstance(_raw, str) or not _raw:
+            return None
+        return _raw if _TURN_ID_RE.match(_raw) else None
+
+    _assistant_message_id = _identity_field("assistant_message_id")
+    _request_id = _identity_field("request_id")
+    logger.info(
+        "v3 turn identity: conv=%s msg=%s req=%s regenerate=%s "
+        "(msg_present=%s req_present=%s)",
+        conversation_id,
+        (_assistant_message_id or "-")[:8],
+        (_request_id or "-")[:8],
+        bool(body.get("regenerate")),
+        _assistant_message_id is not None,
+        _request_id is not None,
+    )
+
     _regenerate = bool(body.get("regenerate"))
     if _regenerate:
         user_content, file_urls, selected_skill, selected_skill_id = _resolve_regenerate_turn(

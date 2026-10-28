@@ -30,6 +30,19 @@ import {
 import { SessionExpiredError } from '@/api/authFetch';
 import { usePersistentStream } from '@/lib/PersistentStreamContext';
 import { dedupeMessagesByFingerprint } from './messageDedup';
+// Stage 1 (2026-10-27): answer-lifecycle guards. Pure functions — see
+// src/lib/answerLifecycle.js. They prevent an empty/stale/failed replacement
+// or an unconditional final write from destroying a valid displayed answer.
+import {
+  applyContentReplace,
+  resolveFinalContent,
+  shouldPersistContent,
+  backendOwnsContent,
+} from '@/lib/answerLifecycle';
+// Stage 2B Commit 4A (2026-10-27): carry the client-created assistant row id
+// and a stable per-turn request id on the stream request. TRANSPORT ONLY —
+// no persistence/concurrency behaviour changes in this commit.
+import { newTurnIdentity } from '@/lib/turnIdentity';
 import { useScreenSize } from '@/hooks/useScreenSize';
 import { classifyIntent, formatHint } from '@/lib/intentClassifier';
 import { detectLang } from '@/lib/detectLang';
@@ -2252,6 +2265,11 @@ export default function Chat() {
         {
           role: 'user',
           content: text,
+          // Commit 4A: exact assistant-message identity + stable request id.
+          // `aiMsg.id` is the row ChatMessage.create returned for THIS turn —
+          // the only id backed by a real chat_messages row. Regeneration reuses
+          // that same row id but mints a NEW request_id (it is a new turn).
+          ...newTurnIdentity({ assistantMessageId: aiMsg?.id }),
           ...(regenerate ? { regenerate: true } : {}),
           ...(fileUrls && fileUrls.length ? { file_urls: fileUrls } : {}),
           ...(lang ? { lang } : {}),
