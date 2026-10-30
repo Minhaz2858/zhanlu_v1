@@ -533,11 +533,48 @@ async def list_kb_metrics(app_id: str, kb_id: str, db: Session = Depends(get_db)
             "base_column": r.base_column,
             "aggregation": r.aggregation,
             "unit": r.unit,
+            "currency": r.currency,
+            "time_column": r.time_column,
+            "dimensions": r.dimensions or [],
+            "filters_json": r.filters_json or [],
+            "zero_denominator_behavior": r.zero_denominator_behavior,
+            "evidence_status": r.evidence_status,
+            "version": r.version,
+            "lifecycle": r.lifecycle,
+            "reviewed_by": r.reviewed_by,
+            "source_object_refs": r.source_object_refs or [],
             "synonyms": r.synonyms or [],
             "is_enabled": bool(r.is_enabled),
         }
         for r in rows
     ]
+
+
+_ALLOWED_METRIC_FILTER_OPS = ("eq", "ne", "gt", "lt", "ge", "le", "in", "notnull")
+
+
+def _validated_metric_filters(raw) -> list | None:
+    """P5-T1: structured basis filters, op-whitelisted. A filter is
+    deterministic data, not prose — anything else is rejected, never
+    interpreted."""
+    if raw in (None, [], ""):
+        return None
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="filters_json must be a list")
+    out = []
+    for f in raw:
+        if not isinstance(f, dict) or not str(f.get("column") or "").strip():
+            raise HTTPException(status_code=400, detail="each filter needs a column")
+        op = str(f.get("op") or "").strip()
+        if op not in _ALLOWED_METRIC_FILTER_OPS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"filter op must be one of {', '.join(_ALLOWED_METRIC_FILTER_OPS)}")
+        if op != "notnull" and "value" not in f:
+            raise HTTPException(status_code=400, detail=f"filter op {op} needs a value")
+        out.append({"column": str(f["column"]).strip(), "op": op,
+                    **({"value": f["value"]} if op != "notnull" else {})})
+    return out
 
 
 @router.post("/{kb_id}/metrics")
@@ -564,6 +601,14 @@ async def create_kb_metric(app_id: str, kb_id: str, body: dict, db: Session = De
     synonyms = body.get("synonyms") or []
     if isinstance(synonyms, str):
         synonyms = [s.strip() for s in synonyms.split(",") if s.strip()]
+    filters_json = _validated_metric_filters((body or {}).get("filters_json"))
+    lifecycle = str((body or {}).get("lifecycle") or "published").strip()
+    if lifecycle not in ("draft", "published", "retired"):
+        raise HTTPException(status_code=400, detail="lifecycle must be draft|published|retired")
+    reviewed_by = str((body or {}).get("reviewed_by") or "").strip() or None
+    # P5-T5: requires_approval metrics start as draft until a reviewer signs.
+    if (body or {}).get("requires_approval") and not reviewed_by:
+        lifecycle = "draft"
     row = MetricDefinition(
         id=str(_uuid.uuid4()),
         datasource_id=kb_id,
@@ -576,6 +621,18 @@ async def create_kb_metric(app_id: str, kb_id: str, body: dict, db: Session = De
         unit=str(body.get("unit") or "").strip() or None,
         synonyms=synonyms,
         is_enabled=True,
+        # P5-T1 governance fields
+        time_column=str(body.get("time_column") or "").strip() or None,
+        dimensions=list(body.get("dimensions") or []) or None,
+        currency=str(body.get("currency") or "").strip() or None,
+        zero_denominator_behavior=str(
+            body.get("zero_denominator_behavior") or "").strip() or None,
+        filters_json=filters_json,
+        evidence_status="verified",
+        version=1,
+        lifecycle=lifecycle,
+        reviewed_by=reviewed_by,
+        source_object_refs=list(body.get("source_object_refs") or []) or None,
     )
     db.add(row)
     db.commit()
@@ -608,11 +665,16 @@ async def update_kb_metric(
         "aggregation": str,
         "unit": str,
         "display_name": str,
+        "time_column": str,
+        "currency": str,
+        "zero_denominator_behavior": str,
     }
+    mutated = False
     for field, cast in fields.items():
         if field in (body or {}):
             val = body[field]
             setattr(row, field, (str(val).strip() or None) if val is not None else None)
+            mutated = True
     if "synonyms" in (body or {}):
         syn = body["synonyms"]
         row.synonyms = (
@@ -620,10 +682,34 @@ async def update_kb_metric(
             if isinstance(syn, str)
             else list(syn or [])
         )
+        mutated = True
+    if "dimensions" in (body or {}):
+        row.dimensions = list(body["dimensions"] or []) or None
+        mutated = True
+    if "filters_json" in (body or {}):
+        row.filters_json = _validated_metric_filters(body["filters_json"])
+        mutated = True
+    if "source_object_refs" in (body or {}):
+        row.source_object_refs = list(body["source_object_refs"] or []) or None
+        mutated = True
     if "is_enabled" in (body or {}):
         row.is_enabled = bool(body["is_enabled"])
+        mutated = True
+    if "lifecycle" in (body or {}):
+        lc = str(body["lifecycle"] or "").strip()
+        if lc not in ("draft", "published", "retired"):
+            raise HTTPException(status_code=400, detail="lifecycle must be draft|published|retired")
+        row.lifecycle = lc
+        mutated = True
+    if "reviewed_by" in (body or {}):
+        row.reviewed_by = str(body["reviewed_by"] or "").strip() or None
+        mutated = True
+    if mutated:
+        # P5-T1: every mutation bumps the version — consumers pin results
+        # to (metric_id, version) so a silent definition change is visible.
+        row.version = (row.version or 1) + 1
     db.commit()
-    return {"id": str(row.id), "ok": True}
+    return {"id": str(row.id), "ok": True, "version": row.version}
 
 
 @router.delete("/{kb_id}/metrics/{metric_id}")

@@ -200,6 +200,10 @@ class SemanticJoin:
     relation_type: str = "FK"
     confidence: float = 1.0
     tier: str = TIER_DISCOVERED
+    # P0-6 (2026-10-30): derived join cardinality — "one"/"many" per side,
+    # None when undetermined. Never guessed: see join_cardinality.
+    source_cardinality: str | None = None
+    target_cardinality: str | None = None
 
 
 @dataclass(frozen=True)
@@ -488,6 +492,8 @@ class SemanticStore:
                     target_columns=tuple(_json_list(r.target_columns)),
                     relation_type=r.relation_type or "FK",
                     confidence=float(r.confidence or 1.0),
+                    source_cardinality=getattr(r, "source_cardinality", None),
+                    target_cardinality=getattr(r, "target_cardinality", None),
                 )
             )
         return out
@@ -648,6 +654,8 @@ class SemanticStore:
 
             q = self.db.query(MetricDefinition).filter(
                 MetricDefinition.is_enabled.is_(True),
+                # P5-T1: only published metrics enter the verified glossary.
+                MetricDefinition.lifecycle == "published",
                 *self._org_conds(MetricDefinition),
             )
             if self.kb_ids:
@@ -1192,7 +1200,13 @@ class SemanticStore:
         return {
             "kb_ids": list(self.kb_ids),
             "relations": len(rels),
-            "columns_described": sum(
+            # P0-5 (2026-10-30 audit): columns_described must count COLUMN
+            # rows with descriptions — the previous implementation counted
+            # described RELATIONS (tables), which made the UI's
+            # "Columns described" stat misreport coverage by ~15x.
+            "columns_described": self._count_described_columns(),
+            # Kept under its honest name: described tables (the old count).
+            "tables_described": sum(
                 1 for r in rels if (r.description or "").strip()
             ),
             "verified_relations": sum(1 for r in rels if r.tier == TIER_VERIFIED),
@@ -1203,6 +1217,55 @@ class SemanticStore:
             "workload_tables": len(self.workload()) if self._workload_enabled() else 0,
             "tiers": [TIER_VERIFIED, TIER_DISCOVERED, TIER_LEARNED, TIER_RUNTIME],
         }
+
+    def _count_described_columns(self) -> int:
+        """Count kb_column_meta rows carrying a description, in-scope KBs only."""
+        if not self.kb_ids or self.db is None:
+            return 0
+        try:
+            from sqlalchemy import func as _func
+
+            from app.models.knowledge_catalog import (
+                KBColumnMeta,
+                KBTableMeta,
+            )
+
+            return int(
+                self.db.query(_func.count(KBColumnMeta.id))
+                .join(
+                    KBTableMeta,
+                    KBColumnMeta.table_meta_id == KBTableMeta.id,
+                )
+                .filter(
+                    KBTableMeta.kb_id.in_(self.kb_ids),
+                    KBColumnMeta.is_deleted == False,  # noqa: E712
+                    KBTableMeta.is_deleted == False,  # noqa: E712
+                    *(
+                        [
+                            KBColumnMeta.org_id == self.org_id,
+                            KBTableMeta.org_id == self.org_id,
+                        ]
+                        if self.org_id
+                        else []
+                    ),
+                )
+                .filter(
+                    # A description in either language counts — the same
+                    # rule relations() uses for its description field.
+                    (
+                        (_func.coalesce(KBColumnMeta.description_en, ""))
+                        != ""
+                    )
+                    | (
+                        (_func.coalesce(KBColumnMeta.description_zh, ""))
+                        != ""
+                    ),
+                )
+                .scalar()
+                or 0
+            )
+        except Exception:
+            return 0
 
 
 def _settings() -> Any:
