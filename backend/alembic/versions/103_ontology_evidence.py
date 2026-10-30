@@ -40,15 +40,19 @@ def upgrade() -> None:
         op.create_index(f"ix_{t}_evidence_status", t, ["evidence_status"])
 
     # Backfill — bound rows carry real evidence but no recorded human
-    # authorization: inferred, never verified.
+    # authorization: inferred, never verified. (Mirrors
+    # evidence.legacy_backfill_status exactly, including empty-string
+    # backing_kind → proposed.)
     op.execute(
         "UPDATE ontology_objects SET evidence_status = 'inferred', "
         f"provenance_json = '{_BACKFILL_MARK}'::json "
-        "WHERE backing_kind <> 'manual' "
+        "WHERE backing_kind IS NOT NULL AND backing_kind <> '' "
+        "AND backing_kind <> 'manual' "
         "AND backing_ref IS NOT NULL AND backing_ref <> ''"
     )
     op.execute(
-        "UPDATE ontology_actions SET evidence_status = 'inferred' "
+        "UPDATE ontology_actions SET evidence_status = 'inferred', "
+        f"provenance_json = '{_BACKFILL_MARK}'::json "
         "WHERE tool_name IS NOT NULL AND tool_name <> ''"
     )
 

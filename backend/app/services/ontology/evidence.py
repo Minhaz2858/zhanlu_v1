@@ -88,9 +88,23 @@ def stamp_human_bind(obj: OntologyObject, *, bound_by: str | None) -> None:
 
 
 def stamp_unbind(obj: OntologyObject) -> None:
-    """Unbinding (manual/unbound) returns the object to a proposal."""
+    """Unbinding (manual/unbound) returns the object to a proposal.
+
+    Supersedes stale evidence: confidence is cleared (a proposal must not
+    display a score — 'proposed · 90%' reads as fabricated evidence) and
+    prior binding/verification provenance keys are nulled so an
+    unbind→re-discovery cycle cannot carry a misleading audit trail."""
     obj.evidence_status = STATUS_PROPOSED
-    _merge_provenance(obj, {"unbound_at": _now_iso()})
+    obj.confidence = None
+    _merge_provenance(obj, {
+        "unbound_at": _now_iso(),
+        "verified_by": None,
+        "verified_at": None,
+        "method": None,
+        "confidence": None,
+        "kb_id": None,
+        "table": None,
+    })
 
 
 def stamp_discovery(
@@ -129,7 +143,8 @@ def stamp_link(link: OntologyLink, *, by: str | None,
                status: str = STATUS_INFERRED) -> None:
     """Links created/confirmed by humans or automation land here; legacy
     links backfilled as proposed. `verified` requires an explicit human
-    confirmation flow (PRD P3 review queue will call this)."""
+    confirmation flow (PRD P3 identity-review queue will call this —
+    deliberately kept ahead of that phase; not yet wired)."""
     if not is_valid_status(status) or status == STATUS_VERIFIED:
         status = STATUS_INFERRED
     link.evidence_status = status

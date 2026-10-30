@@ -158,6 +158,7 @@ def bind_object(
     from app.services.ontology.evidence import stamp_human_bind, stamp_unbind
 
     if body.backing_kind == "manual" or not (body.backing_ref or "").strip():
+        obj.backing_ref = None  # no dangling ref on an unbound proposal
         stamp_unbind(obj)
     else:
         stamp_human_bind(obj, bound_by=getattr(admin, "email", None)

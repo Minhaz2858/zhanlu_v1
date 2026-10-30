@@ -45,8 +45,10 @@ def _obj(db, backing_kind="manual", backing_ref=None):
         dom = OntologyDomain(org_id=ORG, code="procurement", name="Procurement")
         db.add(dom)
         db.flush()
+    from uuid import uuid4
     o = OntologyObject(
-        org_id=ORG, domain_id=dom.id, name=f"Thing{backing_kind}",
+        org_id=ORG, domain_id=dom.id,
+        name=f"Thing{backing_kind}{uuid4().hex[:6]}",
         backing_kind=backing_kind, backing_ref=backing_ref,
     )
     db.add(o)
@@ -171,6 +173,50 @@ def test_discovery_can_never_set_verified(db, monkeypatch):
     with pytest.raises(ValueError):
         stamp_discovery(o, method="llm_discovery", confidence=0.99,
                         kb_id="kb1", table="t", status="verified")
+
+
+def test_apply_binding_stamps_inferred_evidence(db):
+    """Integration: discovery's _apply_binding (the only autobind writer)
+    lands objects at inferred with method + confidence provenance."""
+    from app.services.ontology.discovery import _apply_binding
+    from app.services.ontology.evidence import STATUS_INFERRED
+
+    o = _obj(db, "manual")
+    _apply_binding(o, "kb1", "party_master",
+                   {"name": "party_full_nm"}, method="llm_discovery",
+                   confidence=0.9)
+    db.commit()
+    assert o.backing_ref == "kb:kb1:party_master"
+    assert o.evidence_status == STATUS_INFERRED
+    assert o.confidence == 0.9
+    assert o.provenance_json["method"] == "llm_discovery"
+
+    # Hint path: no fabricated score
+    o2 = _obj(db, "manual")
+    _apply_binding(o2, "kb1", "t", {})
+    assert o2.evidence_status == STATUS_INFERRED
+    assert o2.confidence is None
+
+
+def test_unbind_clears_stale_confidence_and_supersedes_provenance(db):
+    """Review fix: an unbound proposal must not display a score, and a
+    re-discovery cycle must not inherit stale verified_by/method keys."""
+    from app.services.ontology.discovery import _apply_binding
+    from app.services.ontology.evidence import (
+        stamp_human_bind, stamp_unbind,
+    )
+
+    o = _obj(db, "manual")
+    _apply_binding(o, "kb1", "t", {"name": "n"}, method="llm_discovery",
+                   confidence=0.9)
+    stamp_human_bind(o, bound_by="boss")
+    stamp_unbind(o)
+    db.commit()
+    assert o.evidence_status == "proposed"
+    assert o.confidence is None
+    p = o.provenance_json
+    assert p["verified_by"] is None and p["method"] is None
+    assert "unbound_at" in p
 
 
 # ── Serialization carries the canonical fields ──────────────────────────
