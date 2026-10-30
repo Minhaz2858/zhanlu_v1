@@ -903,8 +903,9 @@ def identity_resolve(
     admin: User = Depends(require_org_admin),
 ):
     """Run tiers 1-4 across two sources for ONE ontology object.
-    Bounded, read-only. Tiers 1-2 auto-confirm with recorded evidence;
-    tiers 3-4 land in the review queue as `inferred`."""
+    Bounded, read-only. ALL tiers land as `inferred` (system evidence —
+    tiers 1-2 with high confidence); only an org-admin confirm activates
+    a crosswalk for the runtime."""
     from app.services.identity.resolver import resolve_object_identity
 
     report = resolve_object_identity(
@@ -967,3 +968,19 @@ def identity_reject(
     """Org-admin rejects a crosswalk. Audited; the rejection is
     remembered and the pair is never re-proposed."""
     return _identity_review(match_id, "reject", db, admin)
+
+
+@router.get("/ontology/identity/matches/{match_id}/history")
+def identity_history(
+    match_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Append-only decision history for one crosswalk (created, confirm,
+    reject, reversals) — auditable and reconstructable."""
+    from app.services.identity.review import decision_history
+
+    try:
+        return decision_history(db, user.org_id, match_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Match not found")

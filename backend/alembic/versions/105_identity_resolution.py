@@ -91,8 +91,34 @@ def upgrade() -> None:
                     ["org_id", "status"])
     _rls("identity_matches")
 
+    # C2 (closure pass): append-only identity decision history — one row
+    # per decision event (created / confirm / reject / reversal), never
+    # updated or deleted; history reconstructed via (event_seq, created_date).
+    op.create_table(
+        "identity_decision_events",
+        *_common_cols(),
+        sa.Column("match_id", sa.String(36), nullable=False, index=True),
+        sa.Column("object_id", sa.String(36), nullable=False, index=True),
+        sa.Column("event_kind", sa.String(20), nullable=False),
+        sa.Column("event_seq", sa.Integer(), nullable=False),
+        sa.Column("previous_status", sa.String(20), nullable=True),
+        sa.Column("new_status", sa.String(20), nullable=False),
+        sa.Column("reviewed_by", sa.String(255), nullable=True),
+        sa.Column("match_tier", sa.String(20), nullable=False),
+        sa.Column("confidence", sa.Float(), nullable=True),
+        sa.Column("evidence_json", sa.JSON(), nullable=True),
+        sa.Column("source_a_key", sa.String(255), nullable=False),
+        sa.Column("source_b_key", sa.String(255), nullable=False),
+        sa.Column("pk_a", sa.String(255), nullable=False),
+        sa.Column("pk_b", sa.String(255), nullable=False),
+        sa.UniqueConstraint("org_id", "match_id", "event_seq",
+                            name="uq_identity_decision_event_seq"),
+    )
+    _rls("identity_decision_events")
+
 
 def downgrade() -> None:
-    for t in ("identity_matches", "file_table_rows", "file_table_schemas"):
+    for t in ("identity_decision_events", "identity_matches",
+              "file_table_rows", "file_table_schemas"):
         op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {t}")
         op.drop_table(t)

@@ -94,8 +94,8 @@ def test_tier1_exact_matches_and_never_strips_prefixes(db, two_sources):
     by_pk = {(m.pk_a, m.pk_b): m for m in matches}
     m = by_pk[("1001", "1001")]
     assert m.match_tier == "exact"
-    assert m.status == "confirmed"
-    assert m.reviewed_by == "system:exact"
+    assert m.status == "inferred"              # system evidence ≠ human decision
+    assert m.reviewed_by is None               # reviewed_by reserved for humans
     assert m.confidence == 1.0
     assert ("1002", "C1002") not in by_pk      # prefix ≠ exact
     assert ("1003", "1004") not in by_pk
@@ -122,15 +122,51 @@ def test_tier2_normalization_requires_containment_evidence(db, two_sources):
     assert report["tier1"] == 0                          # nothing exact
     assert report["tier2"] == 4                          # C1001→1001 etc.
     matches = db.query(IdentityMatch).filter_by(
-        object_id="obj-c2", status="confirmed").all()
+        object_id="obj-c2", status="inferred").all()
     assert len(matches) == 4
     for m in matches:
         assert m.match_tier == "normalization"
+        assert m.reviewed_by is None                     # system ≠ human
         rule = m.normalization_rule_json
         assert rule["transform"] == "strip_alpha_prefix"
         assert rule["containment"] >= 0.9
         assert rule["shared_pairs"] >= 3                 # recorded evidence
         assert m.evidence_json["matched_value"]          # sample provenance
+
+
+def test_tier1_and_2_not_active_until_human_confirm(db, two_sources):
+    """Contract: system matching generates EVIDENCE (inferred, high
+    confidence); only a human decision makes a crosswalk ACTIVE.
+    read_object_data's cross_sources block must therefore stay empty
+    after a resolve and appear only after an explicit confirm."""
+    from app.services.identity.resolver import resolve_object_identity
+    from app.services.identity.review import crosswalk_summary, review_match
+
+    a = two_sources("crm3.xlsx", "CRM", [
+        ["account_id", "account_name"],
+        [1001, "Acme"], [1002, "Bravo"], [1003, "Charlie"],
+        [1004, "Delta"], [1005, "Echo"],
+    ])
+    b = two_sources("master3.xlsx", "Master", [
+        ["customer_no", "customer_name"],
+        ["1001", "Acme"], ["C1002", "Bravo"], ["C1003", "Charlie"],
+        ["C1004", "Delta"], ["C1005", "Echo"],
+    ])
+    report = resolve_object_identity(db, ORG, "obj-gate", a, b)
+    db.commit()
+    assert report["tier1"] == 1 and report["tier2"] == 4
+
+    # Nothing human-confirmed yet → no active crosswalks.
+    assert crosswalk_summary(db, ORG, "obj-gate")["sources"] == []
+
+    # Human confirms ONE pair → exactly that pair becomes active.
+    m = db.query(IdentityMatch).filter_by(
+        object_id="obj-gate", pk_a="1001").first()
+    review_match(db, ORG, m.id, "confirm", reviewed_by="boss")
+    s = crosswalk_summary(db, ORG, "obj-gate")
+    assert len(s["sources"]) == 1
+    assert s["sources"][0]["confirmed_pairs"] == 1
+    assert s["sources"][0]["sample"] == [{"pk_a": "1001", "pk_b": "1001"}]
 
 
 def test_tier2_without_evidence_never_transforms(db, two_sources):
@@ -233,9 +269,8 @@ def test_tier4_weak_signal_review_queue(db, two_sources, monkeypatch):
 
 
 def test_rejected_pairs_are_never_reproposed(db, two_sources):
-    from app.services.identity.resolver import (
-        mark_review, resolve_object_identity,
-    )
+    from app.services.identity.resolver import resolve_object_identity
+    from app.services.identity.review import review_match
 
     a = two_sources("crm6.xlsx", "CRM", [
         ["account_id", "account_name"],
@@ -248,8 +283,7 @@ def test_rejected_pairs_are_never_reproposed(db, two_sources):
     resolve_object_identity(db, ORG, "obj-c6", a, b)
     db.commit()
     m = db.query(IdentityMatch).filter_by(object_id="obj-c6").first()
-    mark_review(db, ORG, m.id, "reject", reviewed_by="boss")
-    db.commit()
+    review_match(db, ORG, m.id, "reject", reviewed_by="boss")
 
     resolve_object_identity(db, ORG, "obj-c6", a, b)   # re-run
     db.commit()
@@ -257,6 +291,70 @@ def test_rejected_pairs_are_never_reproposed(db, two_sources):
                 db.query(IdentityMatch).filter_by(object_id="obj-c6").all()}
     assert statuses[m.pk_a] == "rejected"              # decision remembered
     assert m.reviewed_by == "boss"
+
+
+def test_db_source_gate_poisoning_does_not_abort_resolution(
+        db, two_sources, monkeypatch):
+    """A DB-source read whose execution gate swallows a failed internal
+    query must NOT poison the request transaction: resolution continues
+    and matches are still recorded. (Found live: drifted-schema
+    deployments abort the shared session inside QueryService gates.)"""
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+
+    from app.models.knowledge_base import KnowledgeBase
+    from app.services.identity.resolver import resolve_object_identity
+
+    # Real DB source: a SQLite file with C-prefixed ids.
+    p = Path(tempfile.mkdtemp()) / "p3_poison.db"
+    conn = sqlite3.connect(p)
+    conn.execute("CREATE TABLE customers (customer_no TEXT, customer_name TEXT)")
+    conn.executemany("INSERT INTO customers VALUES (?, ?)", [
+        ("C1001", "Acme"), ("C1002", "Bravo"),
+        ("C1003", "Charlie"), ("C1004", "Dx"),
+    ])
+    conn.commit()
+    conn.close()
+
+    db_kb = KnowledgeBase(org_id=ORG, name="p3-poison-db",
+                          source_kind="database", db_type="sqlite",
+                          api_url=str(p))
+    db.add(db_kb)
+    db.commit()
+
+    # Poison exactly like the drifted-schema live failure: a gate query
+    # fails on the SHARED session, and the gate swallows the exception.
+    import app.services.db.execution_gate as gate
+
+    real_enforce = gate.enforce
+
+    def poisoned_enforce(session, *a, **kw):
+        from sqlalchemy import text as _t
+
+        try:
+            session.execute(_t("SELECT * FROM __no_such_table_p3__"))
+        except Exception:
+            pass  # swallowed exactly like enforce does
+        return real_enforce(session, *a, **kw)
+
+    monkeypatch.setattr(gate, "enforce", poisoned_enforce)
+
+    a = two_sources("crm7.xlsx", "CRM", [
+        ["account_id", "account_name"],
+        [1001, "Acme"], [1002, "Bravo"], [1003, "Charlie"], [1004, "Dx"],
+    ])
+    b = {"kind": "db", "kb_id": db_kb.id, "table": "customers",
+         "column": "customer_no", "pk_column": "customer_no"}
+
+    report = resolve_object_identity(
+        db, ORG, "obj-poison", a, b,
+        attribute_pairs=[("account_name", "customer_name")],
+    )
+    db.commit()
+    assert report["tier2"] == 4, report
+    m = db.query(IdentityMatch).filter_by(object_id="obj-poison").first()
+    assert m is not None and m.status == "inferred"
 
 
 def test_sampling_is_bounded(db, two_sources):

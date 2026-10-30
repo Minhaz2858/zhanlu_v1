@@ -6,9 +6,15 @@ chunks; identity resolution needs queryable records).
 
 IdentityMatch — crosswalk rows: "real-world entity X in source A ≡ row
 pk_b in source B". NEVER merges or copies source records; the source
-systems stay authoritative. Tiers 1-2 (deterministic, evidence-backed)
-auto-confirm; tiers 3-4 land in the human review queue. Rejections are
+systems stay authoritative. ALL tiers land as `inferred` (system
+matching issues EVIDENCE, not human decisions); only an org-admin
+confirm sets `confirmed` (active for the runtime). Rejections are
 remembered and never re-proposed by the same method.
+
+IdentityDecisionEvent — append-only decision history: created /
+confirm / reject / reversal, preserving previous decision, new
+decision, reviewer, matching method, confidence, evidence, source
+record identifiers and timestamp. Auditable and reconstructable.
 """
 
 from __future__ import annotations
@@ -70,3 +76,31 @@ class IdentityMatch(TimestampedBase):
     reviewed_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     summary_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class IdentityDecisionEvent(TimestampedBase):
+    """Append-only identity decision history (C2). One row per decision
+    event: system creation, human confirm, human reject, or a reversal
+    (confirmed→rejected / rejected→confirmed). Never updated or deleted —
+    history is reconstructed by ordering on (event_seq, created_date)."""
+
+    __tablename__ = "identity_decision_events"
+    __table_args__ = (
+        UniqueConstraint("org_id", "match_id", "event_seq",
+                         name="uq_identity_decision_event_seq"),
+    )
+
+    match_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    object_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    event_kind: Mapped[str] = mapped_column(String(20), nullable=False)  # created|confirm|reject
+    event_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    match_tier: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
+    evidence_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    source_a_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_b_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    pk_a: Mapped[str] = mapped_column(String(255), nullable=False)
+    pk_b: Mapped[str] = mapped_column(String(255), nullable=False)

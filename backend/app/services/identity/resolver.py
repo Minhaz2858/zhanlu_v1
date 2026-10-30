@@ -7,8 +7,14 @@ Four strictly separated tiers:
                       valid ONLY with recorded evidence (transformed
                       value-set containment ≥ threshold); the rule is
                       re-validated against live samples each run
-3. semantic         — multi-attribute embedding agreement → human review
-4. probabilistic    — weaker single-attribute signals → human review
+3. semantic         — multi-attribute embedding agreement
+4. probabilistic    — weaker single-attribute signals
+
+Decision contract: EVERY tier lands as `inferred` — the system issues
+matching EVIDENCE (tier + confidence), never a human decision. Tiers 1-2
+carry high confidence; tiers 3-4 explicitly require review. Only an
+org-admin confirm (review_match) sets status='confirmed', which is what
+makes a crosswalk ACTIVE for the ontology runtime.
 
 Rejections are remembered: a pair with status 'rejected' is never
 re-proposed. Sources are read-only and bounded; nothing merges.
@@ -17,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 
 from sqlalchemy.orm import Session
 
@@ -90,18 +97,14 @@ def fetch_source_values(db: Session, org_id: str, source: dict,
                 if r.values_json and r.values_json.get(column) is not None]
 
     # DB source: bounded distinct sample through the read-only service.
-    from app.services.db.query_service import QueryService
-
     table = source.get("table") or ""
     if not re.match(r"^[A-Za-z0-9_.]+$", table) or \
             not re.match(r"^[A-Za-z0-9_]+$", column):
         return []
     try:
-        result = QueryService(db).execute(
-            source["kb_id"],
-            f"SELECT DISTINCT {column} FROM {table}",
-            max_rows=limit,
-        )
+        result = _fetch_via_query_service(
+            db, source["kb_id"], f"SELECT DISTINCT {column} FROM {table}",
+            limit, ctx=f"{table}.{column}")
         return [str(r[column]) for r in (result.get("rows") or [])
                 if r.get(column) is not None]
     except Exception as exc:  # noqa: BLE001 — honest failure
@@ -141,8 +144,6 @@ def fetch_source_rows(db: Session, org_id: str, source: dict,
         return [dict(r.values_json or {}) for r in rows
                 if r.values_json and any(r.values_json.get(c) for c in columns)]
 
-    from app.services.db.query_service import QueryService
-
     table = source.get("table") or ""
     if not re.match(r"^[A-Za-z0-9_.]+$", table):
         return []
@@ -150,11 +151,9 @@ def fetch_source_rows(db: Session, org_id: str, source: dict,
     if not cols:
         return []
     try:
-        result = QueryService(db).execute(
-            source["kb_id"],
-            f"SELECT {', '.join(cols)} FROM {table}",
-            max_rows=limit,
-        )
+        result = _fetch_via_query_service(
+            db, source["kb_id"], f"SELECT {', '.join(cols)} FROM {table}",
+            limit, ctx=table)
         return [dict(r) for r in (result.get("rows") or [])]
     except Exception as exc:  # noqa: BLE001 — honest failure
         logger.warning("identity row read failed (%s): %s", table, exc)
@@ -192,11 +191,18 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 def _record_match(db: Session, org_id: str, object_id: str, source_a: dict,
                   source_b: dict, pk_a: str, pk_b: str, tier: str, *,
-                  status: str = "confirmed", confidence: float | None = None,
+                  status: str = "inferred", confidence: float | None = None,
                   rule: dict | None = None, evidence: dict | None = None,
                   reviewed_by: str | None = None) -> IdentityMatch | None:
     """Idempotent crosswalk writer: never overwrites an existing decision
-    (confirmed stays confirmed, rejected is REMEMBERED)."""
+    (confirmed stays confirmed, rejected is REMEMBERED).
+
+    Decision contract (closure review 2026-10-30): ALL tiers land as
+    'inferred' — the system generates matching EVIDENCE (tier and
+    confidence in the record), it never issues a human identity decision.
+    `reviewed_by` is reserved for HUMANS; only an explicit org-admin
+    confirm (review_match) makes a crosswalk ACTIVE (status='confirmed').
+    Every creation appends an `identity_decision_events` row."""
     existing = (
         db.query(IdentityMatch)
         .filter(
@@ -212,6 +218,7 @@ def _record_match(db: Session, org_id: str, object_id: str, source_a: dict,
     if existing is not None:
         return None  # decision already recorded — never re-propose
     m = IdentityMatch(
+        id=str(uuid.uuid4()),
         org_id=org_id, object_id=object_id,
         source_a=source_a, source_b=source_b,
         source_a_key=_source_key(source_a), source_b_key=_source_key(source_b),
@@ -220,7 +227,39 @@ def _record_match(db: Session, org_id: str, object_id: str, source_a: dict,
         evidence_json=evidence, reviewed_by=reviewed_by,
     )
     db.add(m)
+    from app.services.identity.review import append_decision_event
+
+    append_decision_event(
+        db, org_id, m, event_kind="created", previous_status=None,
+        new_status=status, reviewed_by=reviewed_by,
+    )
     return m
+
+
+def _fetch_via_query_service(db: Session, kb_id: str, sql: str, limit: int,
+                             *, ctx: str = "") -> dict:
+    """Bounded read through QueryService with transaction-poisoning
+    recovery (closure C3, found live): the execution gate swallows its
+    own internal errors; on drifted-schema deployments those failures
+    abort the SHARED request transaction, and the next resolver statement
+    dies with InFailedSqlTransaction. Probe after the read; if the
+    transaction was poisoned, roll it back — reads are read-only and the
+    resolver commits only after all fetches are done."""
+    from sqlalchemy import text
+
+    from app.services.db.query_service import QueryService
+
+    result = QueryService(db).execute(kb_id, sql, max_rows=limit)
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:  # noqa: BLE001 — poisoning recovery, never raised
+        logger.warning("identity db read left a poisoned transaction; "
+                       "rolling back (%s)", ctx)
+        try:
+            db.rollback()
+        except Exception:  # pragma: no cover — defensive
+            logger.exception("identity rollback after poisoning failed")
+    return result
 
 
 def _rows_for_source(db: Session, org_id: str, source: dict, columns: list[str],
@@ -273,7 +312,7 @@ def resolve_object_identity(
 
     consumed_a: set[str] = set()
 
-    def record(tier: str, ra: dict, rb: dict, *, status: str = "confirmed",
+    def record(tier: str, ra: dict, rb: dict, *, status: str = "inferred",
                confidence: float | None = None, rule: dict | None = None,
                evidence: dict | None = None, reviewed_by: str | None = None):
         if report["tier1"] + report["tier2"] + report["tier3"] + \
@@ -298,7 +337,6 @@ def resolve_object_identity(
         for ra in a_rows:
             for rb in b_rows:
                 if record("exact", ra, rb, confidence=1.0,
-                          reviewed_by="system:exact",
                           evidence={"method": "exact_id",
                                     "normalized_value": norm,
                                     "columns": [id_a, id_b]}) is not None:
@@ -367,7 +405,6 @@ def resolve_object_identity(
             m = record("normalization", ra, rb,
                        confidence=chosen_rule["containment"],
                        rule=chosen_rule,
-                       reviewed_by="system:normalization",
                        evidence={"method": "evidence_backed_normalization",
                                  "original_value": original,
                                  "matched_value": transformed,
@@ -428,23 +465,5 @@ def resolve_object_identity(
     return report
 
 
-def mark_review(db: Session, org_id: str, match_id: str, decision: str,
-                reviewed_by: str | None = None) -> IdentityMatch:
-    """org-admin confirm/reject on a crosswalk. Audited by the endpoint."""
-    if decision not in ("confirm", "reject"):
-        raise ValueError("decision must be confirm or reject")
-    m = (
-        db.query(IdentityMatch)
-        .filter(IdentityMatch.id == match_id,
-                IdentityMatch.org_id == org_id)
-        .first()
-    )
-    if m is None:
-        raise ValueError("match not found")
-    from datetime import datetime, timezone
-
-    m.status = "confirmed" if decision == "confirm" else "rejected"
-    m.reviewed_by = reviewed_by
-    m.reviewed_at = datetime.now(timezone.utc)
-    db.commit()
-    return m
+# mark_review was REMOVED (closure C2): it bypassed the audit trail. All
+# decisions go through review_match (audited + append-only decision history).
