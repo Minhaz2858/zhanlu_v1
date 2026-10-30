@@ -1052,6 +1052,47 @@ def identity_history(
         raise HTTPException(status_code=404, detail="Match not found")
 
 
+# ── P6: continuous evolution — admin reconciliation ──────────────────────
+
+
+@router.post("/ontology/evolution/reconcile")
+def reconcile_ontology(
+    body: dict | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Manual administrator reconciliation (P6-T5). apply=false → report
+    only; apply=true → the E2-allowed controlled mutations (stale marking
+    with revisions, notifications)."""
+    from app.services.ontology.evolution import reconcile
+
+    apply = bool((body or {}).get("apply"))
+    return reconcile(db, admin.org_id, apply=apply)
+
+
+@router.get("/ontology/evolution/state")
+def evolution_state(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Per-source evolution ledger for this org."""
+    from app.models.ontology import OntologyEvolutionState
+
+    rows = (
+        db.query(OntologyEvolutionState)
+        .filter(OntologyEvolutionState.org_id == admin.org_id,
+                OntologyEvolutionState.is_deleted == False)  # noqa: E712
+        .order_by(OntologyEvolutionState.source_key)
+        .all()
+    )
+    return {"sources": [{
+        "source_key": r.source_key, "source_kind": r.source_kind,
+        "signature": r.signature, "last_status": r.last_status,
+        "last_error": r.last_error, "attempts": r.attempts,
+        "last_run_at": r.last_run_at.isoformat() if r.last_run_at else None,
+    } for r in rows]}
+
+
 @router.get("/ontology/domains")
 def list_domains_ep(
     org_id: str | None = Query(default=None),

@@ -22,7 +22,7 @@ Design rules (from the strategy's anti-goals):
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.models.base import TimestampedBase
@@ -89,6 +89,12 @@ class OntologyObject(TimestampedBase):
     )
     confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
     provenance_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # P6 — binding health, maintained by ontology.evolution.reconcile ONLY:
+    # ok | stale | broken (stale = bound table/columns changed; broken =
+    # bound table gone). Never mutated by discovery (never overwrites a
+    # human decision) — the human rebind path clears it via stamp_human_bind.
+    binding_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    last_validated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class OntologyLink(TimestampedBase):
@@ -277,3 +283,25 @@ class DocumentDecisionEvent(TimestampedBase):
                                                        nullable=True)
     payload_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     detail_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
+class OntologyEvolutionState(TimestampedBase):
+    """P6 — idempotency ledger for continuous evolution. One row per
+    (org, source): the last-seen signature of the source's schema/content
+    facts. An unchanged signature produces ZERO proposals, revisions or
+    notifications (invariant E1)."""
+
+    __tablename__ = "ontology_evolution_state"
+    __table_args__ = (
+        UniqueConstraint("org_id", "source_key",
+                         name="uq_evolution_state_org_source"),
+    )
+
+    source_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    last_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="ok")
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

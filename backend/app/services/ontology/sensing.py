@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -190,7 +191,31 @@ async def run_ontology_sensors(stop_event: asyncio.Event) -> None:
         def _tick():
             db = SessionLocal()
             try:
-                return run_due_sensors(db)
+                results = run_due_sensors(db)
+                # P6: evolution reconciliation rides the same loop (flag-
+                # gated, default OFF — opt-in per deployment).
+                if os.getenv("ONTOLOGY_EVOLUTION_ENABLED", "").strip().lower() \
+                        in ("1", "true", "yes"):
+                    try:
+                        from sqlalchemy import distinct as _distinct
+
+                        from app.models.knowledge_base import (
+                            KnowledgeBase as _KB,
+                        )
+                        from app.services.ontology.evolution import (
+                            reconcile,
+                        )
+
+                        org_ids = [
+                            r[0] for r in db.query(
+                                _distinct(_KB.org_id)).all() if r[0]
+                        ]
+                        for org_id in org_ids:
+                            reconcile(db, org_id, apply=True)
+                    except Exception as evo_exc:  # noqa: BLE001
+                        logger.warning("evolution tick failed (non-fatal): %s",
+                                       evo_exc)
+                return results
             finally:
                 db.close()
 
