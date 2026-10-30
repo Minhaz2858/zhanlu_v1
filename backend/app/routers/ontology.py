@@ -855,3 +855,115 @@ def retire_action(
     if not action:
         raise HTTPException(status_code=404, detail="Action not found")
     return _retire(db, admin, "action", action)
+
+
+# ── P3: cross-source identity resolution — review queue API ────────────
+
+
+class IdentitySourceModel(BaseModel):
+    kind: str  # "db" | "file"
+    kb_id: str
+    table: str | None = None       # db sources
+    sheet: str | None = None       # file sources
+    column: str | None = None
+    pk_column: str | None = None
+
+
+class IdentityResolveBody(BaseModel):
+    object_id: str
+    source_a: IdentitySourceModel
+    source_b: IdentitySourceModel
+    attribute_pairs: list[tuple[str, str]] | None = None
+    max_rows: int = 500
+
+
+def _identity_source_dict(s: IdentitySourceModel) -> dict:
+    if s.kind not in ("db", "file"):
+        raise HTTPException(status_code=422,
+                            detail="source.kind must be db or file")
+    if not s.column:
+        raise HTTPException(status_code=422,
+                            detail="source.column is required")
+    d = {"kind": s.kind, "kb_id": s.kb_id, "column": s.column}
+    if s.kind == "db":
+        if not s.table:
+            raise HTTPException(status_code=422,
+                                detail="db sources need a table")
+        d["table"] = s.table
+    else:
+        d["sheet"] = s.sheet or ""
+    d["pk_column"] = s.pk_column or s.column
+    return d
+
+
+@router.post("/ontology/identity/resolve")
+def identity_resolve(
+    body: IdentityResolveBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Run tiers 1-4 across two sources for ONE ontology object.
+    Bounded, read-only. Tiers 1-2 auto-confirm with recorded evidence;
+    tiers 3-4 land in the review queue as `inferred`."""
+    from app.services.identity.resolver import resolve_object_identity
+
+    report = resolve_object_identity(
+        db, admin.org_id, body.object_id,
+        _identity_source_dict(body.source_a),
+        _identity_source_dict(body.source_b),
+        attribute_pairs=body.attribute_pairs,
+        max_rows=max(1, min(body.max_rows, 5000)),
+    )
+    db.commit()
+    return report
+
+
+@router.get("/ontology/identity/matches")
+def identity_matches(
+    object_id: str | None = None,
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """The org's crosswalk review queue. status: confirmed|inferred|rejected."""
+    from app.services.identity.review import list_matches
+
+    if status and status not in ("confirmed", "inferred", "rejected"):
+        raise HTTPException(status_code=422, detail="invalid status")
+    return list_matches(db, user.org_id, object_id=object_id, status=status)
+
+
+def _identity_review(match_id: str, decision: str, db: Session,
+                     admin: User) -> dict:
+    from app.services.identity.review import review_match
+
+    try:
+        return review_match(db, admin.org_id, match_id, decision,
+                            reviewed_by=getattr(admin, "email", None)
+                            or str(getattr(admin, "id", "") or ""))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Match not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/ontology/identity/matches/{match_id}/confirm")
+def identity_confirm(
+    match_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Org-admin confirms a crosswalk (activates it for the runtime).
+    Audited as `identity_review`."""
+    return _identity_review(match_id, "confirm", db, admin)
+
+
+@router.post("/ontology/identity/matches/{match_id}/reject")
+def identity_reject(
+    match_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Org-admin rejects a crosswalk. Audited; the rejection is
+    remembered and the pair is never re-proposed."""
+    return _identity_review(match_id, "reject", db, admin)

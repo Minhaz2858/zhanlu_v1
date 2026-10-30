@@ -246,6 +246,35 @@ def _humanize_db_type(db_type: str) -> str:
     }.get((db_type or "").lower(), db_type or "DB")
 
 
+@router.post("/{kb_id}/ingest-rows")
+async def ingest_rows_endpoint(kb_id: str, db: Session = Depends(get_db)):
+    """P3a: (re-)stage a tabular file KB (xlsx/csv) into queryable rows
+    for identity resolution. Idempotent per (kb, sheet)."""
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+    if kb.source_kind != "file":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Row staging is only for source_kind='file' (got {kb.source_kind!r})",
+        )
+    from app.services.identity.file_rows import ingest_structured_rows, is_tabular
+
+    if not is_tabular(kb):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Row staging needs a tabular file (xlsx/csv), got {kb.file_type!r}",
+        )
+    report = await asyncio.to_thread(ingest_structured_rows, db, kb)
+    if report.get("error"):
+        raise HTTPException(status_code=422, detail=report["error"])
+    return report
+
+
 @router.post("/{kb_id}/reindex")
 async def reindex_kb(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     """Re-extract, re-chunk, re-embed a file-kind KB. Returns the new status."""

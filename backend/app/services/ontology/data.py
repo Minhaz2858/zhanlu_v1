@@ -101,6 +101,7 @@ def read_object_data(
         "backing": {"kind": "table", "ref": ref},
         "row_count": len(data),
         "rows": _map_rows_to_properties(data, obj),
+        **_cross_sources_block(db, org_id, obj),
     }
 
 
@@ -217,7 +218,25 @@ def _read_via_kb(
         "row_count": len(rows),
         "rows": _map_rows_to_properties(rows, obj),
         "truncated": bool(result.get("truncated")),
+        **_cross_sources_block(db, org_id, obj),
     }
+
+
+def _cross_sources_block(db: Session, org_id: str, obj: OntologyObject) -> dict:
+    """P3 runtime integration: objects with CONFIRMED identity crosswalks
+    expose an honest `cross_sources` provenance summary. Inferred/rejected
+    matches never appear; failure to compute degrades silently (never
+    blocks the read)."""
+    try:
+        from app.services.identity.review import crosswalk_summary
+
+        summary = crosswalk_summary(db, org_id, obj.id)
+        if summary and summary["sources"]:
+            return {"cross_sources": summary}
+    except Exception as exc:  # noqa: BLE001 — enrichment must not break reads
+        logger.warning("cross_sources enrichment failed for %s: %s",
+                       obj.name, exc)
+    return {}
 
 
 def execute_action(

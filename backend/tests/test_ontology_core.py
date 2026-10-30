@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.models.base import Base
 from app.models.ontology import OntologyAction, OntologyObject
+import app.models.ontology_revision  # noqa: F401 — register for create_all (P2 revisions)
 from app.services.ontology.coverage import compute_coverage
 from app.services.ontology.data import execute_action, read_object_data
 from app.services.ontology.queries import (

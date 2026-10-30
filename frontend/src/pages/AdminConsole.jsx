@@ -12,7 +12,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { formatAbsoluteTime } from '@/lib/time';
 import {
   Shield, DollarSign, FileText, CheckCircle2, XCircle, Clock,
-  Loader2, AlertCircle, ChevronDown, ChevronRight, UserCheck,
+  Loader2, AlertCircle, ChevronDown, ChevronRight, UserCheck, GitMerge,
 } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 
@@ -32,12 +32,13 @@ export default function AdminConsole() {
   const [auditLogs, setAuditLogs] = useState([]);
   const [policyDecisions, setPolicyDecisions] = useState([]);
   const [escalations, setEscalations] = useState([]);
+  const [identityMatches, setIdentityMatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState({});
 
   const loadData = useCallback(async () => {
     try {
-      const [apps, cost, breakdown, logs, decisions, escs] = await Promise.all([
+      const [apps, cost, breakdown, logs, decisions, escs, matches] = await Promise.all([
         fetchJSON(`${API_BASE}/governance/approvals?status=pending`),
         fetchJSON(`${API_BASE}/governance/cost`),
         fetchJSON(`${API_BASE}/governance/cost/breakdown`),
@@ -45,6 +46,8 @@ export default function AdminConsole() {
         fetchJSON(`${API_BASE}/governance/policy-decisions?limit=50`),
         // P3-6: the human handoff queue (escalations with full context)
         fetchJSON(`${API_BASE}/ontology/escalations`),
+        // P3: cross-source identity review queue (inferred crosswalks)
+        fetchJSON(`${API_BASE}/ontology/identity/matches`),
       ]);
       setApprovals(apps);
       setCostSummary(cost);
@@ -52,6 +55,7 @@ export default function AdminConsole() {
       setAuditLogs(logs);
       setPolicyDecisions(decisions);
       setEscalations(Array.isArray(escs) ? escs : []);
+      setIdentityMatches(Array.isArray(matches) ? matches : []);
     } catch (e) {
       console.error('Failed to load admin data:', e);
     } finally {
@@ -100,6 +104,18 @@ export default function AdminConsole() {
     setActionLoading({ ...actionLoading, [`esc-${id}`]: null });
   }
 
+  // P3: identity crosswalk review — confirm activates, reject remembers.
+  async function handleIdentityReview(id, decision) {
+    setActionLoading({ ...actionLoading, [`id-${id}`]: decision });
+    try {
+      await fetchJSON(`${API_BASE}/ontology/identity/matches/${id}/${decision}`, {
+        method: 'POST',
+      });
+      loadData();
+    } catch (e) { console.error(e); }
+    setActionLoading({ ...actionLoading, [`id-${id}`]: null });
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -109,9 +125,11 @@ export default function AdminConsole() {
   }
 
   const openEscalations = escalations.filter((e) => e.status === 'open');
+  const pendingIdentity = identityMatches.filter((m) => m.status === 'inferred');
   const tabs = [
     { key: 'approvals', label: 'Approvals', icon: Shield, count: approvals.length },
     { key: 'escalations', label: 'Escalations', icon: UserCheck, count: openEscalations.length },
+    { key: 'identity', label: 'Identity', icon: GitMerge, count: pendingIdentity.length },
     { key: 'cost', label: 'Cost', icon: DollarSign },
     { key: 'audit', label: 'Audit Log', icon: FileText, count: auditLogs.length },
     { key: 'policy', label: 'Policy Decisions', icon: CheckCircle2, count: policyDecisions.length },
@@ -244,6 +262,83 @@ export default function AdminConsole() {
                       {actionLoading[`esc-${esc.id}`] === 'resolving' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
                       Resolve
                     </button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* Identity Tab (P3: cross-source identity review queue) */}
+      {tab === 'identity' && (
+        <div className="space-y-3">
+          {identityMatches.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No identity crosswalks yet — run identity resolution on a bound object to populate this queue
+            </p>
+          ) : (
+            identityMatches.map((m) => (
+              <div key={m.id} className="rounded-xl border border-border bg-card p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        m.status === 'confirmed' ? 'bg-green-100 text-green-700' :
+                        m.status === 'rejected' ? 'bg-red-100 text-red-600' :
+                        'bg-amber-100 text-amber-700'
+                      }`}>{m.status}</span>
+                      <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">
+                        {m.match_tier}
+                      </span>
+                      {m.confidence != null && (
+                        <span className="text-[11px] text-muted-foreground">
+                          confidence {(m.confidence * 100).toFixed(0)}%
+                        </span>
+                      )}
+                      <span className="text-[11px] text-muted-foreground">
+                        object {m.object_id?.slice(0, 8)}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 font-mono text-sm text-foreground">
+                      {m.pk_a} <span className="text-muted-foreground">≡</span> {m.pk_b}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      {m.source_a_key} ⇄ {m.source_b_key}
+                    </p>
+                    {m.evidence_json && (
+                      <details className="mt-1.5">
+                        <summary className="cursor-pointer text-[11px] text-primary">match evidence</summary>
+                        <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-secondary p-2 text-[10px] leading-relaxed">
+                          {JSON.stringify(m.evidence_json, null, 2)}
+                        </pre>
+                      </details>
+                    )}
+                    {m.reviewed_by && (
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        reviewed by {m.reviewed_by}
+                      </p>
+                    )}
+                  </div>
+                  {m.status === 'inferred' && (
+                    <div className="flex shrink-0 gap-2">
+                      <button
+                        onClick={() => handleIdentityReview(m.id, 'confirm')}
+                        disabled={!!actionLoading[`id-${m.id}`]}
+                        className="inline-flex items-center gap-1 rounded-md bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                      >
+                        {actionLoading[`id-${m.id}`] === 'confirm' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                        Confirm
+                      </button>
+                      <button
+                        onClick={() => handleIdentityReview(m.id, 'reject')}
+                        disabled={!!actionLoading[`id-${m.id}`]}
+                        className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-secondary disabled:opacity-50"
+                      >
+                        {actionLoading[`id-${m.id}`] === 'reject' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}
+                        Reject
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>

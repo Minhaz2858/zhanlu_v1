@@ -319,6 +319,19 @@ def ingest_kb(db: Session, kb_id: str) -> bool:
         db.commit()
         logger.info("ingest_kb: kb %s ready, %d chunks", kb_id, n)
 
+        # P3a: tabular files (xlsx/csv) are ALSO staged as queryable rows
+        # for identity resolution. Non-fatal — text indexing already won.
+        try:
+            from app.services.identity.file_rows import ingest_tabular_kb
+
+            staging = ingest_tabular_kb(db, kb)
+            if not staging.get("skipped"):
+                logger.info("ingest_kb: staged %s rows for kb %s",
+                            staging.get("rows"), kb_id)
+        except Exception:
+            logger.warning("ingest_kb: row staging failed for kb %s "
+                           "(non-fatal)", kb_id, exc_info=True)
+
         # Unified Resource Registry (flag-gated, best-effort): register the
         # ingested document store as a `file` resource for its projects.
         try:
