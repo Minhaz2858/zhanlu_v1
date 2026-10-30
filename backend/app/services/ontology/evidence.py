@@ -129,6 +129,48 @@ def stamp_discovery(
     })
 
 
+def stamp_human_document_approval(obj: OntologyObject, *, reviewer_id: str,
+                                  proposal, content_hash: str | None = None,
+                                  decision: str = "approved") -> None:
+    """P4 D2 — human authorization of a DOCUMENT-derived element. The ONLY
+    document-approval entry point to `verified` (the sole writer of
+    document provenance entries, D7):
+
+    - requires an authenticated human reviewer identity — a machine caller
+      (missing/blank reviewer) is refused exactly like the discovery guard
+      above: automation can never reach `verified`;
+    - appends ONE provenance entry {source_kb_id, doc_version_id,
+      content_hash, location, quote, reviewer, decision, audience_snapshot}
+      — per-entry authorization (D7); two documents on one object keep
+      independent entries;
+    - preserves existing provenance (append semantics) and reassigned the
+      JSON column (P1 mutation gotcha);
+    - human confirmation is not a score: confidence stays None."""
+    if not (reviewer_id or "").strip():
+        raise ValueError(
+            "document approval requires an authenticated human reviewer — "
+            "machine-generated evidence can never set verified"
+        )
+    obj.evidence_status = STATUS_VERIFIED
+    obj.confidence = None
+    base = dict(obj.provenance_json) if obj.provenance_json else {}
+    entries = list(base.get("document_provenance") or [])
+    entries.append({
+        "source_kb_id": proposal.source_kb_id,
+        "doc_version_id": proposal.doc_version_id,
+        "content_hash": content_hash,
+        "location": dict(proposal.location_json or {}),
+        "quote": proposal.quote,
+        "reviewer": reviewer_id,
+        "decision": decision,
+        "audience_snapshot": dict(proposal.audience_json or {}),
+        "approved_at": _now_iso(),
+    })
+    obj.provenance_json = {**base, "document_provenance": entries,
+                           "document_reviewer": reviewer_id,
+                           "document_approved_at": _now_iso()}
+
+
 def stamp_action_binding(action: OntologyAction, *, bound_by: str | None) -> None:
     """Human wires an action to a registry tool → inferred (the binding is
     machine-validated but is not itself data evidence); unbound → proposed."""

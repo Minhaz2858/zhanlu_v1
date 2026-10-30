@@ -247,3 +247,33 @@ class DocumentProposal(TimestampedBase):
     conflict_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     reviewed_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class DocumentDecisionEvent(TimestampedBase):
+    """P4 T7 — append-only document-proposal decision history
+    (IdentityDecisionEvent pattern). One row per review event: revise,
+    approve, reject, or a supersede notice. Never updated or deleted —
+    history is reconstructed by ordering on (event_seq, created_date) and
+    is anchored to the immutable doc_version_id via the proposal."""
+
+    __tablename__ = "ontology_document_decision_events"
+    __table_args__ = (
+        UniqueConstraint("org_id", "proposal_id", "event_seq",
+                         name="uq_document_decision_event_seq"),
+    )
+
+    proposal_id: Mapped[str] = mapped_column(String(36), nullable=False,
+                                             index=True)
+    object_id: Mapped[Optional[str]] = mapped_column(String(36),
+                                                     nullable=True, index=True)
+    event_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, doc="revise|approve|reject|supersede"
+    )
+    event_seq: Mapped[int] = mapped_column(nullable=False)
+    previous_status: Mapped[Optional[str]] = mapped_column(String(20),
+                                                           nullable=True)
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(255),
+                                                       nullable=True)
+    payload_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    detail_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
