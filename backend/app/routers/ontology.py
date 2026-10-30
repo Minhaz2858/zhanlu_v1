@@ -150,6 +150,46 @@ def bind_object(
         raise HTTPException(status_code=404, detail="Object not found")
     if body.backing_kind not in ("table", "entity", "metric", "manual"):
         raise HTTPException(status_code=422, detail="invalid backing_kind")
+    # P5-T2 (bind trap): a binding the runtime cannot serve is refused at
+    # the door — accepting it would create a permanent-refusal object.
+    if body.backing_kind == "metric":
+        from app.models.metric_definition import MetricDefinition
+
+        metric = (
+            db.query(MetricDefinition)
+            .filter(
+                MetricDefinition.id == (body.backing_ref or "").strip(),
+                MetricDefinition.org_id == org,
+                MetricDefinition.is_deleted == False,  # noqa: E712
+            )
+            .first()
+        )
+        if metric is None:
+            raise HTTPException(status_code=400, detail=(
+                "metric backing_ref does not resolve to a metric definition "
+                "in this org"))
+        if not metric.is_enabled or (metric.lifecycle or "") != "published":
+            raise HTTPException(status_code=400, detail=(
+                f"metric {metric.name!r} is {metric.lifecycle or 'disabled'} "
+                "— only published, enabled metrics can back an object"))
+    if body.backing_kind == "entity":
+        from app.models.identity import IdentityMatch
+
+        confirmed = (
+            db.query(IdentityMatch)
+            .filter(
+                IdentityMatch.org_id == org,
+                IdentityMatch.object_id == obj.id,
+                IdentityMatch.status == "confirmed",
+                IdentityMatch.is_deleted == False,  # noqa: E712
+            )
+            .count()
+        )
+        if not confirmed:
+            raise HTTPException(status_code=400, detail=(
+                "entity backing requires at least one CONFIRMED identity "
+                "crosswalk for this object — confirm one in the identity "
+                "review queue first"))
     obj.backing_kind = body.backing_kind
     obj.backing_ref = body.backing_ref
     if body.properties is not None:

@@ -37,13 +37,27 @@ def read_object_data(
         (BYO-DB) — routed through the read-only QueryService after an
         org-ownership check on the KB.
 
-    entity/metric backings return an honest "not yet supported" (P1).
+    entity/metric backings: metric → governed computation via
+    services/ontology/metrics.compute_metric (P5-T2); entity → confirmed
+    crosswalk resolution (P5-T4). Anything unresolvable returns a TYPED
+    unavailable result — never a fabricated number.
     """
     try:
         limit = max(1, min(int(limit or 50), 200))
     except (TypeError, ValueError):
         limit = 50
     filters = {k: v for k, v in (filters or {}).items() if v is not None}
+
+    if obj.backing_kind == "metric" and (obj.backing_ref or "").strip():
+        from app.services.ontology.metrics import compute_metric
+
+        out = compute_metric(db, org_id, obj.backing_ref, filters=filters)
+        if out.get("success"):
+            out["object"] = obj.name
+        return out
+
+    if obj.backing_kind == "entity" and (obj.backing_ref or "").strip():
+        return _resolve_entity_backing(db, org_id, obj, filters, limit)
 
     if obj.backing_kind != "table" or not obj.backing_ref:
         return {
@@ -138,6 +152,121 @@ def _map_rows_to_properties(rows: list[dict], obj: OntologyObject) -> list[dict]
         }
         for row in rows
     ]
+
+
+def _resolve_entity_backing(
+    db: Session,
+    org_id: str,
+    obj: OntologyObject,
+    filters: dict,
+    limit: int,
+) -> dict:
+    """P5-T4 — entity backing over CONFIRMED identity crosswalks only.
+
+    For every confirmed source pair the SAME records are returned per
+    source (each side keeps its OWN identifiers and rows — no destructive
+    merge, invariant I5). Inferred/rejected matches are never promoted at
+    runtime: no confirmed crosswalk → typed unavailable.
+    """
+    from app.models.identity import FileTableRow, IdentityMatch
+    from app.models.knowledge_base import KnowledgeBase
+
+    matches = (
+        db.query(IdentityMatch)
+        .filter(
+            IdentityMatch.org_id == org_id,
+            IdentityMatch.object_id == obj.id,
+            IdentityMatch.status == "confirmed",
+            IdentityMatch.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    )
+    if not matches:
+        return _unavailable_shape(
+            f"object {obj.name!r} has no CONFIRMED identity crosswalk — "
+            "confirm one in the identity review queue to enable entity reads")
+
+    groups: dict[tuple[str, str], list[IdentityMatch]] = {}
+    for m in matches:
+        groups.setdefault((m.source_a_key, m.source_b_key), []).append(m)
+
+    def _rows_for(source: dict, pks: list[str]) -> dict:
+        """Grounded rows for ONE side of a crosswalk. DB sources go through
+        the org-checked QueryService; file sources read the P3a staging."""
+        kind = (source or {}).get("kind")
+        pk_col = (source or {}).get("pk_column") or (source or {}).get("column")
+        kb_id = (source or {}).get("kb_id")
+        try:
+            if kind == "file":
+                rows = (
+                    db.query(FileTableRow)
+                    .filter(
+                        FileTableRow.kb_id == kb_id,
+                        FileTableRow.sheet_name == (source or {}).get("sheet"),
+                        FileTableRow.is_deleted == False,  # noqa: E712
+                    )
+                    .all()
+                )
+                col = pk_col or ""
+                out_rows = [
+                    r.values_json for r in rows
+                    if str((r.values_json or {}).get(col)) in set(pks)
+                ]
+                return {"kind": "file", "kb_id": kb_id,
+                        "sheet": (source or {}).get("sheet"),
+                        "pk_column": col, "rows": out_rows[:limit]}
+            kb = db.query(KnowledgeBase).filter(
+                KnowledgeBase.id == kb_id,
+                KnowledgeBase.is_deleted == False,  # noqa: E712
+            ).first()
+            if kb is None or (kb.org_id or "default-org") != org_id:
+                return {"kind": "db", "kb_id": kb_id, "rows": [],
+                        "reason": "source not in this org"}
+            if not (_IDENT_RE.match(str(pk_col or ""))
+                    and _IDENT_RE.match(str((source or {}).get("table") or ""))):
+                return {"kind": "db", "kb_id": kb_id, "rows": [],
+                        "reason": "source pk/table not resolvable"}
+            from app.services.db.query_service import QueryService
+
+            placeholders = ", ".join(f":pk{i}" for i in range(len(pks)))
+            sql = (f"SELECT * FROM {source['table']} "
+                   f"WHERE {pk_col} IN ({placeholders})")
+            result = QueryService(db).execute(
+                kb_id, sql, max_rows=limit,
+                params={f"pk{i}": v for i, v in enumerate(pks)})
+            return {"kind": "db", "kb_id": kb_id,
+                    "table": source.get("table"), "pk_column": pk_col,
+                    "rows": result.get("rows") or []}
+        except Exception as exc:  # noqa: BLE001 — honest per-source failure
+            logger.warning("entity backing source read failed: %s", exc)
+            return {"kind": kind, "kb_id": kb_id, "rows": [],
+                    "reason": f"source read failed: {exc}"}
+
+    out_groups = []
+    for (key_a, key_b), ms in groups.items():
+        first = ms[0]
+        pks_a = [m.pk_a for m in ms]
+        pks_b = [m.pk_b for m in ms]
+        out_groups.append({
+            "source_a_key": key_a,
+            "source_b_key": key_b,
+            "confirmed_pairs": len(ms),
+            "side_a": _rows_for(first.source_a or {}, pks_a),
+            "side_b": _rows_for(first.source_b or {}, pks_b),
+        })
+
+    return {
+        "success": True,
+        "object": obj.name,
+        "backing_kind": "entity",
+        "crosswalk_groups": out_groups,
+        "note": "per-source records only — no destructive merge",
+    }
+
+
+def _unavailable_shape(reason: str) -> dict:
+    return {"success": False, "unavailable": True,
+            "evidence_status": "unavailable", "reason": reason}
 
 
 def _read_via_kb(

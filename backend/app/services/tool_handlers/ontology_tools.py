@@ -307,6 +307,96 @@ async def _score_leads(args: dict, db: Session, user_id: str | None,
     }
 
 
+async def _compute_metric(args: dict, db: Session, user_id: str | None,
+                          context: dict | None = None) -> dict:
+    """P5-T3 — the shared governed-metric tool. The LLM may NAME a metric;
+    the number comes from deterministic code through the execution gate
+    (services/ontology/metrics.compute_metric). Every department agent
+    consumes the SAME definition — no per-agent formulas."""
+    from app.services.ontology.metrics import compute_metric, resolve_metric
+
+    org_id = _org_id(context)
+    metric_ref = str(args.get("metric") or "").strip()
+    if not metric_ref:
+        return {"success": False, "reason": "metric name is required"}
+
+    metric, reason = resolve_metric(db, org_id, metric_ref)
+    if metric is None:
+        # resolve_metric's refusals are already typed/unavailable-shaped;
+        # keep the shape but never leak another org's existence.
+        return {"success": False, "unavailable": True,
+                "evidence_status": "unavailable", "reason": reason}
+
+    # P0 discipline: a metric tied to ontology objects requires the CALLING
+    # agent to hold a binding (read) on at least one of those objects'
+    # domains. Callers without an agent identity (API surface) pass the org
+    # wall only.
+    agent_name = (context or {}).get("agent_name")
+    refs = metric.source_object_refs or []
+    if refs and agent_name:
+        from app.models.ontology import AgentDomainBinding, OntologyObject
+
+        domains = {
+            o.domain_id for o in db.query(OntologyObject).filter(
+                OntologyObject.id.in_(refs),
+                OntologyObject.org_id == org_id,
+                OntologyObject.is_deleted == False,  # noqa: E712
+            ).all()
+        }
+        bound = {
+            b.domain_id for b in db.query(AgentDomainBinding).filter(
+                AgentDomainBinding.org_id == org_id,
+                AgentDomainBinding.agent_name == agent_name,
+                AgentDomainBinding.is_deleted == False,  # noqa: E712
+            ).all()
+        }
+        if not (domains & bound):
+            return {"success": False, "unavailable": True,
+                    "evidence_status": "unavailable",
+                    "reason": ("agent is not bound to any domain this metric "
+                               "backs — request access, never estimate")}
+
+    extra = args.get("filters") if isinstance(args.get("filters"), dict) else None
+    return compute_metric(db, org_id, metric.id, filters=extra)
+
+
+COMPUTE_METRIC_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "compute_metric",
+        "description": (
+            "Compute a GOVERNED business metric (revenue, OEE, gross "
+            "margin, ...) from the org's authoritative metric registry. "
+            "The value is calculated deterministically from the verified "
+            "definition and passes the SQL execution gate — you cannot "
+            "alter or estimate it; cite it as returned. Use whenever the "
+            "user asks for a governed KPI number."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string",
+                           "description": "Metric name or synonym (e.g. 'Gross Revenue')."},
+                "filters": {"type": "object",
+                            "description": "Optional extra equality filters on columns, e.g. {\"fdocstatus\": \"C\"}."},
+            },
+            "required": ["metric"],
+        },
+    },
+}
+
+registry.register(
+    name="compute_metric",
+    schema=COMPUTE_METRIC_SCHEMA,
+    handler=_compute_metric,
+    category="data",
+    toolset="data",
+    description="Compute a governed business metric from the authoritative registry (deterministic, gate-passed).",
+    emoji="📐",
+    max_result_size_chars=20_000,
+)
+
+
 SCORE_SCHEMA = {
     "type": "function",
     "function": {
