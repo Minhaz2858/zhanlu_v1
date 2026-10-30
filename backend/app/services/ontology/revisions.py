@@ -13,6 +13,7 @@ Contract:
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from sqlalchemy import func, select
@@ -29,6 +30,12 @@ from app.models.ontology_revision import OntologyRevision
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 # Mutable-state snapshot fields per entity type (evidence fields INCLUDED —
 # the history must be able to reconstruct any prior evidence state).
@@ -59,6 +66,14 @@ def snapshot(entity_type: str, entity) -> dict:
     return {f: getattr(entity, f) for f in _SNAPSHOT_FIELDS[entity_type]}
 
 
+def _json_stable(value):
+    """Normalize through a JSON round-trip so dict/list/type drift
+    (e.g. tuple stored → list read back) can never fake a change —
+    a revision must reflect a MEANINGFUL difference, not serialization
+    noise."""
+    return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+
 def _latest_after(db: Session, entity_type: str, entity_id: str) -> dict | None:
     row = (
         db.query(OntologyRevision)
@@ -78,10 +93,14 @@ def record_revision(
 ):
     """Record ONE revision for `entity`, atomic with the caller's
     transaction. Returns the OntologyRevision, or None when the snapshot
-    is unchanged (idempotent re-run → zero revisions)."""
-    after = snapshot(entity_type, entity)
+    is unchanged (idempotent re-run → zero revisions).
+
+    CALLING CONTRACT: mutate the entity FIRST, then call this — the
+    snapshot is taken at call time. Calling it before the mutation and
+    mutating after a None return leaves the mutation unrevised."""
+    after = _json_stable(snapshot(entity_type, entity))
     before = _latest_after(db, entity_type, entity.id)
-    if before is not None and before == after:
+    if before is not None and _json_stable(before) == after:
         return None  # idempotent: nothing meaningfully changed
 
     org_id = getattr(entity, "org_id", None)
@@ -112,8 +131,12 @@ def record_revision(
         )
         try:
             nested = db.begin_nested()
-            db.add(rev)
-            db.flush()
+            try:
+                db.add(rev)
+                db.flush()
+            except Exception:
+                nested.rollback()  # release the aborted savepoint before retry
+                raise
             nested.commit()  # release savepoint; still atomic with outer txn
             return rev
         except Exception as exc:  # noqa: BLE001 — concurrent race → retry
@@ -149,7 +172,13 @@ def revisions_since(db: Session, org_id: str, since_revision_id: str | None,
             OntologyRevision.org_id == org_id,
         ).first()
         if anchor is not None:
-            q = q.filter(OntologyRevision.created_date > anchor.created_date)
+            # Composite cursor: (created_date, id) — same-second batches
+            # must not be permanently skipped by a date-only cursor.
+            q = q.filter(
+                (OntologyRevision.created_date > anchor.created_date)
+                | ((OntologyRevision.created_date == anchor.created_date)
+                   & (OntologyRevision.id > anchor.id))
+            )
     return q.order_by(OntologyRevision.created_date.desc()).limit(limit).all()
 
 
@@ -158,8 +187,11 @@ _RESTORE_FIELDS = _SNAPSHOT_FIELDS  # rollback restores the full snapshot
 
 def rollback_to_revision(db: Session, entity_type: str, entity,
                          revision_no: int, changed_by: str | None = None):
-    """Restore the entity to `revision_no`'s BEFORE state and append a NEW
-    `rollback` revision. History is never erased or rewritten."""
+    """Restore the entity to its state AT revision N (that revision's
+    after_json) and append a NEW `rollback` revision. History is never
+    erased or rewritten. Rolling back a retire un-retires; restoring a
+    'verified' evidence state is legitimate (it was human-authorized when
+    recorded) and the rollback provenance records who did it."""
     target = (
         db.query(OntologyRevision)
         .filter(
@@ -182,11 +214,27 @@ def rollback_to_revision(db: Session, entity_type: str, entity,
     for f in _RESTORE_FIELDS[entity_type]:
         if f in restore:
             setattr(entity, f, restore[f])
-    return record_revision(
-        db, entity_type, entity, change_kind="rollback",
-        changed_by=changed_by,
-        summary=f"rollback to revision {revision_no}",
-    )
+    if hasattr(entity, "provenance_json"):
+        base = dict(entity.provenance_json) if entity.provenance_json else {}
+        entity.provenance_json = {**base, "rollback_by": changed_by,
+                                  "rollback_at": _now_iso(),
+                                  "rollback_to": revision_no}
+    try:
+        return record_revision(
+            db, entity_type, entity, change_kind="rollback",
+            changed_by=changed_by,
+            summary=f"rollback to revision {revision_no}",
+        )
+    except Exception as exc:  # noqa: BLE001 — e.g. name unique conflict → honest 422
+        from sqlalchemy.exc import IntegrityError
+
+        if isinstance(exc, IntegrityError):
+            db.rollback()
+            raise ValueError(
+                f"rollback conflicts with current data "
+                f"(e.g. another element already uses the restored name): {exc.orig}"
+            )
+        raise
 
 
 def revision_to_dict(r: OntologyRevision) -> dict:

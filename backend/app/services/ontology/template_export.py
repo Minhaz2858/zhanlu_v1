@@ -196,7 +196,6 @@ def import_org_template(db: Session, org_id: str, bundle: dict) -> dict:
             report["objects_created"] += 1
 
     obj_by_name = {o.name: o for o in list_objects(db, org_id)}
-    created_entities: list[tuple[str, object]] = []
     for lspec in (bundle.get("links") or []):
         src = obj_by_name.get((lspec.get("from") or ""))
         dst = obj_by_name.get((lspec.get("to") or ""))

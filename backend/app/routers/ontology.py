@@ -709,7 +709,7 @@ def create_binding(
 # ── P2: versioned ontology registry — history, rollback, retirement ────
 
 
-@router.get("/revisions")
+@router.get("/ontology/revisions")
 def list_all_revisions(
     since: str | None = None,
     entity_type: str | None = None,
@@ -725,7 +725,7 @@ def list_all_revisions(
     return {"revisions": [revision_to_dict(r) for r in rows]}
 
 
-@router.get("/{entity_type}/{entity_id}/revisions")
+@router.get("/ontology/{entity_type}/{entity_id}/revisions")
 def list_entity_revisions(
     entity_type: str,
     entity_id: str,
@@ -764,7 +764,7 @@ def _entity_for_rollback(db: Session, org_id: str, entity_type: str, entity_id: 
     return entity
 
 
-@router.post("/{entity_type}/{entity_id}/rollback")
+@router.post("/ontology/{entity_type}/{entity_id}/rollback")
 def rollback_entity(
     entity_type: str,
     entity_id: str,
@@ -789,6 +789,11 @@ def rollback_entity(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     db.commit()
+    if rev is None:
+        # Requested revision's state == current state: nothing to restore.
+        return {"ok": True, "revision": None,
+                "note": "state already matches the requested revision — "
+                        "no revision recorded"}
     return {"ok": True, "revision": revision_to_dict(rev)}
 
 
@@ -807,7 +812,7 @@ def _retire(db: Session, admin: User, entity_type: str, entity) -> dict:
     return {"ok": True, "retired": entity.id}
 
 
-@router.delete("/objects/{object_id}")
+@router.delete("/ontology/objects/{object_id}")
 def retire_object(
     object_id: str,
     db: Session = Depends(get_db),
@@ -821,7 +826,7 @@ def retire_object(
     return _retire(db, admin, "object", obj)
 
 
-@router.delete("/links/{link_id}")
+@router.delete("/ontology/links/{link_id}")
 def retire_link(
     link_id: str,
     db: Session = Depends(get_db),
@@ -840,7 +845,7 @@ def retire_link(
     return _retire(db, admin, "link", link)
 
 
-@router.delete("/actions/{action_id}")
+@router.delete("/ontology/actions/{action_id}")
 def retire_action(
     action_id: str,
     db: Session = Depends(get_db),
