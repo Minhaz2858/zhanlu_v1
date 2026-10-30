@@ -66,8 +66,10 @@ class KnowledgeBase(TimestampedBase):
     # immutable `document_versions` table (D5: version rows are never
     # updated or deleted). NULL for legacy rows not yet re-indexed.
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # use_alter: document_versions.kb_id → knowledge_bases.id and this
+    # pointer form a FK cycle; ALTER-based creation avoids circular CREATE.
     content_version_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("document_versions.id"), nullable=True
+        String(36), ForeignKey("document_versions.id", use_alter=True), nullable=True
     )
 
     # Stats

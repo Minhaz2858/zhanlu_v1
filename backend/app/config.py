@@ -216,6 +216,12 @@ class Settings(BaseSettings):
     # Master switch. When False, no automation run ever sends email, even if
     # a task has recipients configured. Enable first, then add per-task emails.
     NOTIFICATION_GATEWAY_ENABLED: bool = False
+
+    # ── P4: Document-Grounded Ontology (document_grounding.py) ───────────
+    # Master switch for the document→ontology proposal pipeline. Default
+    # OFF; enable per deployment after reviewing the authorization
+    # inheritance contract (docs/plans/2026-10-31-p4-decision-record.md).
+    ONTOLOGY_DOC_GROUNDING_ENABLED: bool = False
     # Max attachment size in bytes before the gateway falls back to a signed
     # download link (8 MB default, matching the plan's "file > 8 MB → link").
     EMAIL_ATTACH_MAX_BYTES: int = 8_388_608
