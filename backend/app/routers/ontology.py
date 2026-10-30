@@ -93,7 +93,8 @@ def get_objects(
     user: User = Depends(get_current_user_required),
 ):
     org = _org_or_404(user, org_id)
-    return [object_to_dict(o) for o in list_objects(db, org, domain_id)]
+    return [object_to_dict(o, doc_ctx={"db": db, "user": user})
+            for o in list_objects(db, org, domain_id)]
 
 
 @router.get("/ontology/links")
@@ -174,7 +175,7 @@ def bind_object(
         or str(getattr(admin, "id", "") or ""),
     )
     db.commit()
-    return object_to_dict(obj)
+    return object_to_dict(obj, doc_ctx={"db": db, "user": admin})
 
 
 class ObjectDataBody(BaseModel):
@@ -709,6 +710,27 @@ def create_binding(
 # ── P2: versioned ontology registry — history, rollback, retirement ────
 
 
+def _scrub_revision(r: dict, db: Session, user: User) -> dict:
+    """D7 (P4 T8): revision snapshots embed provenance_json, which may
+    carry document-derived entries (quotes, locations, reviewer ids).
+    Apply the SAME per-entry D6 filter to the snapshots that the live
+    object serialization uses — the revision feed must not become a
+    provenance side-channel. Before/after are reassigned, never mutated."""
+    from app.services.ontology.doc_access import filter_document_entries
+
+    for key in ("before", "after"):
+        snap = r.get(key)
+        if not isinstance(snap, dict):
+            continue
+        prov = snap.get("provenance_json")
+        if isinstance(prov, dict) and "document_provenance" in prov:
+            snap = dict(snap)
+            snap["provenance_json"] = filter_document_entries(
+                db, user, prov)
+            r[key] = snap
+    return r
+
+
 @router.get("/ontology/revisions")
 def list_all_revisions(
     since: str | None = None,
@@ -716,13 +738,15 @@ def list_all_revisions(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_required),
 ):
-    """Org-wide revision feed (newest first). `since` = a revision id."""
+    """Org-wide revision feed (newest first). `since` = a revision id.
+    Document provenance entries inside snapshots are per-entry gated (D7)."""
     from app.services.ontology.revisions import revision_to_dict, revisions_since
 
     if entity_type and entity_type not in ("object", "link", "action", "domain"):
         raise HTTPException(status_code=422, detail="invalid entity_type")
     rows = revisions_since(db, user.org_id, since, entity_type)
-    return {"revisions": [revision_to_dict(r) for r in rows]}
+    return {"revisions": [
+        _scrub_revision(revision_to_dict(r), db, user) for r in rows]}
 
 
 @router.get("/ontology/{entity_type}/{entity_id}/revisions")
@@ -732,13 +756,15 @@ def list_entity_revisions(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_required),
 ):
-    """Per-entity revision history (newest first)."""
+    """Per-entity revision history (newest first). Document provenance
+    entries inside snapshots are per-entry gated (D7)."""
     from app.services.ontology.revisions import list_revisions, revision_to_dict
 
     if entity_type not in ("object", "link", "action", "domain"):
         raise HTTPException(status_code=422, detail="invalid entity_type")
     rows = list_revisions(db, user.org_id, entity_type, entity_id)
-    return {"revisions": [revision_to_dict(r) for r in rows]}
+    return {"revisions": [
+        _scrub_revision(revision_to_dict(r), db, user) for r in rows]}
 
 
 class RollbackBody(BaseModel):
@@ -984,3 +1010,181 @@ def identity_history(
         return decision_history(db, user.org_id, match_id)
     except LookupError:
         raise HTTPException(status_code=404, detail="Match not found")
+
+
+# ── P4 T8: document-grounded ontology evidence (review queue) ────────────
+
+def _document_gate(db: Session, user: User, kb_id: str):
+    """D6 fail-closed gate on the SOURCE document. admin ≠ document-reader:
+    org-admin grants the ROUTE, this gate grants the DOCUMENT — approval
+    requires BOTH. Returns the KB on success (PermissionError → 403)."""
+    from app.models.knowledge_base import KnowledgeBase
+    from app.services.ontology.doc_access import assert_document_kb_access
+
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id)
+        .first()
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="Source document not found")
+    try:
+        assert_document_kb_access(db, user, kb)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return kb
+
+
+@router.post("/ontology/document-evidence/extract")
+def extract_document_evidence_ep(
+    body: dict,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Run the document→ontology proposal pipeline for one file KB (P4 T6).
+    Org-admin + D6 document access required; the master flag gates it."""
+    import app.config as config
+    from app.services.ontology.document_grounding import (
+        extract_document_evidence,
+    )
+
+    if not getattr(config.settings, "ONTOLOGY_DOC_GROUNDING_ENABLED", False):
+        raise HTTPException(
+            status_code=400,
+            detail="document grounding is disabled ("
+                   "ONTOLOGY_DOC_GROUNDING_ENABLED)",
+        )
+    kb = _document_gate(db, admin, str(body.get("kb_id") or ""))
+    return extract_document_evidence(db, kb, org_id=admin.org_id)
+
+
+def _gate_proposal(db: Session, admin: User, proposal_id: str):
+    """Fetch an org-scoped proposal AND gate its source document (D6)."""
+    from app.models.ontology import DocumentProposal
+
+    p = (
+        db.query(DocumentProposal)
+        .filter(DocumentProposal.id == proposal_id,
+                DocumentProposal.org_id == admin.org_id)
+        .first()
+    )
+    if p is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    _document_gate(db, admin, p.source_kb_id)
+    return p
+
+
+@router.get("/ontology/document-evidence")
+def list_document_evidence(
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Org review queue. Restricted-source proposals are HIDDEN from admins
+    without document access (D6) — the count is reported honestly."""
+    from app.models.ontology import DocumentProposal
+    from app.services.ontology.doc_access import document_access_state
+    from app.services.ontology.document_review import _to_dict
+
+    q = db.query(DocumentProposal).filter(
+        DocumentProposal.org_id == admin.org_id)
+    if status:
+        q = q.filter(DocumentProposal.status == status)
+    rows = q.order_by(DocumentProposal.created_date.desc()).all()
+
+    out, hidden = [], 0
+    for p in rows:
+        from app.models.knowledge_base import KnowledgeBase
+
+        kb = (
+            db.query(KnowledgeBase)
+            .filter(KnowledgeBase.id == p.source_kb_id)
+            .first()
+        )
+        if document_access_state(db, admin, kb)["allowed"]:
+            out.append(_to_dict(p))
+        else:
+            hidden += 1
+    return {"proposals": out, "hidden": hidden}
+
+
+@router.post("/ontology/document-evidence/{proposal_id}/approve")
+def approve_document_evidence(
+    proposal_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """ATOMIC approve (P4 T7/D4): element + provenance entry + D2 stamp +
+    revision + decision event + audit + status. The reviewer identity is
+    the authenticated principal — never a request body."""
+    from app.services.ontology.document_review import review_proposal
+
+    _gate_proposal(db, admin, proposal_id)
+    try:
+        return review_proposal(
+            db, admin.org_id, proposal_id, "approve",
+            reviewed_by=admin.id,
+            domain_id=body.get("domain_id"),
+            payload_override=body.get("payload_override"),
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/ontology/document-evidence/{proposal_id}/reject")
+def reject_document_evidence(
+    proposal_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    from app.services.ontology.document_review import review_proposal
+
+    _gate_proposal(db, admin, proposal_id)
+    try:
+        return review_proposal(db, admin.org_id, proposal_id, "reject",
+                               reviewed_by=admin.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/ontology/document-evidence/{proposal_id}/revise")
+def revise_document_evidence(
+    proposal_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Admin edits the proposal payload while it is still `proposed`."""
+    from app.services.ontology.document_review import revise_proposal
+
+    _gate_proposal(db, admin, proposal_id)
+    try:
+        return revise_proposal(db, admin.org_id, proposal_id,
+                               body.get("payload") or {},
+                               reviewed_by=admin.id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/ontology/document-evidence/{proposal_id}/history")
+def document_evidence_history(
+    proposal_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Append-only decision history for one proposal (restricted sources
+    stay hidden behind the D6 gate)."""
+    from app.services.ontology.document_review import decision_history
+
+    _gate_proposal(db, admin, proposal_id)
+    try:
+        return decision_history(db, admin.org_id, proposal_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Proposal not found")

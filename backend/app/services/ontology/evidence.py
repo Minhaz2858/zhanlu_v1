@@ -166,9 +166,10 @@ def stamp_human_document_approval(obj: OntologyObject, *, reviewer_id: str,
         "audience_snapshot": dict(proposal.audience_json or {}),
         "approved_at": _now_iso(),
     })
-    obj.provenance_json = {**base, "document_provenance": entries,
-                           "document_reviewer": reviewer_id,
-                           "document_approved_at": _now_iso()}
+    # Per-entry ONLY (T8 review F4): no object-level reviewer/approval keys —
+    # everything rides inside the filtered entries so hiding an entry hides
+    # ALL traces of that document's approval.
+    obj.provenance_json = {**base, "document_provenance": entries}
 
 
 def stamp_action_binding(action: OntologyAction, *, bound_by: str | None) -> None:

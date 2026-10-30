@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.models.base import Base
 from app.models.ontology import OntologyAction, OntologyObject
+import app.models.identity  # noqa: F401 — register identity tables in metadata (ordering-dependent create_all)
 
 ORG = "org-test"
 

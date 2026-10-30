@@ -18,7 +18,24 @@ def domain_to_dict(d: OntologyDomain) -> dict:
     }
 
 
-def object_to_dict(o: OntologyObject) -> dict:
+def object_to_dict(o: OntologyObject, *, doc_ctx: dict | None = None) -> dict:
+    """Serialize an object. Document-derived provenance entries (P4/D7)
+    are PER-ENTRY gated: without an auth context (doc_ctx=None — external
+    API keys, unknown callers) they are stripped entirely; with
+    doc_ctx={"db", "user"} only entries whose source document the user may
+    access survive (fail-closed, doc_access.filter_document_entries)."""
+    provenance = o.provenance_json
+    if provenance and "document_provenance" in provenance:
+        if doc_ctx is None:
+            provenance = {k: v for k, v in provenance.items()
+                          if k != "document_provenance"}
+        else:
+            from app.services.ontology.doc_access import (
+                filter_document_entries,
+            )
+
+            provenance = filter_document_entries(
+                doc_ctx.get("db"), doc_ctx.get("user"), provenance)
     return {
         "id": o.id, "domain_id": o.domain_id, "name": o.name,
         "display_name": o.display_name, "description": o.description,
@@ -27,7 +44,7 @@ def object_to_dict(o: OntologyObject) -> dict:
         # P1 evidence taxonomy (canonical statuses: evidence.py)
         "evidence_status": o.evidence_status,
         "confidence": o.confidence,
-        "provenance": o.provenance_json,
+        "provenance": provenance,
     }
 
 

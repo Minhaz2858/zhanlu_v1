@@ -17,6 +17,7 @@ from app.models.resource_access_policy import ResourceAccessPolicy
 from app.models.user import User
 from app.routers.access_policies import router as ap_router
 import app.models  # noqa: F401  register all models
+import app.models.identity  # noqa: F401 — register identity tables in metadata (ordering-dependent create_all)
 
 
 @pytest.fixture(scope="module", autouse=True)

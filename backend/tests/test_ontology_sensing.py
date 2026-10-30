@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.models.base import Base
 from app.models.ontology_sensor import OntologySensor, OntologySensorRun
+import app.models.identity  # noqa: F401 — register identity tables in metadata (ordering-dependent create_all)
 
 ORG = "org-sense"
 

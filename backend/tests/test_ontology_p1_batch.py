@@ -15,6 +15,9 @@ from app.models.ontology import (
     OntologyLink,
     OntologyObject,
 )
+import app.models.ontology_revision  # noqa: F401 — register in metadata
+# (fanout's notify_object_change writes ontology_revisions; without this
+# import create_all misses the table — ordering-dependent latent bug)
 from app.services.ontology.fanout import notify_object_change, plan_fanout
 from app.services.ontology.queries import ensure_domains, get_object_by_name
 from app.services.trust_panel import build_trust_panel, trust_panel_for_message
