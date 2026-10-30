@@ -19,10 +19,11 @@ Design rules (from the strategy's anti-goals):
   same wall as the rest of the platform.
 """
 
+from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, JSON, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Boolean, DateTime, JSON, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.models.base import TimestampedBase
 
@@ -183,3 +184,66 @@ class CoverageState(TimestampedBase):
     # The business metric this domain is accountable for (from §4 matrix).
     metric_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     metric_value: Mapped[Optional[float]] = mapped_column(default=None)
+
+
+class DocumentProposal(TimestampedBase):
+    """P4 T4 — a document-derived ontology proposal awaiting human review.
+
+    Every row retains the full provenance chain required by the plan:
+    kb_id + doc_version_id (document identity), chunk_key (chunk id),
+    location_json (page/sheet/section), quote (the ORIGINAL verbatim span —
+    whitespace normalization is a verifier concern, never stored here),
+    method + model_version (extraction provenance), created_date
+    (extraction timestamp), plus source_kb_id + audience_json (D3/D6
+    authorization inheritance).
+
+    Status lifecycle: proposed → approved | rejected | superseded.
+    Machine steps can NEVER create an `approved` row or a verified element;
+    approval flows exclusively through document_review.review_proposal.
+    """
+
+    __tablename__ = "ontology_document_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id", "kb_id", "doc_version_id", "chunk_key",
+            "proposal_kind", "quote_hash",
+            name="uq_document_proposal_idempotency",
+        ),
+    )
+
+    kb_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    doc_version_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, index=True
+    )
+    source_kb_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    chunk_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    proposal_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    # entity | definition | relationship | rule | approval_policy |
+    # status_definition | metric
+    payload_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    quote: Mapped[str] = mapped_column(Text, nullable=False)
+    quote_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    @validates("quote")
+    def _derive_quote_hash(self, key, value):
+        """quote_hash is a derived integrity field: SHA-256 of the original
+        verbatim span. Callers never set it by hand."""
+        import hashlib
+
+        self.quote_hash = hashlib.sha256(
+            (value or "").encode("utf-8")
+        ).hexdigest()
+        return value
+    location_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    method: Mapped[str] = mapped_column(String(60), nullable=False)
+    model_version: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    audience_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="proposed", index=True
+    )
+    object_id: Mapped[Optional[str]] = mapped_column(
+        String(36), nullable=True, index=True
+    )  # set when approved/attached
+    conflict_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
