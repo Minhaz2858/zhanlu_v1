@@ -1,12 +1,12 @@
-# P4 — Document-Grounded Ontology: Gap Audit + Implementation Plan (v2, REVISED)
+# P4 — Document-Grounded Ontology: Gap Audit + Implementation Plan (v3, FINAL)
 
-**Date:** 2026-10-31 (v2 — revised after review REQUEST CHANGES)
-**Status:** PLAN v2 — presented for approval. NO implementation before approval.
+**Date:** 2026-10-31 (v3 — final corrections after second review)
+**Status:** PLAN v3 — presented for final approval. NO implementation before approval.
 **Scope guard:** P4 only. No P5 (computed metrics), P6, P7 work.
 **Companion decision record:** `docs/plans/2026-10-31-p4-decision-record.md`
-(resolves the four review blockers: file-level document identity, dedicated
-human document-approval writer, authorization inheritance rule, atomic
-approval).
+(D1-D4: file-level identity, dedicated approval writer, inheritance rule,
+atomic approval — D5-D7: immutable versions, FAIL-CLOSED authorization
+function, per-provenance-entry authorization).
 
 ---
 
@@ -50,7 +50,8 @@ approval).
 ```
 file KB ingest (PDF/DOCX/XLSX/CSV)                    [one KB = one file — D1, evidence in decision record]
   └─ ingest_kb computes SHA-256 from actual file bytes
-      └─ document_versions row appended (append-only history; kb.content_hash = current)   [NEW, migration 107]
+      └─ document_versions row APPENDED — rows are IMMUTABLE, never updated/deleted      [D5, migration 107]
+      └─ current pointer: kb.content_hash + kb.content_version_id (on knowledge_bases)   [D5]
   └─ extract_segments()            # NEW: structured {text, location(page|sheet|section)}   [T2]
       └─ chunk_segments()          # NEW: chunks carry location metadata (RAG path untouched) [T3]
           └─ document_grounding.extract_document_evidence(db, kb)   # NEW, flag-gated [T6]
@@ -67,12 +68,20 @@ Human review (org-admin, AdminConsole "Doc Evidence" tab)                       
   │     + record_revision (P2 savepoint/lock/retry unchanged)
   │     + document decision event (IdentityDecisionEvent pattern)
   │     + AuditEvent + proposal status update
-  │   Authorization gate: reviewer must pass the source KB's access check;
-  │   audience-unresolvable proposals are NOT promotable (D3)
+  │   Authorization gate: assert_document_kb_access (D6, FAIL-CLOSED) on the
+  │   source KB for the reviewer; audience-unresolvable proposals are NOT
+  │   promotable (D3)
   ├─ reject   → remembered, never re-proposed
   └─ revise   → admin edits payload, then approve
-Re-ingest with changed hash → old proposals flagged `superseded`
-(history + decision events preserved; doc_version_id anchors them)          [D1]
+Re-ingest with changed hash → new immutable version row; old proposals
+flagged `superseded` — history + decision events preserved (doc_version_id
+anchors them)                                                                [D1/D5]
+Runtime disclosure (discovery / read_object_data enrichment / external API):
+  PER-PROVENANCE-ENTRY filtering via the D6 fail-closed gate — each
+  document-derived provenance entry carries {source_kb_id, doc_version_id,
+  content_hash, location, quote, reviewer, decision, audience_snapshot};
+  restricted entries are hidden even when the object's other entries are
+  visible; a global `verified` status is NEVER a disclosure license.         [D7]
 ```
 
 **Evidence contract (P1-aligned):**
@@ -94,10 +103,11 @@ extraction timestamp — plus `audience_json` (D3).
 
 ### New/changed artifacts
 
-- Migration `107_document_versions`: append-only `document_versions`
-  (`org_id, kb_id, content_hash, content_bytes, file_url_at_ingest,
-  first_indexed_at, is_current` + RLS `tenant_isolation`, 105 pattern) AND
-  `kb.content_hash` current-hash column. SHA-256 from actual file bytes.
+- Migration `107_document_versions`: **immutable** `document_versions`
+  (`id, org_id, kb_id, content_hash, content_bytes, file_url_at_ingest,
+  first_indexed_at` + RLS `tenant_isolation`, 105 pattern — NO mutable
+  status column, D5) + current pointer columns on `knowledge_bases`
+  (`content_hash`, `content_version_id`). SHA-256 from actual file bytes.
 - Migration `108_ontology_document_proposals`: proposal table (+ RLS) —
   idempotency `(org_id, kb_id, doc_version_id, chunk_key, proposal_kind,
   quote_hash)`; `source_kb_id` + `audience_json` (D3); `status` ∈
@@ -106,35 +116,61 @@ extraction timestamp — plus `audience_json` (D3).
   additive; existing `extract_text`/`chunk_text` behavior unchanged.
 - `evidence.stamp_human_document_approval` (D2) — evidence.py stays the
   sole evidence writer.
+- `services/ontology/doc_access.py::assert_document_kb_access` (D6) — NEW
+  FAIL-CLOSED gate. The existing `resolve_user_policies`
+  (`access_policy_service.py:100-165`) FAILS OPEN (no rows / missing
+  principal / resolution error → `has_policies=False` = full access), so it
+  CANNOT be reused as-is for disclosure decisions; the new gate inverts the
+  default at this boundary (unknown → deny) while using it for evaluation.
+  Principal kinds: authenticated user (User.id from JWT) — evaluated
+  against the source KB's project/agent share bindings; API-key principals
+  (X-API-Key, org-scoped, no user) — document-derived evidence DENIED by
+  default; org-admin — allowed and recorded as such.
 - `services/ontology/document_grounding.py` — extraction + verification +
   proposal persistence (+ per-run counts: proposed / verified_quote /
   dropped_untraceable / duplicates_skipped).
 - `services/ontology/document_review.py` — atomic approve/reject/revise +
-  decision events + revision integration (D4).
-- Runtime authorization gate (D3) in discovery / `read_object_data`
-  enrichment / external read API: document-derived elements filtered or
-  annotated when the principal lacks source-KB access.
+  decision events + revision integration (D4). Provenance ENTRIES carry
+  `{source_kb_id, doc_version_id, content_hash, location, quote, reviewer,
+  decision, audience_snapshot}` (D7) — per-entry authorization.
+- Runtime authorization gate (D6/D7) in discovery / `read_object_data`
+  enrichment / external read API: PER-ENTRY filtering of document-derived
+  provenance; fail-closed (unknown → hidden); API-key principals get no
+  document-derived content by default.
 - `routers/ontology.py` — `/ontology/document-evidence/*` endpoints
   (org-admin mutations, literal paths).
 - `AdminConsole.jsx` — "Doc Evidence" tab; `EnterpriseProfile.jsx` —
-  document provenance on objects (EvidenceBadge reuse).
+  document provenance on objects (EvidenceBadge reuse; per-entry
+  visibility).
 - Flag: `ONTOLOGY_DOC_GROUNDING_ENABLED` (default False).
 
 ## Part C — Bite-sized TDD tasks (revised sequence)
 
 | # | Task | Acceptance condition |
 |---|------|----------------------|
-| T0 | Resolve document identity + authorization contracts | DONE — decision record: cardinality settled (one KB = one file, evidence cited), inheritance rule defined, atomic approval defined |
-| T1 | Document content hashing/versioning (migration 107 + `ingest_kb` computes SHA-256 from file bytes, appends `document_versions`) | Stable file-level identity; hash stable across unchanged re-ingest; differs on content change; old versions preserved; legacy rows NULL |
+| T0 | Resolve document identity + authorization contracts | DONE — decision record D1-D7: cardinality settled (one KB = one file, evidence cited), inheritance + fail-closed gate defined, atomic approval defined, per-entry authorization defined |
+| T1 | Document content hashing/versioning (migration 107: immutable `document_versions` + current pointer on `knowledge_bases`; `ingest_kb` computes SHA-256 from file bytes, appends version rows) | Stable file-level identity; **unchanged re-ingest → NO new version** (scenario 1); **changed content → NEW immutable version** (scenario 2); version rows never updated/deleted; legacy rows NULL |
 | T2 | Structured extraction `extract_segments` (pdf pages, docx paragraphs+headings, xlsx sheets, csv rows) | Page/sheet/section provenance correct per type; existing `extract_text` behavior byte-identical (regression) |
 | T3 | Location-aware chunking `chunk_segments` | Location propagated; existing RAG behavior preserved |
-| T4 | Proposal model + migration 108 (+ RLS + idempotency + `source_kb_id`/`audience_json`) | Org isolation + document identity (doc_version_id) |
+| T4 | Proposal model + migration 108 (+ RLS + idempotency + `source_kb_id`/`audience_json`/`doc_version_id`) | Org isolation + document identity; **old proposals + decision history remain accessible after superseding** (scenario 3) |
 | T5 | Deterministic quote verification | Every accepted quote traceable to source segment; ORIGINAL span stored; untraceable dropped + counted |
 | T6 | Extraction + dedup pipeline (flag-gated; untrusted-content prompt hardening; LLM step stubbed in tests) | No fabricated evidence; counts reported separately; cross-org KB rejected; dedup no duplicates; conflicts flagged |
-| T7 | Human review service (atomic approval; `stamp_human_document_approval`; decision events; revisions; never overwrite verified) | Atomic approval (fail = nothing applied); P1 evidence semantics; P2 revision written; inheritance gate enforced |
-| T8 | API + authorization (extract, list, approve/reject/revise, history; org-admin mutations; source-KB access check at approval; runtime visibility gate) | Org-admin mutations; appropriate read access; non-promotable proposals refuse approval with explicit reason |
-| T9 | Frontend: AdminConsole "Doc Evidence" tab + EnterpriseProfile provenance (navigable citation: document + page/sheet) | Build green; review shows quotation, location, conflicts, evidence status; approve/reject/revise work |
-| T10 | Independent review + E2E | Real documents (PDF/DOCX/XLSX): quote verification, missing evidence, conflicting policies, document update → supersede w/ history preserved, cross-source grounding, authorization, revision history; clean-worktree regression comparison (P3 methodology); progress log + commits |
+| T7 | Human review service (atomic approval; `stamp_human_document_approval`; per-entry provenance authorization (D7); decision events; revisions; never overwrite verified) | Atomic approval — **an approval failure rolls back EVERY mutation** (scenario 6) and **an audit failure cannot leave a partially approved proposal** (scenario 7); **machine-generated evidence can never become `verified`** (scenario 8); restricted entries independently protected (scenario 5 groundwork) |
+| T8 | API + authorization (`doc_access.assert_document_kb_access` FAIL-CLOSED; extract, list, approve/reject/revise, history; org-admin mutations; runtime per-entry visibility gate) | **A restricted document cannot leak through ontology discovery** (scenario 4); different-audience documents on one object independently protected (scenario 5); non-promotable proposals refuse approval with explicit reason; API-key principals get no document-derived content by default |
+| T9 | Frontend: AdminConsole "Doc Evidence" tab + EnterpriseProfile provenance (navigable citation: document + page/sheet; per-entry visibility) | Build green; review shows quotation, location, conflicts, evidence status; approve/reject/revise work |
+| T10 | Independent review + E2E | Real documents (PDF/DOCX/XLSX): quote verification, missing evidence, conflicting policies, document update → supersede w/ history preserved, cross-source grounding, authorization, revision history, all eight binding scenarios above; clean-worktree regression comparison (P3 methodology); progress log + commits |
+
+### Binding regression scenarios (from final review §3)
+
+1. Re-ingesting unchanged content creates no new document version. (T1)
+2. Changed content creates a new immutable version. (T1)
+3. Old proposals and decision history remain accessible after superseding. (T4/T7)
+4. A restricted document cannot leak through ontology discovery. (T8)
+5. Two documents with different audiences attached to one ontology object
+   remain independently protected. (T7/T8)
+6. An approval failure rolls back every associated mutation. (T7)
+7. An audit failure cannot leave a partially approved proposal. (T7)
+8. Machine-generated evidence cannot become `verified`. (T7)
 
 ## Part D — Non-negotiable architectural invariants
 

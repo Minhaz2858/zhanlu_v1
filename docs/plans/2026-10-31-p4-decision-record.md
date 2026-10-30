@@ -114,6 +114,77 @@ applied approval is impossible. The concurrency handling of P2
 - **Superseding:** re-ingest with a new hash flags old proposals
   `superseded` but never deletes them or their decision events.
 
+## D5 — `document_versions` is strictly immutable (final review 1.1)
+
+The v2 sketch put `is_current` on the version row — changing it would
+UPDATE historical records, contradicting append-only history. **Decision:**
+`document_versions` rows are IMMUTABLE — `(id, org_id, kb_id, content_hash,
+content_bytes, file_url_at_ingest, first_indexed_at)` only, never updated,
+never deleted. The CURRENT pointer lives on `knowledge_bases`
+(`content_hash` + `content_version_id`), updated at ingest. "Superseded"
+is a property of PROPOSALS (they keep referencing their original
+`doc_version_id`), never of version rows.
+
+## D6 — The authorization function is NEW and FAIL-CLOSED (final review 1.2)
+
+The v2 wording ("reuse the same source-KB access resolution") assumed an
+existing guarantee that does not hold. Verified in code:
+
+- `access_policy_service.resolve_user_policies`
+  (`access_policy_service.py:100-165`) — resolves `ResourceAccessPolicy`
+  rows per (user, resource_type='project'|'agent', resource_id) and
+  evaluates bound KBs into `ResolvedPolicy`
+  (`blocked_kb_ids` / `allowlisted_kbs` / `is_kb_fully_denied`).
+- **It FAILS OPEN**: no policy rows, missing principal, or a resolution
+  exception all return `has_policies=False` = FULL ACCESS
+  (L131-135, L158-162). Principal = authenticated `User.id` (JWT).
+
+Therefore P4 adds its own **fail-closed** gate,
+`services/ontology/doc_access.py::assert_document_kb_access(db, *, principal,
+kb_id) -> AccessDecision`:
+
+- principal kinds: (a) authenticated user (User.id) — evaluated via
+  `resolve_user_policies` against the source KB's project/agent share
+  bindings; (b) API-key principals (`ontology_external.py` X-API-Key) —
+  org-scoped only, NO user context → **document-derived evidence is denied
+  by default**; (c) org-admin — allowed (recorded as such).
+- **Unknown/unresolvable authorization → DENY.** The fail-open default of
+  the underlying resolver is inverted at this boundary: absence of
+  positively-established access is denial for document-derived content.
+- The gate is used at BOTH enforcement points from D3 (approval gate and
+  runtime evidence-entry filter) so approval and disclosure always answer
+  the same question with the same semantics.
+
+## D7 — Authorization is PER-PROVENANCE-ENTRY (final review 1.3)
+
+Scenario: a public customer definition (Document A) and restricted margin
+data (Document B) both feed ONE ontology object. A whole-object
+`verified` status + object-level `source_kb_id` filter would leak B.
+
+**Decision:** authorization attaches to each provenance ENTRY. Every
+document-derived `provenance_json` entry carries
+`{source_kb_id, doc_version_id, content_hash, location, quote, reviewer,
+decision, audience_snapshot}` and the runtime filters ENTRIES by the D6
+gate — an object whose other entries are accessible still hides the
+restricted entry (and its quotation/derived claims). A global `verified`
+status on an object is NEVER interpreted as authorization to disclose
+every supporting document. The review UI renders per-entry visibility.
+
+## Final acceptance scenarios (final review §3)
+
+These eight are binding regression scenarios, folded into the task
+acceptance conditions in the plan:
+
+1. Re-ingesting UNCHANGED content creates NO new document version. (T1)
+2. Changed content creates a NEW immutable version. (T1)
+3. Old proposals and decision history remain accessible after superseding. (T4/T7)
+4. A restricted document cannot leak through ontology discovery. (T8)
+5. Two documents with different audiences attached to one object remain
+   independently protected (per-entry filtering). (T7/T8)
+6. An approval failure rolls back EVERY associated mutation. (T7)
+7. An audit failure cannot leave a partially approved proposal. (T7)
+8. Machine-generated evidence cannot become `verified`. (T7)
+
 ## Revised sequence
 
 T0 (identity + authorization contracts — this record) → T1..T10 as in the
