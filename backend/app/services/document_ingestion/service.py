@@ -265,6 +265,21 @@ def ingest_kb(db: Session, kb_id: str) -> bool:
     kb.index_error = None
     db.commit()
 
+    # P4 T1: document identity — SHA-256 over actual bytes, appended to the
+    # immutable document_versions history (D5). Non-fatal: a read failure
+    # records nothing, indexing continues.
+    try:
+        from app.services.document_ingestion.versioning import (
+            record_document_version,
+        )
+
+        record_document_version(db, kb)
+        db.commit()
+    except Exception:
+        logger.warning("ingest_kb: document versioning failed for %s "
+                       "(non-fatal)", kb_id, exc_info=True)
+        db.rollback()
+
     try:
         local = _resolve_local_path(kb.file_url or "")
         if local is None or not local.exists():

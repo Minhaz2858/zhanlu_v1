@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import String, Text, Integer, DateTime, ForeignKey
+from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -61,6 +61,15 @@ class KnowledgeBase(TimestampedBase):
     file_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     file_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
+    # ── P4 T1: document identity (one file KB = one document) ─────────────
+    # Current-version POINTER only — the historical rows live in the
+    # immutable `document_versions` table (D5: version rows are never
+    # updated or deleted). NULL for legacy rows not yet re-indexed.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("document_versions.id"), nullable=True
+    )
+
     # Stats
     item_count: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True, default="active")
@@ -98,4 +107,30 @@ class KnowledgeBase(TimestampedBase):
     nl2sql_state_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     nl2sql_state_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
+    )
+
+
+class DocumentVersion(TimestampedBase):
+    """P4 T1 / D5 — IMMUTABLE document version record.
+
+    One row per distinct content state of a file KB's document. Rows are
+    NEVER updated or deleted: "current" is a pointer on
+    ``KnowledgeBase.content_version_id``, and "superseded" is a property of
+    proposals that reference an older version — never of version rows.
+    """
+
+    __tablename__ = "document_versions"
+    __table_args__ = (
+        UniqueConstraint("org_id", "kb_id", "content_hash",
+                         name="uq_document_version_hash"),
+    )
+
+    kb_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_bases.id"), nullable=False, index=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_url_at_ingest: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    first_indexed_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False
     )
