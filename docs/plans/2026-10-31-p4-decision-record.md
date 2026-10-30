@@ -125,7 +125,7 @@ never deleted. The CURRENT pointer lives on `knowledge_bases`
 is a property of PROPOSALS (they keep referencing their original
 `doc_version_id`), never of version rows.
 
-## D6 — The authorization function is NEW and FAIL-CLOSED (final review 1.2)
+## D6 — The authorization function is NEW and FAIL-CLOSED (final review 1.2, corrected 1.3b)
 
 The v2 wording ("reuse the same source-KB access resolution") assumed an
 existing guarantee that does not hold. Verified in code:
@@ -141,19 +141,35 @@ existing guarantee that does not hold. Verified in code:
 
 Therefore P4 adds its own **fail-closed** gate,
 `services/ontology/doc_access.py::assert_document_kb_access(db, *, principal,
-kb_id) -> AccessDecision`:
+kb_id) -> AccessDecision`.
 
-- principal kinds: (a) authenticated user (User.id) — evaluated via
-  `resolve_user_policies` against the source KB's project/agent share
-  bindings; (b) API-key principals (`ontology_external.py` X-API-Key) —
-  org-scoped only, NO user context → **document-derived evidence is denied
-  by default**; (c) org-admin — allowed (recorded as such).
-- **Unknown/unresolvable authorization → DENY.** The fail-open default of
-  the underlying resolver is inverted at this boundary: absence of
-  positively-established access is denial for document-derived content.
-- The gate is used at BOTH enforcement points from D3 (approval gate and
-  runtime evidence-entry filter) so approval and disclosure always answer
-  the same question with the same semantics.
+**Two DISTINCT permissions (final review correction — admin ≠ document
+reader):**
+1. **Administrative permission** (org-admin): may list/review/reject/manage
+   ontology proposals. Does NOT by itself grant access to document content.
+2. **Source-document permission**: the right to access the underlying
+   document and its evidence — decided ONLY by `assert_document_kb_access`.
+
+Approval requires BOTH. Runtime disclosure enforces source-document
+permission independently — for everyone, admins included. An org-admin who
+cannot read a restricted finance document cannot approve its evidence and
+will not see its derived provenance entries.
+
+**Five-state decision semantics** (`AccessDecision.state`); the underlying
+resolver's fail-open result is NEVER interpreted as proof of access:
+
+| State | Meaning | Result |
+|-------|---------|--------|
+| `EXPLICITLY_AUTHORIZED` | owner of the KB (`created_by_id`), OR a policy row explicitly allows the KB, OR the KB carries NO restricting policies for an authenticated org member (document retrieval would serve the file to them — same-access rule) | **ALLOW** (basis recorded) |
+| `EXPLICITLY_DENIED` | any applicable policy denies/blocks the KB | DENY |
+| `NO_APPLICABLE_POLICY` | principal known, org matches, but access cannot be POSITIVELY established beyond the above (e.g. restricted context the gate cannot evaluate) | DENY |
+| `MISSING_PRINCIPAL` | API-key / unauthenticated / cross-org principal | DENY |
+| `RESOLUTION_FAILURE` | any exception while resolving | DENY |
+
+Every ALLOW records its `basis` (owner / policy_allow / org_unrestricted);
+every DENY records its state. The gate is used at BOTH enforcement points
+from D3 (approval gate and runtime evidence-entry filter) so approval and
+disclosure always answer the same question with the same semantics.
 
 ## D7 — Authorization is PER-PROVENANCE-ENTRY (final review 1.3)
 

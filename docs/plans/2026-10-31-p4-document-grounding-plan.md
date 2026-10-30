@@ -121,11 +121,16 @@ extraction timestamp — plus `audience_json` (D3).
   (`access_policy_service.py:100-165`) FAILS OPEN (no rows / missing
   principal / resolution error → `has_policies=False` = full access), so it
   CANNOT be reused as-is for disclosure decisions; the new gate inverts the
-  default at this boundary (unknown → deny) while using it for evaluation.
-  Principal kinds: authenticated user (User.id from JWT) — evaluated
-  against the source KB's project/agent share bindings; API-key principals
-  (X-API-Key, org-scoped, no user) — document-derived evidence DENIED by
-  default; org-admin — allowed and recorded as such.
+  default at this boundary while using it for evaluation. **Two distinct
+  permissions**: administrative (org-admin — review/manage proposals) vs
+  source-document access (D6 gate) — approval requires BOTH; runtime
+  disclosure enforces source-document access for everyone, admins included.
+  Five-state semantics: `EXPLICITLY_AUTHORIZED` (owner / policy allow /
+  org-unrestricted for an authenticated member — basis recorded) → ALLOW;
+  `EXPLICITLY_DENIED`, `NO_APPLICABLE_POLICY`, `MISSING_PRINCIPAL`
+  (API-key principals get no document-derived content),
+  `RESOLUTION_FAILURE` → DENY. `has_policies=False` is NEVER treated as
+  proof of access.
 - `services/ontology/document_grounding.py` — extraction + verification +
   proposal persistence (+ per-run counts: proposed / verified_quote /
   dropped_untraceable / duplicates_skipped).
@@ -156,7 +161,7 @@ extraction timestamp — plus `audience_json` (D3).
 | T5 | Deterministic quote verification | Every accepted quote traceable to source segment; ORIGINAL span stored; untraceable dropped + counted |
 | T6 | Extraction + dedup pipeline (flag-gated; untrusted-content prompt hardening; LLM step stubbed in tests) | No fabricated evidence; counts reported separately; cross-org KB rejected; dedup no duplicates; conflicts flagged |
 | T7 | Human review service (atomic approval; `stamp_human_document_approval`; per-entry provenance authorization (D7); decision events; revisions; never overwrite verified) | Atomic approval — **an approval failure rolls back EVERY mutation** (scenario 6) and **an audit failure cannot leave a partially approved proposal** (scenario 7); **machine-generated evidence can never become `verified`** (scenario 8); restricted entries independently protected (scenario 5 groundwork) |
-| T8 | API + authorization (`doc_access.assert_document_kb_access` FAIL-CLOSED; extract, list, approve/reject/revise, history; org-admin mutations; runtime per-entry visibility gate) | **A restricted document cannot leak through ontology discovery** (scenario 4); different-audience documents on one object independently protected (scenario 5); non-promotable proposals refuse approval with explicit reason; API-key principals get no document-derived content by default |
+| T8 | API + authorization (`doc_access.assert_document_kb_access` FAIL-CLOSED, five-state; admin ≠ document-reader — approval requires BOTH permissions; extract, list, approve/reject/revise, history; runtime per-entry visibility gate) | **A restricted document cannot leak through ontology discovery** (scenario 4); different-audience documents on one object independently protected (scenario 5); an org-admin WITHOUT source-document permission can neither approve nor see the restricted entries; non-promotable proposals refuse approval with explicit reason; API-key principals get no document-derived content by default |
 | T9 | Frontend: AdminConsole "Doc Evidence" tab + EnterpriseProfile provenance (navigable citation: document + page/sheet; per-entry visibility) | Build green; review shows quotation, location, conflicts, evidence status; approve/reject/revise work |
 | T10 | Independent review + E2E | Real documents (PDF/DOCX/XLSX): quote verification, missing evidence, conflicting policies, document update → supersede w/ history preserved, cross-source grounding, authorization, revision history, all eight binding scenarios above; clean-worktree regression comparison (P3 methodology); progress log + commits |
 
