@@ -1,9 +1,10 @@
 # P3 — Cross-source Identity Resolution: Progress Log
 
-**Date:** 2026-10-30
-**Status:** IMPLEMENTED, CLOSURE PASS COMPLETE — presented for acceptance review
+**Date:** 2026-10-30 (final corrections 2026-10-31)
+**Status:** P3 FORMALLY CLOSED — accepted subject to final closure tasks, both complete
 **Plan:** `docs/plans/2026-10-30-p3-identity-resolution-plan.md`
-**Commits:** `c50fa034b` (P3 impl), `2839e1c30` (closure C1+C2+C3 fix)
+**Commits:** `c50fa034b` (P3 impl), `2839e1c30` (closure C1+C2+C3 fix),
+`35688d58d` (closure evidence docs), final-corrections commit (see below)
 
 ## What shipped
 
@@ -132,7 +133,38 @@ commit `2839e1c30`:
   migration 105 (documented workaround, consistent with prior practice on
   this deployment).
 
-## Original implementation notes
+## Final acceptance tasks (2026-10-31) — both complete
+
+1. **Progress log cleaned** — the implementation notes now describe ONLY the
+   final semantics (human-only confirmation for all tiers, append-only
+   decision history, savepoint-based transaction-integrity recovery). The
+   superseded auto-confirm / missing-history / unverified-DB-source claims
+   were removed; the only remaining mention of auto-confirm is the C1
+   section's record of what the review corrected.
+2. **Transaction-integrity regression test** —
+   `test_recovery_preserves_unrelated_pending_change`: an UNRELATED,
+   uncommitted (flushed, outer-transaction) `OntologyObject` is created in
+   the request session; the execution gate is poisoned exactly like the
+   live failure (failing internal query, exception swallowed); the
+   resolver's recovery runs; the unrelated pending change must still be
+   `persistent` immediately after recovery (mechanism-level assertion) and
+   must survive the subsequent resolve + commit. To make this hold
+   structurally, the recovery was upgraded from a plain `db.rollback()`
+   (which would discard caller work it does not own) to **savepoint-based
+   recovery**: flush outer pending work → gated read inside
+   `begin_nested()` → probe → on poisoning `ROLLBACK TO SAVEPOINT` and
+   retry (returning the last good read — the source-DB rows are
+   independent of the poisoned connection). Live-verified again on the
+   drifted-schema backend: recovery fired, cross-org resolve returned 0,
+   same-org resolve returned `skipped_existing: 4` (decision memory
+   intact), no 500s.
+
+Re-run results (post-corrections): P3-specific suites
+(`test_identity_*` — 36 tests) + ontology regression
+(`test_ontology_core` + `test_ontology_p2_revisions` — 24 tests):
+**60/60 passed.**
+
+## Implementation notes (final state, post-closure)
 
 ### P3a — structured spreadsheet ingestion (prerequisite)
 
@@ -149,12 +181,14 @@ commit `2839e1c30`:
   tabular KBs (non-fatal); explicit re-stage endpoint
   `POST /apps/{app_id}/knowledge_bases/{kb_id}/ingest-rows`.
 
-### P3 — resolver (four strictly separated tiers)
+### P3 — resolver (four strictly separated tiers, human-only confirmation)
 
 - `backend/app/services/identity/resolver.py` — `resolve_object_identity`
-  (bounded, read-only, per-object, two sources):
+  (bounded, read-only, per-object, two sources). ALL tiers land as
+  `inferred` — system evidence is never a human decision; `reviewed_by`
+  stays NULL for resolver-produced matches:
   - **Tier 1 exact** — lossless only (trim/case-fold/int↔str). `1001` never
-    matches `C1001`. Auto-`confirmed`, `reviewed_by='system:exact'`.
+    matches `C1001`. `inferred`, confidence 1.0.
   - **Tier 2 normalization** — closed transform set (`strip_alpha_prefix`,
     `strip_leading_zeros`, `numeric_suffix`), EITHER direction (rule records
     `direction`), valid ONLY when transformed value-set containment ≥ 0.9
@@ -169,24 +203,36 @@ commit `2839e1c30`:
     source_b_key, pk_b)`).
   - Org wall: file staging reads and DB reads are org-checked; cross-org is
     an empty result, never a leak.
+  - Transaction integrity: DB-source reads go through
+    `_fetch_via_query_service` — flushes the caller's pending work into the
+    outer transaction, runs the gated read inside a SAVEPOINT, probes for
+    gate-induced poisoning, and recovers via `ROLLBACK TO SAVEPOINT`
+    (preserving unrelated pending changes — regression-tested).
 
 ### Governance / API
 
 - `backend/app/services/identity/review.py` — `list_matches` (org-scoped,
-  status filter), `review_match` (confirm/reject, audited as
-  `identity_review`), `crosswalk_summary` (CONFIRMED pairs only — provenance
-  block, no per-row joins).
+  status filter), `review_match` (the ONLY mutation path for match status;
+  audited as `identity_review` AND appended to the decision history;
+  same-decision re-review rejected), `crosswalk_summary` (CONFIRMED pairs
+  only — provenance block, no per-row joins), `decision_history`
+  (append-only reconstruction).
 - `backend/app/routers/ontology.py` (no router prefix — literal paths):
   - `POST /api/ontology/identity/resolve` (org-admin)
   - `GET  /api/ontology/identity/matches?object_id=&status=`
   - `POST /api/ontology/identity/matches/{id}/confirm` (org-admin, audited)
   - `POST /api/ontology/identity/matches/{id}/reject` (org-admin, audited)
-- P2 revisions are intentionally NOT written for match decisions — matches
-  are crosswalks, not ontology elements (documented decision).
+  - `GET  /api/ontology/identity/matches/{id}/history` (org-scoped)
+- Decision history: `identity_decision_events` (append-only) records
+  `created` / `confirm` / `reject` / reversals with previous decision, new
+  decision, reviewer identity, matching tier, confidence, evidence JSON,
+  source record identifiers and timestamps, sequence-numbered org-scoped
+  (`uq_identity_decision_event_seq`). The unaudited `mark_review` shortcut
+  was removed — every status mutation flows through the audited path.
 
 ### Runtime integration
 
-- `read_object_data` (both platform-table and kb-backed reads) now appends an
+- `read_object_data` (both platform-table and kb-backed reads) appends an
   honest `cross_sources` block when CONFIRMED crosswalks exist for the
   object: which sources, how many pairs, a small sample. Enrichment failure
   degrades silently — never blocks a read. Inferred/rejected never appear.
@@ -206,8 +252,8 @@ commit `2839e1c30`:
 2. Tier 3/4 run ONLY with explicit `attribute_pairs` (no auto-derivation):
    silently embedding arbitrary columns (free-text notes, timestamps) is not
    defensible in an identity decision.
-3. Migration `105` edited in place (not yet applied via alembic anywhere —
-   see "Environment note" below).
+3. Migration `105` extended in place with `identity_decision_events`
+   (applied nowhere via alembic yet — see "Environment note" and C5).
 
 ## Testing (TDD)
 
@@ -233,19 +279,24 @@ commit `2839e1c30`:
 
 ## Live verification (local backend :8123, local Postgres `zhanlu`)
 
+Post-closure live run (final semantics — all matches `inferred` until a
+human confirms):
+
 1. Two xlsx KBs (`p3_crm.xlsx` bare ids / `p3_master.xlsx` `C`-prefixed ids,
    identical attributes) staged through the live `ingest-rows` endpoint
    (4 rows each).
 2. `POST /api/ontology/identity/resolve` → `tier2: 4` with recorded rule
    `{transform: strip_alpha_prefix, direction: b_to_a, containment: 1.0,
    shared_pairs: 4}`; tier1=0 (nothing exact — correct); skipped_existing=0.
-3. `GET matches` shows `normalization/confirmed`, per-match evidence with
-   original→transformed values.
+3. `GET matches` shows `normalization/inferred`, `reviewed_by` NULL, with
+   per-match evidence (original→transformed values).
 4. `POST .../confirm` → `confirmed, admin@zhanlu.dev` + `identity_review`
-   AuditEvent (decision, match_id, tier, pks, source keys).
+   AuditEvent + decision-history events (`created` then `confirm` with
+   previous status, reviewer, tier, confidence, source ids).
 5. `POST .../reject` on another match → `rejected, admin@zhanlu.dev`.
 6. Re-run resolve → `skipped_existing: 4`; rejected row stays `rejected`
    with reviewer preserved (decision memory, no re-proposals).
+7. DB-to-file integration, runtime provenance and org isolation: see C3.
 
 ## Environment note
 

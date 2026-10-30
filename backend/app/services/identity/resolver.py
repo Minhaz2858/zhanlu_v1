@@ -238,28 +238,45 @@ def _record_match(db: Session, org_id: str, object_id: str, source_a: dict,
 
 def _fetch_via_query_service(db: Session, kb_id: str, sql: str, limit: int,
                              *, ctx: str = "") -> dict:
-    """Bounded read through QueryService with transaction-poisoning
-    recovery (closure C3, found live): the execution gate swallows its
-    own internal errors; on drifted-schema deployments those failures
+    """Bounded read through QueryService with TRANSACTION-INTEGRITY
+    recovery (closure C3 + C7, found live): the execution gate swallows
+    its own internal errors; on drifted-schema deployments those failures
     abort the SHARED request transaction, and the next resolver statement
-    dies with InFailedSqlTransaction. Probe after the read; if the
-    transaction was poisoned, roll it back — reads are read-only and the
-    resolver commits only after all fetches are done."""
+    dies with InFailedSqlTransaction.
+
+    Recovery is SAVEPOINT-based, never a plain rollback: the caller's
+    pending work is flushed into the OUTER transaction first, the gated
+    read runs inside a SAVEPOINT, and on poisoning we ROLLBACK TO
+    SAVEPOINT — unrelated pending changes are provably preserved
+    (regression-tested). The read itself usually succeeds (the gate
+    poisons the PG connection, not the source DB), so the last good
+    result is returned even if the savepoint had to be rolled back
+    twice."""
     from sqlalchemy import text
 
     from app.services.db.query_service import QueryService
 
-    result = QueryService(db).execute(kb_id, sql, max_rows=limit)
-    try:
-        db.execute(text("SELECT 1"))
-    except Exception:  # noqa: BLE001 — poisoning recovery, never raised
-        logger.warning("identity db read left a poisoned transaction; "
-                       "rolling back (%s)", ctx)
+    result = None
+    for attempt in (1, 2):
         try:
-            db.rollback()
-        except Exception:  # pragma: no cover — defensive
-            logger.exception("identity rollback after poisoning failed")
-    return result
+            db.flush()  # caller's pending work → OUTER transaction
+        except Exception:  # pragma: no cover — caller's own problem
+            raise
+        nested = db.begin_nested()
+        try:
+            result = QueryService(db).execute(kb_id, sql, max_rows=limit)
+            db.execute(text("SELECT 1"))  # probe for gate-poisoned tx
+            nested.commit()
+            return result
+        except Exception:  # noqa: BLE001 — savepoint-scope recovery
+            nested.rollback()  # ROLLBACK TO SAVEPOINT — outer tx intact
+            logger.warning(
+                "identity db read: transaction poisoned by the execution "
+                "gate; recovered via savepoint (attempt %d, %s)",
+                attempt, ctx)
+    if result is not None:
+        return result
+    raise RuntimeError(f"identity db read failed for {ctx!r}")
 
 
 def _rows_for_source(db: Session, org_id: str, source: dict, columns: list[str],

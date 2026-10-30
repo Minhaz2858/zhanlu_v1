@@ -357,6 +357,90 @@ def test_db_source_gate_poisoning_does_not_abort_resolution(
     assert m is not None and m.status == "inferred"
 
 
+def test_recovery_preserves_unrelated_pending_change(db, two_sources, monkeypatch):
+    """Transaction integrity of the shared-session recovery (closure task 2):
+    an unrelated PENDING change in the request session must survive the
+    execution-gate poisoning + resolver recovery — the recovery may never
+    discard work it does not own."""
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+
+    from app.models.knowledge_base import KnowledgeBase
+    from app.models.ontology import OntologyObject
+    from app.services.identity.resolver import resolve_object_identity
+
+    # Real DB source (SQLite file) with ids matching the file side exactly
+    # → tier 1 candidates.
+    p = Path(tempfile.mkdtemp()) / "p3_pending.db"
+    conn = sqlite3.connect(p)
+    conn.execute("CREATE TABLE customers (customer_no TEXT)")
+    conn.executemany("INSERT INTO customers VALUES (?)",
+                     [("1001",), ("1002",), ("1003",), ("1004",)])
+    conn.commit()
+    conn.close()
+    db_kb = KnowledgeBase(org_id=ORG, name="p3-pending-db",
+                          source_kind="database", db_type="sqlite",
+                          api_url=str(p))
+    db.add(db_kb)
+    db.commit()
+
+    # The file source KB creation above commits; the UNRELATED change is
+    # added now and left UNCOMMITTED (flushed into the outer transaction —
+    # exactly the state a request session may carry when resolve runs).
+    unrelated = OntologyObject(org_id=ORG, domain_id="d1",
+                               name="PendingThing", backing_kind="manual",
+                               backing_ref="")
+    db.add(unrelated)
+    db.flush()
+    unrelated_id = unrelated.id
+
+    # Poison exactly like the live failure: a gate query fails on the
+    # SHARED session and the gate swallows the exception.
+    import app.services.db.execution_gate as gate
+
+    real_enforce = gate.enforce
+
+    def poisoned_enforce(session, *a, **kw):
+        from sqlalchemy import text as _t
+
+        try:
+            session.execute(_t("SELECT * FROM __no_such_table_p3__"))
+        except Exception:
+            pass  # swallowed exactly like enforce does
+        return real_enforce(session, *a, **kw)
+
+    monkeypatch.setattr(gate, "enforce", poisoned_enforce)
+
+    # Mechanism-level check FIRST, before any commit: the recovery itself
+    # must be non-destructive — the unrelated change is still alive and
+    # persistent (flushed into the OUTER transaction, untouched by the
+    # savepoint recovery) immediately after the poisoned read.
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.services.identity import resolver as resolver_mod
+
+    result = resolver_mod._fetch_via_query_service(
+        db, db_kb.id, "SELECT customer_no FROM customers", 500,
+        ctx="customers")
+    assert result["rows"], result
+    assert sa_inspect(unrelated).persistent, (
+        "recovery discarded unrelated pending work")
+
+    a = two_sources("crm9.xlsx", "CRM", [
+        ["account_id"], [1001], [1002], [1003], [1004],
+    ])
+    b = {"kind": "db", "kb_id": db_kb.id, "table": "customers",
+         "column": "customer_no", "pk_column": "customer_no"}
+
+    report = resolve_object_identity(db, ORG, "obj-pending", a, b)
+    db.commit()
+
+    assert report["tier1"] == 4, report
+    # The unrelated pending change survived the recovery and the commit.
+    assert db.get(OntologyObject, unrelated_id) is not None
+
+
 def test_sampling_is_bounded(db, two_sources):
     from app.services.identity.resolver import resolve_object_identity
 
