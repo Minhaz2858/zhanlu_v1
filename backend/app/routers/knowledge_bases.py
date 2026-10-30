@@ -553,6 +553,21 @@ async def list_kb_metrics(app_id: str, kb_id: str, db: Session = Depends(get_db)
 _ALLOWED_METRIC_FILTER_OPS = ("eq", "ne", "gt", "lt", "ge", "le", "in", "notnull")
 
 
+def _metric_org_guard(db: Session, kb_id: str, user) -> None:
+    """P5 review F3b: metric definitions are ORG assets — the caller's org
+    must own the datasource. Cross-org authoring/patching is a leak."""
+    from app.models.knowledge_base import KnowledgeBase
+
+    kb = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == kb_id,
+        KnowledgeBase.is_deleted == False,  # noqa: E712
+    ).first()
+    if kb is None:
+        raise HTTPException(status_code=404, detail="Datasource not found")
+    if (kb.org_id or "default-org") != (user.org_id or "default-org"):
+        raise HTTPException(status_code=403, detail="Datasource not in your org")
+
+
 def _validated_metric_filters(raw) -> list | None:
     """P5-T1: structured basis filters, op-whitelisted. A filter is
     deterministic data, not prose — anything else is rejected, never
@@ -578,9 +593,13 @@ def _validated_metric_filters(raw) -> list | None:
 
 
 @router.post("/{kb_id}/metrics")
-async def create_kb_metric(app_id: str, kb_id: str, body: dict, db: Session = Depends(get_db)):
+async def create_kb_metric(app_id: str, kb_id: str, body: dict,
+                           db: Session = Depends(get_db),
+                           user=Depends(get_current_user_required)):
     """Author a metric definition for this datasource (VERIFIED on save)."""
     import uuid as _uuid
+
+    _metric_org_guard(db, kb_id, user)
 
     from app.models.metric_definition import MetricDefinition
 
@@ -642,10 +661,14 @@ async def create_kb_metric(app_id: str, kb_id: str, body: dict, db: Session = De
 
 @router.patch("/{kb_id}/metrics/{metric_id}")
 async def update_kb_metric(
-    app_id: str, kb_id: str, metric_id: str, body: dict, db: Session = Depends(get_db)
+    app_id: str, kb_id: str, metric_id: str, body: dict,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user_required),
 ):
     """Edit a metric definition (fix a wrong definition/unit/synonyms)."""
     from app.models.metric_definition import MetricDefinition
+
+    _metric_org_guard(db, kb_id, user)
 
     row = (
         db.query(MetricDefinition)
@@ -699,6 +722,12 @@ async def update_kb_metric(
         lc = str(body["lifecycle"] or "").strip()
         if lc not in ("draft", "published", "retired"):
             raise HTTPException(status_code=400, detail="lifecycle must be draft|published|retired")
+        if lc == "published" and row.requires_approval and not (
+                row.reviewed_by or str(body.get("reviewed_by") or "").strip()):
+            # P5-T5 (review F3): an approval-required metric cannot enter
+            # force through PATCH without a reviewer signature.
+            raise HTTPException(status_code=400, detail=(
+                "this metric requires approval — set reviewed_by to publish"))
         row.lifecycle = lc
         mutated = True
     if "reviewed_by" in (body or {}):
@@ -714,9 +743,12 @@ async def update_kb_metric(
 
 @router.delete("/{kb_id}/metrics/{metric_id}")
 async def delete_kb_metric(
-    app_id: str, kb_id: str, metric_id: str, db: Session = Depends(get_db)
+    app_id: str, kb_id: str, metric_id: str, db: Session = Depends(get_db),
+    user=Depends(get_current_user_required),
 ):
     from app.models.metric_definition import MetricDefinition
+
+    _metric_org_guard(db, kb_id, user)
 
     row = (
         db.query(MetricDefinition)

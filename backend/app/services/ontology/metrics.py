@@ -130,6 +130,7 @@ def _build_sql(metric, extra_filters: dict | None) -> tuple[str, dict, list]:
 
     where: list[str] = []
     params: dict[str, Any] = {}
+    applied_cols: list[str] = []
     i = 0
     for f in (metric.filters_json or []):
         if not isinstance(f, dict):
@@ -138,22 +139,35 @@ def _build_sql(metric, extra_filters: dict | None) -> tuple[str, dict, list]:
         op = str(f.get("op") or "").strip()
         if not _IDENT_RE.match(col) or op not in _FILTER_OPS:
             raise ValueError(f"invalid stored filter {f!r}")
-        where.append(_FILTER_OPS[op].format(col=col, i=i))
-        if op != "notnull":
-            params[f"p_{i}"] = f.get("value")
+        if op == "in":
+            # List params are NOT portable across connectors (sqlite3 and
+            # plain-dict SQLAlchemy text() don't expand them) — expand to
+            # one placeholder per value (review finding 1).
+            values = f.get("value") or []
+            if not isinstance(values, list) or not values:
+                raise ValueError("'in' filter needs a non-empty list value")
+            phs = ", ".join(f":p_{i}_{j}" for j in range(len(values)))
+            where.append(f"{col} IN ({phs})")
+            for j, v in enumerate(values):
+                params[f"p_{i}_{j}"] = v
+        else:
+            where.append(_FILTER_OPS[op].format(col=col, i=i))
+            if op != "notnull":
+                params[f"p_{i}"] = f.get("value")
+        applied_cols.append(col)
         i += 1
     for key, value in (extra_filters or {}).items():
         if value is None or not _IDENT_RE.match(str(key)):
             continue
         where.append(f"{key} = :p_{i}")
         params[f"p_{i}"] = value
+        applied_cols.append(str(key))
         i += 1
 
     sql = f"SELECT {template.format(col=col_sql)} AS metric_value FROM {table}"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    return sql, params, [f.get("column") for f in (metric.filters_json or [])
-                         if isinstance(f, dict)]
+    return sql, params, applied_cols
 
 
 def compute_metric(

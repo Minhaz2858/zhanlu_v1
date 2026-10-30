@@ -130,6 +130,25 @@ def test_cross_org_confirmed_match_invisible(db, env):
     assert out["success"] is False and out["unavailable"] is True
 
 
+def test_cross_org_file_source_is_org_walled(db, env):
+    """P5 review F2: the file branch checks the KB org — a cross-org file
+    source leaks nothing even if a cross-org match existed."""
+    from app.services.ontology.data import read_object_data
+
+    m = _match(db, env["obj"], status="confirmed", pk_a="1", pk_b="C1")
+    m.source_b = {"kind": "file", "kb_id": "kb-foreign", "sheet": "S1",
+                  "column": "cust_no"}
+    m.source_b_key = "file:kb-foreign:S1"
+    db.add(KnowledgeBase(id="kb-foreign", org_id=OTHER, name="foreign",
+                         source_kind="file", file_type="xlsx",
+                         file_url="/api/uploads/f.xlsx"))
+    db.commit()
+    out = read_object_data(db, ORG, env["obj"])
+    assert out["success"] is True  # db side works
+    side_b = out["crosswalk_groups"][0]["side_b"]
+    assert side_b["rows"] == [] and "not in this org" in (side_b.get("reason") or "")
+
+
 def test_no_destructive_merge_two_pairs_two_sides(db, env):
     from app.services.ontology.data import read_object_data
 

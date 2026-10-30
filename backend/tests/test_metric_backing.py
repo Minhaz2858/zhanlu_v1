@@ -214,6 +214,36 @@ def test_invalid_aggregation_typed_unavailable(db, seeded):
     _assert_unavailable(out, "aggregation")
 
 
+def test_in_filter_expands_and_computes(db, seeded):
+    """P5 review F1: 'in' must actually compute (expanded placeholders),
+    not produce a permanent refusal."""
+    from app.services.ontology.metrics import compute_metric
+
+    seeded.metric.filters_json = [
+        {"column": "fdocstatus", "op": "in", "value": ["C", "A"]}]
+    db.commit()
+    out = compute_metric(db, ORG, "Gross Revenue")
+    assert out["success"] is True
+    assert out["value"] == pytest.approx(180.0)
+
+
+def test_gate_refusal_is_typed_unavailable(db, seeded, monkeypatch):
+    """P5 review F7: the ExecutionValidationError branch surfaces gate
+    violations, never a number."""
+    import app.services.db.query_service as qs_mod
+    from app.services.db.execution_gate import ExecutionValidationError
+    from app.services.ontology.metrics import compute_metric
+
+    def _refuse(self, kb_id, sql, **kw):
+        raise ExecutionValidationError(
+            {"errors": ["metric binding violation (test)"], "detail": {}})
+
+    monkeypatch.setattr(qs_mod.QueryService, "execute", _refuse)
+    out = compute_metric(db, ORG, "Gross Revenue")
+    _assert_unavailable(out, "gate")
+    assert out.get("gate_violations")
+
+
 # ── the bind trap: no more permanent-refusal bindings ─────────────────────
 
 def test_bind_rejects_metric_ref_to_unknown_or_unpublished_definition(db, seeded):

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import uuid
 
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -130,11 +132,13 @@ def test_patch_bumps_version(db):
     import asyncio
 
     asyncio.run(update_kb_metric(
-        "app", kb.id, m.id, {"unit": "CNY"}, db=db))
+        "app", kb.id, m.id, {"unit": "CNY"}, db=db,
+        user=SimpleNamespace(org_id=ORG)))
     db.expire_all()
     assert db.get(MetricDefinition, m.id).version == 2
     asyncio.run(update_kb_metric(
-        "app", kb.id, m.id, {"unit": "USD"}, db=db))
+        "app", kb.id, m.id, {"unit": "USD"}, db=db,
+        user=SimpleNamespace(org_id=ORG)))
     db.expire_all()
     assert db.get(MetricDefinition, m.id).version == 3
 
@@ -152,14 +156,14 @@ def test_filters_op_whitelist_rejected_on_create(db):
             "name": "net revenue",
             "base_table": "sales_order", "base_column": "famount",
             "filters_json": [{"column": "fbillno", "op": "DROP TABLE", "value": 1}],
-        }, db=db))
+        }, db=db, user=SimpleNamespace(org_id=ORG)))
     assert exc.value.status_code == 400
     with pytest.raises(HTTPException):
         asyncio.run(create_kb_metric("app", kb.id, {
             "name": "net revenue 2", "base_table": "sales_order",
             "base_column": "famount",
             "filters_json": "not-a-list",
-        }, db=db))
+        }, db=db, user=SimpleNamespace(org_id=ORG)))
 
 
 def test_filters_valid_ops_accepted_and_persisted(db):
@@ -173,7 +177,7 @@ def test_filters_valid_ops_accepted_and_persisted(db):
         "name": "net revenue",
         "base_table": "sales_order", "base_column": "famount",
         "filters_json": [{"column": "fdocstatus", "op": "eq", "value": "C"}],
-    }, db=db))
+    }, db=db, user=SimpleNamespace(org_id=ORG)))
     row = db.get(MetricDefinition, out["id"])
     assert row.filters_json == [
         {"column": "fdocstatus", "op": "eq", "value": "C"}]

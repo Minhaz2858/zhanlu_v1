@@ -60,13 +60,17 @@ def read_object_data(
         return _resolve_entity_backing(db, org_id, obj, filters, limit)
 
     if obj.backing_kind != "table" or not obj.backing_ref:
+        reason = (
+            f"object {obj.name!r} has no live table binding "
+            f"(backing_kind={obj.backing_kind}) — bind it to a data "
+            "source to read live rows"
+        )
+        if obj.backing_kind == "metric" and not (obj.backing_ref or "").strip():
+            reason = (f"object {obj.name!r} has an empty metric binding — "
+                      "bind it to a published metric definition")
         return {
             "success": False,
-            "reason": (
-                f"object {obj.name!r} has no live table binding "
-                f"(backing_kind={obj.backing_kind}) — bind it to a data "
-                "source to read live rows"
-            ),
+            "reason": reason,
         }
 
     ref = obj.backing_ref
@@ -192,11 +196,22 @@ def _resolve_entity_backing(
 
     def _rows_for(source: dict, pks: list[str]) -> dict:
         """Grounded rows for ONE side of a crosswalk. DB sources go through
-        the org-checked QueryService; file sources read the P3a staging."""
+        the org-checked QueryService; file sources read the P3a staging —
+        BOTH after a KB org check (review finding 2: never trust that the
+        recorded crosswalk was org-clean)."""
         kind = (source or {}).get("kind")
         pk_col = (source or {}).get("pk_column") or (source or {}).get("column")
         kb_id = (source or {}).get("kb_id")
         try:
+            src_kb = db.query(KnowledgeBase).filter(
+                KnowledgeBase.id == kb_id,
+                KnowledgeBase.is_deleted == False,  # noqa: E712
+            ).first()
+            if src_kb is None or (src_kb.org_id or "default-org") != org_id:
+                return {"kind": kind, "kb_id": kb_id, "rows": [],
+                        "reason": "source not in this org"}
+            if not pks:
+                return {"kind": kind, "kb_id": kb_id, "rows": []}
             if kind == "file":
                 rows = (
                     db.query(FileTableRow)
@@ -215,13 +230,7 @@ def _resolve_entity_backing(
                 return {"kind": "file", "kb_id": kb_id,
                         "sheet": (source or {}).get("sheet"),
                         "pk_column": col, "rows": out_rows[:limit]}
-            kb = db.query(KnowledgeBase).filter(
-                KnowledgeBase.id == kb_id,
-                KnowledgeBase.is_deleted == False,  # noqa: E712
-            ).first()
-            if kb is None or (kb.org_id or "default-org") != org_id:
-                return {"kind": "db", "kb_id": kb_id, "rows": [],
-                        "reason": "source not in this org"}
+            kb = src_kb
             if not (_IDENT_RE.match(str(pk_col or ""))
                     and _IDENT_RE.match(str((source or {}).get("table") or ""))):
                 return {"kind": "db", "kb_id": kb_id, "rows": [],

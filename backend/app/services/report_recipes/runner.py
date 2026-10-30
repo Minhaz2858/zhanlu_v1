@@ -124,6 +124,10 @@ def _resolve_sql(
             q = db.query(MetricDefinition).filter(
                 MetricDefinition.name == metric_name,
                 MetricDefinition.is_deleted == False,  # noqa: E712
+                # P5 review F4: only published, enabled metrics may back
+                # recipes — same hygiene as bindings and glossary.
+                MetricDefinition.is_enabled == True,  # noqa: E712
+                MetricDefinition.lifecycle == "published",
             )
             if kb_id:
                 q = q.filter(MetricDefinition.datasource_id == kb_id)
