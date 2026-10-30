@@ -13,6 +13,7 @@ import { formatAbsoluteTime } from '@/lib/time';
 import {
   Shield, DollarSign, FileText, CheckCircle2, XCircle, Clock,
   Loader2, AlertCircle, ChevronDown, ChevronRight, UserCheck, GitMerge,
+  BookOpen, Pencil,
 } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 
@@ -33,12 +34,16 @@ export default function AdminConsole() {
   const [policyDecisions, setPolicyDecisions] = useState([]);
   const [escalations, setEscalations] = useState([]);
   const [identityMatches, setIdentityMatches] = useState([]);
+  const [docProposals, setDocProposals] = useState([]);
+  const [docHidden, setDocHidden] = useState(0);
+  const [docDomains, setDocDomains] = useState([]);
+  const [docError, setDocError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState({});
 
   const loadData = useCallback(async () => {
     try {
-      const [apps, cost, breakdown, logs, decisions, escs, matches] = await Promise.all([
+      const [apps, cost, breakdown, logs, decisions, escs, matches, docs, domains] = await Promise.all([
         fetchJSON(`${API_BASE}/governance/approvals?status=pending`),
         fetchJSON(`${API_BASE}/governance/cost`),
         fetchJSON(`${API_BASE}/governance/cost/breakdown`),
@@ -48,6 +53,10 @@ export default function AdminConsole() {
         fetchJSON(`${API_BASE}/ontology/escalations`),
         // P3: cross-source identity review queue (inferred crosswalks)
         fetchJSON(`${API_BASE}/ontology/identity/matches`),
+        // P4: document-grounded ontology proposals (restricted sources
+        // are hidden server-side; `hidden` reports how many)
+        fetchJSON(`${API_BASE}/ontology/document-evidence`),
+        fetchJSON(`${API_BASE}/ontology/domains`),
       ]);
       setApprovals(apps);
       setCostSummary(cost);
@@ -56,6 +65,9 @@ export default function AdminConsole() {
       setPolicyDecisions(decisions);
       setEscalations(Array.isArray(escs) ? escs : []);
       setIdentityMatches(Array.isArray(matches) ? matches : []);
+      setDocProposals(Array.isArray(docs?.proposals) ? docs.proposals : []);
+      setDocHidden(docs?.hidden || 0);
+      setDocDomains(Array.isArray(domains) ? domains : (domains?.domains || []));
     } catch (e) {
       console.error('Failed to load admin data:', e);
     } finally {
@@ -116,6 +128,48 @@ export default function AdminConsole() {
     setActionLoading({ ...actionLoading, [`id-${id}`]: null });
   }
 
+  // ── P4: document-evidence review ────────────────────────────────────────
+  // A verified quote proves the document SAYS it — only this human approval
+  // makes it business truth. The backend enforces org-admin AND source-
+  // document access (D6) atomically; errors surface inline.
+
+  async function handleDocAction(p, action, body) {
+    setActionLoading((s) => ({ ...s, [`doc-${p.id}`]: action }));
+    setDocError(null);
+    try {
+      await fetchJSON(
+        `${API_BASE}/ontology/document-evidence/${p.id}/${action}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body || {}),
+        },
+      );
+      loadData();
+    } catch (e) {
+      console.error(e);
+      setDocError(`${action} failed: ${e.message}`);
+    }
+    setActionLoading((s) => ({ ...s, [`doc-${p.id}`]: null }));
+  }
+
+  function handleDocApprove(p) {
+    const conflict = p.conflict_json?.existing_object_id;
+    // Create path needs a domain (the document cannot know the org's
+    // domain taxonomy); attach path doesn't.
+    const domainId = conflict ? null : docDomains[0]?.id;
+    handleDocAction(p, 'approve', { domain_id: domainId });
+  }
+
+  function handleDocRevise(p) {
+    const current = p.payload_json?.description || '';
+    const next = window.prompt('Edit the proposed description:', current);
+    if (next === null || !next.trim()) return;
+    handleDocAction(p, 'revise', {
+      payload: { ...(p.payload_json || {}), description: next.trim() },
+    });
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -126,10 +180,12 @@ export default function AdminConsole() {
 
   const openEscalations = escalations.filter((e) => e.status === 'open');
   const pendingIdentity = identityMatches.filter((m) => m.status === 'inferred');
+  const pendingDocProposals = docProposals.filter((p) => p.status === 'proposed');
   const tabs = [
     { key: 'approvals', label: 'Approvals', icon: Shield, count: approvals.length },
     { key: 'escalations', label: 'Escalations', icon: UserCheck, count: openEscalations.length },
     { key: 'identity', label: 'Identity', icon: GitMerge, count: pendingIdentity.length },
+    { key: 'docevidence', label: 'Doc Evidence', icon: BookOpen, count: pendingDocProposals.length },
     { key: 'cost', label: 'Cost', icon: DollarSign },
     { key: 'audit', label: 'Audit Log', icon: FileText, count: auditLogs.length },
     { key: 'policy', label: 'Policy Decisions', icon: CheckCircle2, count: policyDecisions.length },
@@ -336,6 +392,147 @@ export default function AdminConsole() {
                         className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-secondary disabled:opacity-50"
                       >
                         {actionLoading[`id-${m.id}`] === 'reject' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* Doc Evidence Tab (P4: document-grounded ontology review queue) */}
+      {tab === 'docevidence' && (
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            A verified quote proves the document <em>says</em> it — only your
+            approval makes it business truth. Approving creates the ontology
+            element with full source provenance (document, location, verbatim
+            quote) in one atomic step.
+          </p>
+          {docHidden > 0 && (
+            <p className="flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+              <AlertCircle className="h-3.5 w-3.5" />
+              {docHidden} proposal{docHidden > 1 ? 's' : ''} hidden — you lack
+              access to the source document
+            </p>
+          )}
+          {docError && (
+            <p className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-600">
+              <AlertCircle className="h-3.5 w-3.5" /> {docError}
+            </p>
+          )}
+          {docProposals.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No document proposals — extract evidence from a file knowledge
+              base to populate this queue
+            </p>
+          ) : (
+            docProposals.map((p) => (
+              <div key={p.id} className="rounded-xl border border-border bg-card p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        p.status === 'proposed' ? 'bg-amber-100 text-amber-700' :
+                        p.status === 'approved' ? 'bg-green-100 text-green-700' :
+                        p.status === 'rejected' ? 'bg-red-100 text-red-600' :
+                        'bg-secondary text-muted-foreground'
+                      }`}>{p.status}</span>
+                      <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">
+                        {p.proposal_kind}
+                      </span>
+                      {p.location_json?.page != null && (
+                        <span className="text-[11px] text-muted-foreground">
+                          page {p.location_json.page}
+                        </span>
+                      )}
+                      {p.location_json?.sheet && (
+                        <span className="text-[11px] text-muted-foreground">
+                          sheet {p.location_json.sheet}
+                        </span>
+                      )}
+                      {p.location_json?.section && (
+                        <span className="text-[11px] text-muted-foreground">
+                          § {p.location_json.section}
+                        </span>
+                      )}
+                      <span className="text-[11px] text-muted-foreground">
+                        doc {p.doc_version_id?.slice(0, 8)}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-sm font-medium text-foreground">
+                      {p.payload_json?.name || '(unnamed)'}
+                      {p.payload_json?.description && (
+                        <span className="ml-2 text-xs font-normal text-muted-foreground">
+                          {p.payload_json.description}
+                        </span>
+                      )}
+                    </p>
+                    <blockquote className="mt-1.5 border-l-2 border-primary/40 pl-2 text-xs italic text-muted-foreground">
+                      “{p.quote}”
+                    </blockquote>
+                    {p.conflict_json?.existing_object_id && (
+                      <p className="mt-1.5 flex items-center gap-1 text-[11px] text-amber-700">
+                        <AlertCircle className="h-3 w-3" />
+                        conflicts with existing object
+                        {' '}<span className="font-mono">{p.conflict_json.existing_name || p.conflict_json.existing_object_id.slice(0, 8)}</span>
+                        {p.conflict_json.existing_evidence_status === 'verified'
+                          ? ' (verified — the definition is preserved, your approval appends this document as corroborating evidence)'
+                          : ' (will be attached and authorized)'}
+                      </p>
+                    )}
+                    {p.reviewed_by && (
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        reviewed by {p.reviewed_by}
+                      </p>
+                    )}
+                    {p.status === 'proposed' && !p.conflict_json?.existing_object_id && (
+                      <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        domain
+                        <select
+                          defaultValue={docDomains[0]?.id || ''}
+                          id={`doc-domain-${p.id}`}
+                          className="rounded-md border border-border bg-background px-1.5 py-0.5 text-[11px]"
+                        >
+                          {docDomains.map((d) => (
+                            <option key={d.id} value={d.id}>{d.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                  </div>
+                  {p.status === 'proposed' && (
+                    <div className="flex shrink-0 gap-2">
+                      <button
+                        onClick={() => {
+                          const sel = document.getElementById(`doc-domain-${p.id}`);
+                          handleDocAction(p, 'approve', {
+                            domain_id: sel ? sel.value : null,
+                          });
+                        }}
+                        disabled={!!actionLoading[`doc-${p.id}`]}
+                        className="inline-flex items-center gap-1 rounded-md bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                      >
+                        {actionLoading[`doc-${p.id}`] === 'approve' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                        Approve
+                      </button>
+                      <button
+                        onClick={() => handleDocRevise(p)}
+                        disabled={!!actionLoading[`doc-${p.id}`]}
+                        className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-secondary disabled:opacity-50"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        Revise
+                      </button>
+                      <button
+                        onClick={() => handleDocAction(p, 'reject')}
+                        disabled={!!actionLoading[`doc-${p.id}`]}
+                        className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-secondary disabled:opacity-50"
+                      >
+                        {actionLoading[`doc-${p.id}`] === 'reject' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}
                         Reject
                       </button>
                     </div>

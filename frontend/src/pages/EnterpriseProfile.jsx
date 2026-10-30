@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Building2, RefreshCw, Loader2, Download, MapPin, Radar, Plus,
-  CircleDot, Layers, Database, ShieldCheck,
+  CircleDot, Layers, Database, ShieldCheck, History,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { authFetch } from '@/api/authFetch';
+import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
 
 /**
  * Enterprise Profile — the org's ontology coverage map (P0-2/P1-1).
@@ -84,6 +85,73 @@ function CoverageCard({ domain, value, onClick, selected }) {
   );
 }
 
+function RevisionsFeed() {
+  // P2: append-only ontology revision history (GET /api/ontology/revisions).
+  const [open, setOpen] = useState(false);
+  const [revisions, setRevisions] = useState(null);
+  const load = async () => {
+    try {
+      const res = await authFetch('/api/ontology/revisions');
+      const data = await res.json();
+      setRevisions(data.revisions || []);
+    } catch {
+      setRevisions([]);
+    }
+  };
+  useEffect(() => { if (open && revisions === null) load(); }, [open, revisions]);
+  return (
+    <div className="bg-white rounded-lg border border-stone-200">
+      <button onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2 px-4 py-3 text-left">
+        <History size={14} className="text-stone-500" />
+        <h2 className="text-sm font-semibold text-stone-800">Ontology Revision History</h2>
+        <span className="text-[11px] text-stone-400">append-only — every mutation, who made it, when</span>
+        <span className="ml-auto text-stone-400 text-xs">{open ? 'hide' : 'show'}</span>
+      </button>
+      {open && (
+        <div className="px-4 pb-3 max-h-72 overflow-y-auto">
+          {!revisions && <div className="text-[11px] text-stone-400 py-2">Loading…</div>}
+          {revisions && revisions.length === 0 &&
+            <div className="text-[11px] text-stone-400 py-2">No revisions yet — seed or bind something.</div>}
+          {revisions && revisions.map((r) => (
+            <div key={r.id} className="flex items-center gap-2 py-1.5 border-b border-stone-100 last:border-0 text-[11px]">
+              <span className="font-mono text-stone-400">#{r.revision_no}</span>
+              <span className="px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-600 capitalize">{r.change_kind}</span>
+              <span className="text-stone-600 capitalize">{r.entity_type}</span>
+              <span className="text-stone-400 truncate max-w-[240px]" title={r.entity_id}>{r.entity_id.slice(0, 8)}…</span>
+              <span className="text-stone-400">{r.changed_by || '—'}</span>
+              <span className="ml-auto text-stone-300">{(r.created_date || '').replace('T', ' ').slice(0, 16)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EvidenceBadge({ obj }) {
+  // Canonical statuses: frontend/src/lib/evidenceStatuses.js mirrors
+  // backend services/ontology/evidence.py (single source of truth).
+  const status = EVIDENCE_BADGE_STYLE[obj.evidence_status]
+    ? obj.evidence_status
+    : 'proposed';
+  const conf =
+    obj.confidence != null ? ` · ${Math.round(obj.confidence * 100)}%` : '';
+  return (
+    <span
+      className={`inline-flex items-center text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${EVIDENCE_BADGE_STYLE[status]}`}
+      title={
+        obj.provenance
+          ? JSON.stringify(obj.provenance)
+          : `evidence status: ${status}`
+      }
+    >
+      {status}
+      {conf}
+    </span>
+  );
+}
+
 function ObjectsPanel({ domain, objects }) {
   const domObjects = objects.filter((o) => o.domain_id === domain.id);
   return (
@@ -99,17 +167,46 @@ function ObjectsPanel({ domain, objects }) {
       ) : (
         <ul className="mt-2 divide-y divide-stone-100">
           {domObjects.map((o) => (
-            <li key={o.id} className="py-2 flex items-center gap-2">
-              <span className="text-[12px] text-stone-700 font-medium">{o.display_name || o.name}</span>
-              <BackingBadge obj={o} />
-              {o.properties?.length > 0 && (
-                <span className="ml-auto text-[10px] text-stone-400 truncate max-w-[45%]" title={
-                  o.properties
-                    .map((p) => `${p.name}${p.column ? `→${p.column}` : ''}`)
-                    .join(', ')
-                }>
-                  {o.properties.map((p) => p.name).join(', ')}
-                </span>
+            <li key={o.id} className="py-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[12px] text-stone-700 font-medium">{o.display_name || o.name}</span>
+                <BackingBadge obj={o} />
+                <EvidenceBadge obj={o} />
+                {o.properties?.length > 0 && (
+                  <span className="ml-auto text-[10px] text-stone-400 truncate max-w-[45%]" title={
+                    o.properties
+                      .map((p) => `${p.name}${p.column ? `→${p.column}` : ''}`)
+                      .join(', ')
+                  }>
+                    {o.properties.map((p) => p.name).join(', ')}
+                  </span>
+                )}
+              </div>
+              {/* P4 T9 — document-grounded provenance. The backend already
+                  filtered these entries per viewer (D6/D7): what arrives is
+                  exactly what this principal may see, so rendering it is
+                  safe. Each entry is a navigable citation: source document
+                  (kb) + page/sheet/section + the verbatim quote. */}
+              {(o.provenance?.document_provenance || []).length > 0 && (
+                <details className="mt-1">
+                  <summary className="cursor-pointer text-[10px] text-stone-500 hover:text-stone-700">
+                    document evidence ({o.provenance.document_provenance.length})
+                  </summary>
+                  <ul className="mt-1 space-y-1.5 border-l-2 border-stone-200 pl-2.5">
+                    {o.provenance.document_provenance.map((e, i) => (
+                      <li key={`${e.doc_version_id}-${i}`} className="text-[11px]">
+                        <span className="text-stone-600">
+                          {e.location?.page != null ? `page ${e.location.page}` : ''}
+                          {e.location?.sheet ? ` sheet ${e.location.sheet}` : ''}
+                          {e.location?.section ? ` § ${e.location.section}` : ''}
+                          {(e.location?.page != null || e.location?.sheet || e.location?.section) ? ' — ' : ''}
+                          doc <span className="font-mono">{(e.doc_version_id || '').slice(0, 8)}</span>
+                        </span>
+                        <p className="italic text-stone-500">“{e.quote}”</p>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               )}
             </li>
           ))}
@@ -486,7 +583,7 @@ export default function EnterpriseProfile() {
   }
 
   return (
-    <div className="min-h-screen bg-stone-50">
+    <div className="h-full overflow-y-auto bg-stone-50">
       <div className="max-w-6xl mx-auto px-6 py-8">
         <div className="flex items-center gap-3">
           <Building2 size={22} className="text-stone-700" />
@@ -540,6 +637,7 @@ export default function EnterpriseProfile() {
         </div>
 
         {domain && <div className="mt-4"><ObjectsPanel domain={domain} objects={objects} /></div>}
+        <div className="mt-4"><RevisionsFeed /></div>
 
         <PoDraftsCard onExport={exportDrafts} exporting={exporting} />
 
