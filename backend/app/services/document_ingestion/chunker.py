@@ -61,6 +61,34 @@ def _split_chinese_sentences(text: str) -> list[str]:
     return out or ([text.strip()] if text.strip() else [])
 
 
+def chunk_segments(
+    segments: list[dict],
+    max_tokens: int = 800,
+    overlap: int = 100,
+    mode: str = "english",
+) -> list[dict]:
+    """P4 T3 — location-aware chunking over `extract_segments` output.
+
+    Each segment is chunked with the SAME engine as `chunk_text`; the
+    chunk carries a "location" field: the location of the segment that
+    produced its FIRST part (cross-segment chunks keep the first
+    location). Output shape = `chunk_text` chunks + "location". The
+    existing `chunk_text` output shape is untouched (no location key).
+    """
+    chunks: list[dict] = []
+    index = 0
+    for seg in segments or []:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        location = seg.get("location") or {}
+        for c in chunk_text(text, max_tokens=max_tokens, overlap=overlap,
+                            mode=mode):
+            chunks.append({**c, "index": index, "location": location})
+            index += 1
+    return chunks
+
+
 def chunk_text(
     text: str,
     max_tokens: int = 800,
