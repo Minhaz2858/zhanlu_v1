@@ -149,6 +149,7 @@ def import_org_template(db: Session, org_id: str, bundle: dict) -> dict:
         (l.from_object_id, l.to_object_id, l.link_type)
         for l in list_links(db, org_id)
     }
+    created_entities: list[tuple[str, object]] = []
 
     for dspec in (bundle.get("domains") or []):
         code = (dspec.get("code") or "").strip()
@@ -165,6 +166,7 @@ def import_org_template(db: Session, org_id: str, bundle: dict) -> dict:
             db.add(domain)
             db.flush()
             existing_domains[code] = domain
+            created_entities.append(("domain", domain))
             report["domains_created"] += 1
 
         for ospec in (dspec.get("objects") or []):
@@ -190,9 +192,11 @@ def import_org_template(db: Session, org_id: str, bundle: dict) -> dict:
             db.add(obj)
             db.flush()
             existing_objects[name] = obj
+            created_entities.append(("object", obj))
             report["objects_created"] += 1
 
     obj_by_name = {o.name: o for o in list_objects(db, org_id)}
+    created_entities: list[tuple[str, object]] = []
     for lspec in (bundle.get("links") or []):
         src = obj_by_name.get((lspec.get("from") or ""))
         dst = obj_by_name.get((lspec.get("to") or ""))
@@ -203,11 +207,13 @@ def import_org_template(db: Session, org_id: str, bundle: dict) -> dict:
         if key in existing_links:
             report["links_skipped"] += 1
             continue
-        db.add(OntologyLink(
+        link = OntologyLink(
             org_id=org_id, from_object_id=src.id, to_object_id=dst.id,
             link_type=link_type, cardinality=lspec.get("cardinality") or "N:M",
-        ))
+        )
+        db.add(link)
         existing_links.add(key)
+        created_entities.append(("link", link))
         report["links_created"] += 1
 
     for agent_name, binds in (bundle.get("agent_bindings") or {}).items():
@@ -229,6 +235,13 @@ def import_org_template(db: Session, org_id: str, bundle: dict) -> dict:
             ))
             report["bindings_created"] += 1
 
+    # P2: create-revisions for every imported element (idempotent re-import
+    # creates nothing → zero revisions).
+    from app.services.ontology.revisions import record_revision
+
+    for entity_type, entity in created_entities:
+        record_revision(db, entity_type, entity, change_kind="create",
+                        changed_by="template_import")
     db.commit()
     try:
         from app.services.ontology.coverage import compute_coverage

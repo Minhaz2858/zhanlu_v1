@@ -24,6 +24,7 @@ def ensure_domains(db: Session, org_id: str) -> dict:
         .all()
     }
     created = 0
+    created_entities: list[tuple[str, object]] = []
     for pack in DOMAIN_PACKS:
         if pack["code"] in existing:
             continue
@@ -33,13 +34,24 @@ def ensure_domains(db: Session, org_id: str) -> dict:
         )
         db.add(domain)
         db.flush()
-        _seed_pack_contents(db, org_id, domain, pack)
+        created_entities.append(("domain", domain))
+        created_entities.extend(
+            _seed_pack_contents(db, org_id, domain, pack))
         created += 1
+    # P2: birth revisions for every seeded element (idempotent re-seeds
+    # produce zero — only newly created entities are recorded here).
+    from app.services.ontology.revisions import record_revision
+
+    for entity_type, entity in created_entities:
+        record_revision(db, entity_type, entity, change_kind="create",
+                        changed_by="seed")
     db.commit()
     return {"created": created, "existing": len(existing)}
 
 
-def _seed_pack_contents(db: Session, org_id: str, domain: OntologyDomain, pack: dict) -> None:
+def _seed_pack_contents(db: Session, org_id: str, domain: OntologyDomain,
+                        pack: dict) -> list[tuple[str, object]]:
+    created: list[tuple[str, object]] = []
     obj_by_name: dict[str, OntologyObject] = {}
     for spec in pack.get("objects", []):
         obj = OntologyObject(
@@ -52,23 +64,30 @@ def _seed_pack_contents(db: Session, org_id: str, domain: OntologyDomain, pack: 
         )
         db.add(obj)
         obj_by_name[spec["name"]] = obj
+        created.append(("object", obj))
     db.flush()
 
     for from_name, to_name, link_type in pack.get("links", []):
         src, dst = obj_by_name.get(from_name), obj_by_name.get(to_name)
         if src and dst:
-            db.add(OntologyLink(org_id=org_id, from_object_id=src.id,
-                                to_object_id=dst.id, link_type=link_type))
+            link = OntologyLink(org_id=org_id, from_object_id=src.id,
+                                to_object_id=dst.id, link_type=link_type)
+            db.add(link)
+            created.append(("link", link))
 
     for spec in pack.get("objects", []):
         obj = obj_by_name[spec["name"]]
         for act in spec.get("actions", []):
             risk = act.get("risk", "read")
-            db.add(OntologyAction(
+            action = OntologyAction(
                 org_id=org_id, object_id=obj.id, name=act["name"],
                 tool_name=act.get("tool"), risk_level=risk,
                 requires_confirmation=(risk == "write"),
-            ))
+            )
+            db.add(action)
+            created.append(("action", action))
+    db.flush()
+    return created
 
 
 def _domain_object_ids(db: Session, org_id: str, domain_id: str) -> list[str]:

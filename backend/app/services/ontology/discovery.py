@@ -283,7 +283,7 @@ def _llm_schema_match(
             "properties": props_out}
 
 
-def _apply_binding(obj, kb_id: str, table: str, mapped: dict[str, str],
+def _apply_binding(db, obj, kb_id: str, table: str, mapped: dict[str, str],
                    method: str = "hint_match", confidence: float | None = None) -> None:
     obj.backing_kind = "table"
     obj.backing_ref = f"kb:{kb_id}:{table}"
@@ -305,6 +305,12 @@ def _apply_binding(obj, kb_id: str, table: str, mapped: dict[str, str],
 
     stamp_discovery(obj, method=method, confidence=confidence,
                     kb_id=kb_id, table=table)
+    # P2: bind revision, atomic with the batch commit (no-change → none,
+    # so idempotent discovery re-runs produce zero revisions).
+    from app.services.ontology.revisions import record_revision
+
+    record_revision(db, "object", obj, change_kind="bind",
+                    changed_by="discovery")
 
 
 def _verified_columns(schema_svc, kb_id: str, table: str) -> list[str]:
@@ -410,7 +416,7 @@ def discover_bindings(db: Session, org_id: str, *, apply: bool = True) -> dict:
                 if col:
                     mapped[pname] = col
             if apply:
-                _apply_binding(obj, kb_id, table, mapped, method="hint_match")
+                _apply_binding(db, obj, kb_id, table, mapped, method="hint_match")
             discovered += 1
             report.append({
                 "object": obj.name,
@@ -463,7 +469,7 @@ def discover_bindings(db: Session, org_id: str, *, apply: bool = True) -> dict:
         conf = verdict["confidence"]
         mapped = verdict["properties"]  # already verified against cols
         if conf >= threshold and apply:
-            _apply_binding(obj, kb_id, table, mapped,
+            _apply_binding(db, obj, kb_id, table, mapped,
                            method="llm_discovery", confidence=conf)
             discovered += 1
             report.append({

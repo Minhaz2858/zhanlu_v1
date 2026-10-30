@@ -182,7 +182,7 @@ def test_apply_binding_stamps_inferred_evidence(db):
     from app.services.ontology.evidence import STATUS_INFERRED
 
     o = _obj(db, "manual")
-    _apply_binding(o, "kb1", "party_master",
+    _apply_binding(db, o, "kb1", "party_master",
                    {"name": "party_full_nm"}, method="llm_discovery",
                    confidence=0.9)
     db.commit()
@@ -193,7 +193,7 @@ def test_apply_binding_stamps_inferred_evidence(db):
 
     # Hint path: no fabricated score
     o2 = _obj(db, "manual")
-    _apply_binding(o2, "kb1", "t", {})
+    _apply_binding(db, o2, "kb1", "t", {})
     assert o2.evidence_status == STATUS_INFERRED
     assert o2.confidence is None
 
@@ -207,7 +207,7 @@ def test_unbind_clears_stale_confidence_and_supersedes_provenance(db):
     )
 
     o = _obj(db, "manual")
-    _apply_binding(o, "kb1", "t", {"name": "n"}, method="llm_discovery",
+    _apply_binding(db, o, "kb1", "t", {"name": "n"}, method="llm_discovery",
                    confidence=0.9)
     stamp_human_bind(o, bound_by="boss")
     stamp_unbind(o)

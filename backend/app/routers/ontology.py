@@ -163,6 +163,16 @@ def bind_object(
     else:
         stamp_human_bind(obj, bound_by=getattr(admin, "email", None)
                          or str(getattr(admin, "id", "") or ""))
+    # P2: exactly one revision for the bind/unbind, atomic with the mutation
+    from app.services.ontology.revisions import record_revision
+
+    record_revision(
+        db, "object", obj,
+        change_kind="unbind" if obj.evidence_status == "proposed" and
+        obj.backing_kind == "manual" else "bind",
+        changed_by=getattr(admin, "email", None)
+        or str(getattr(admin, "id", "") or ""),
+    )
     db.commit()
     return object_to_dict(obj)
 
@@ -245,6 +255,13 @@ def bind_action(
 
     stamp_action_binding(action, bound_by=getattr(admin, "email", None)
                          or str(getattr(admin, "id", "") or ""))
+    from app.services.ontology.revisions import record_revision
+
+    record_revision(
+        db, "action", action, change_kind="update",
+        changed_by=getattr(admin, "email", None)
+        or str(getattr(admin, "id", "") or ""),
+    )
     db.commit()
     return action_to_dict(action)
 
@@ -685,3 +702,151 @@ def create_binding(
     compute_coverage(db, org)
     return {"ok": True, "agent_name": body.agent_name,
             "domain": domain.code, "permission_scope": body.permission_scope}
+
+
+
+
+# ── P2: versioned ontology registry — history, rollback, retirement ────
+
+
+@router.get("/revisions")
+def list_all_revisions(
+    since: str | None = None,
+    entity_type: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Org-wide revision feed (newest first). `since` = a revision id."""
+    from app.services.ontology.revisions import revision_to_dict, revisions_since
+
+    if entity_type and entity_type not in ("object", "link", "action", "domain"):
+        raise HTTPException(status_code=422, detail="invalid entity_type")
+    rows = revisions_since(db, user.org_id, since, entity_type)
+    return {"revisions": [revision_to_dict(r) for r in rows]}
+
+
+@router.get("/{entity_type}/{entity_id}/revisions")
+def list_entity_revisions(
+    entity_type: str,
+    entity_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Per-entity revision history (newest first)."""
+    from app.services.ontology.revisions import list_revisions, revision_to_dict
+
+    if entity_type not in ("object", "link", "action", "domain"):
+        raise HTTPException(status_code=422, detail="invalid entity_type")
+    rows = list_revisions(db, user.org_id, entity_type, entity_id)
+    return {"revisions": [revision_to_dict(r) for r in rows]}
+
+
+class RollbackBody(BaseModel):
+    revision_no: int
+
+
+def _entity_for_rollback(db: Session, org_id: str, entity_type: str, entity_id: str):
+    from app.models.ontology import OntologyAction, OntologyLink, OntologyObject
+
+    model = {
+        "object": OntologyObject, "link": OntologyLink,
+        "action": OntologyAction,
+    }.get(entity_type)
+    if model is None:
+        raise HTTPException(status_code=422, detail="invalid entity_type")
+    entity = (
+        db.query(model)
+        .filter(model.org_id == org_id, model.id == entity_id)
+        .first()
+    )
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return entity
+
+
+@router.post("/{entity_type}/{entity_id}/rollback")
+def rollback_entity(
+    entity_type: str,
+    entity_id: str,
+    body: RollbackBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Restore an element to its state at `revision_no`. Appends a NEW
+    `rollback` revision — history is never erased."""
+    from app.services.ontology.revisions import (
+        rollback_to_revision,
+        revision_to_dict,
+    )
+
+    entity = _entity_for_rollback(db, admin.org_id, entity_type, entity_id)
+    try:
+        rev = rollback_to_revision(
+            db, entity_type, entity, body.revision_no,
+            changed_by=getattr(admin, "email", None)
+            or str(getattr(admin, "id", "") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    db.commit()
+    return {"ok": True, "revision": revision_to_dict(rev)}
+
+
+def _retire(db: Session, admin: User, entity_type: str, entity) -> dict:
+    from app.services.ontology.revisions import record_revision
+
+    if entity_type == "action":
+        entity.is_active = False
+    entity.is_deleted = True
+    record_revision(
+        db, entity_type, entity, change_kind="retire",
+        changed_by=getattr(admin, "email", None)
+        or str(getattr(admin, "id", "") or ""),
+    )
+    db.commit()
+    return {"ok": True, "retired": entity.id}
+
+
+@router.delete("/objects/{object_id}")
+def retire_object(
+    object_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Soft-retire an object (history survives; a `retire` revision is
+    recorded). Restore via the rollback endpoint."""
+    obj = get_object(db, admin.org_id, object_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+    return _retire(db, admin, "object", obj)
+
+
+@router.delete("/links/{link_id}")
+def retire_link(
+    link_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    from app.models.ontology import OntologyLink
+
+    link = (
+        db.query(OntologyLink)
+        .filter(OntologyLink.org_id == admin.org_id,
+                OntologyLink.id == link_id)
+        .first()
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+    return _retire(db, admin, "link", link)
+
+
+@router.delete("/actions/{action_id}")
+def retire_action(
+    action_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    action = get_action(db, admin.org_id, action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found")
+    return _retire(db, admin, "action", action)
