@@ -193,6 +193,27 @@ def test_execution_failure_typed_unavailable(db, seeded):
     _assert_unavailable(out, "")
 
 
+def test_custom_aggregation_honestly_refused(db, seeded):
+    """'custom' has no deterministic executable definition — refused, not
+    guessed (invariant I1/I2)."""
+    from app.services.ontology.metrics import compute_metric
+
+    seeded.metric.aggregation = "custom"
+    db.commit()
+    out = compute_metric(db, ORG, "Gross Revenue")
+    _assert_unavailable(out, "custom")
+    assert "deterministic" in out["reason"]
+
+
+def test_invalid_aggregation_typed_unavailable(db, seeded):
+    from app.services.ontology.metrics import compute_metric
+
+    seeded.metric.aggregation = "median_of_moons"
+    db.commit()
+    out = compute_metric(db, ORG, "Gross Revenue")
+    _assert_unavailable(out, "aggregation")
+
+
 # ── the bind trap: no more permanent-refusal bindings ─────────────────────
 
 def test_bind_rejects_metric_ref_to_unknown_or_unpublished_definition(db, seeded):
