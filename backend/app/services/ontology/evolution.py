@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -32,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 MAX_SOURCES_PER_RUN = 20
 MAX_FILE_KBS_PER_RUN = 10
+# A source that keeps failing is retried this many scheduled ticks before
+# it is left alone (manual admin reconcile bypasses the cap).
+MAX_SOURCE_ATTEMPTS = 10
 
 
 def _now():
@@ -167,7 +171,8 @@ def _detect_database_source(db: Session, kb: KnowledgeBase) -> dict | None:
     return {"facts": facts, "live": live, "catalog": catalog}
 
 
-def reconcile(db: Session, org_id: str, *, apply: bool = False) -> dict:
+def reconcile(db: Session, org_id: str, *, apply: bool = False,
+              respect_cap: bool = True) -> dict:
     """Scan the org's sources, diff against the ledger, act within E2."""
     report: dict[str, Any] = {
         "org_id": org_id, "apply": apply,
@@ -175,12 +180,33 @@ def reconcile(db: Session, org_id: str, *, apply: bool = False) -> dict:
         "notifications": [], "failed": [],
     }
     touched_tables: set[str] = set()
+    # Removal verdicts already persisted in the ledger (last applied
+    # drift). While the live schema stays unchanged, the (possibly
+    # lagging) catalog self-check must NOT heal these back to ok —
+    # otherwise bindings flap stale→ok→stale every tick until the
+    # indexer catches up.
+    judged_removed: set[str] = set()
+    judged_cols: dict[str, set[str]] = {}
+    for st in (
+        db.query(OntologyEvolutionState)
+        .filter(OntologyEvolutionState.org_id == org_id,
+                OntologyEvolutionState.is_deleted == False)  # noqa: E712
+        .all()
+    ):
+        for f in (st.facts_json or []):
+            if not isinstance(f, (list, tuple)) or len(f) < 2:
+                continue
+            if f[0] == "table_removed":
+                judged_removed.add(f[1])
+            elif f[0] == "column_removed":
+                judged_cols.setdefault(f[1], set()).add(f[2])
 
     kbs = (
         db.query(KnowledgeBase)
         .filter(KnowledgeBase.org_id == org_id,
                 KnowledgeBase.is_deleted == False,  # noqa: E712
                 KnowledgeBase.source_kind == "database")
+        .order_by(KnowledgeBase.id)
         .limit(MAX_SOURCES_PER_RUN)
         .all()
     )
@@ -188,6 +214,20 @@ def reconcile(db: Session, org_id: str, *, apply: bool = False) -> dict:
     for kb in kbs:
         source_key = f"db:{kb.id}"
         try:
+            state = (
+                db.query(OntologyEvolutionState)
+                .filter(OntologyEvolutionState.org_id == org_id,
+                        OntologyEvolutionState.source_key == source_key)
+                .first()
+            )
+            if (respect_cap and apply and state is not None
+                    and state.last_status == "failed"
+                    and (state.attempts or 0) >= MAX_SOURCE_ATTEMPTS):
+                report["sources"].append(
+                    {"source_key": source_key, "status": "skipped",
+                     "reason": f"failed {state.attempts}x — cap reached"})
+                continue
+
             detection = _detect_database_source(db, kb)
             if detection is None:
                 report["sources"].append(
@@ -195,12 +235,6 @@ def reconcile(db: Session, org_id: str, *, apply: bool = False) -> dict:
                      "reason": "no catalog baseline yet"})
                 continue
             signature = _sig(detection["facts"])
-            state = (
-                db.query(OntologyEvolutionState)
-                .filter(OntologyEvolutionState.org_id == org_id,
-                        OntologyEvolutionState.source_key == source_key)
-                .first()
-            )
             if state and state.signature == signature:
                 report["sources"].append(
                     {"source_key": source_key, "status": "unchanged"})
@@ -211,12 +245,14 @@ def reconcile(db: Session, org_id: str, *, apply: bool = False) -> dict:
 
             if not detection["facts"]:
                 # Baseline run (or transiently re-synced): record the
-                # signature WITHOUT inventing a change.
+                # signature WITHOUT inventing a change. Facts are cleared
+                # — a source that came back healthy stops shielding its
+                # bindings from the catalog self-check.
                 report["sources"].append(
                     {"source_key": source_key, "status": "ok"})
                 if apply:
                     _upsert_state(db, org_id, source_key, "database",
-                                  signature, "ok")
+                                  signature, "ok", facts=[])
                     db.commit()
                 continue
 
@@ -231,19 +267,35 @@ def reconcile(db: Session, org_id: str, *, apply: bool = False) -> dict:
             # must not "heal" these back to ok (the catalog may lag the
             # live source).
             touched_tables.update(f[1] for f in detection["facts"])
+            judged_removed.update(f[1] for f in detection["facts"]
+                                  if f[0] == "table_removed")
+            for f in detection["facts"]:
+                if f[0] == "column_removed":
+                    judged_cols.setdefault(f[1], set()).add(f[2])
 
             if apply:
-                actions = _apply_drift(db, org_id, detection, change)
+                actions = _apply_drift(db, org_id, detection, report)
                 report["actions"].extend(actions)
                 # Advance the signature ONLY when the controlled actions
                 # actually ran — a report-only pass must never consume a
                 # pending change (otherwise the follow-up apply run would
-                # see "unchanged" and skip the drift forever).
+                # see "unchanged" and skip the drift forever). The removal
+                # facts ride along so the NEXT run (unchanged signature)
+                # still shields the judged bindings from the lagging
+                # catalog self-check.
                 _upsert_state(db, org_id, source_key, "database", signature,
-                              "changed" if detection["facts"] else "ok")
+                              "changed", facts=[
+                                  list(f) for f in detection["facts"]
+                                  if f[0] in ("table_removed",
+                                              "column_removed")])
                 db.commit()
         except Exception as exc:  # noqa: BLE001 — per-source isolation (E4)
             logger.exception("evolution: source %s failed", source_key)
+            # The failure may have left the session in a pending-rollback
+            # state — roll back BEFORE writing the failure ledger row, or
+            # the commit aborts the remaining sources (the exact
+            # partial-failure scenario E4 exists for).
+            db.rollback()
             report["failed"].append({"source_key": source_key,
                                      "error": str(exc)[:300]})
             if apply:
@@ -252,21 +304,32 @@ def reconcile(db: Session, org_id: str, *, apply: bool = False) -> dict:
                 db.commit()
 
     _check_bindings_and_metrics(db, org_id, report, apply=apply,
-                                skip_tables=touched_tables)
-    db.commit()
+                                touched_tables=touched_tables,
+                                judged_removed=judged_removed,
+                                judged_cols=judged_cols)
+    if apply:
+        db.commit()
     return report
 
 
 def _apply_drift(db: Session, org_id: str, detection: dict,
-                 change: dict) -> list[dict]:
+                 report: dict) -> list[dict]:
     """E2-allowed mutations: stale/broken marking with P2 revisions, and
-    fan-out for material changes. Never touches verified definitions."""
+    fan-out notifications for material changes. Never touches verified
+    definitions. Per-object decision: broken only when the object's bound
+    TABLE was removed; stale only when a REMOVED column is one the object
+    actually maps. Purely additive facts (table/column added) never
+    degrade a binding."""
+    from app.services.ontology.fanout import notify_object_change
     from app.services.ontology.revisions import record_revision
 
     actions: list[dict] = []
     removed_tables = {f[1] for f in detection["facts"]
                       if f[0] == "table_removed"}
-    touched = {f[1] for f in detection["facts"]}
+    removed_cols: dict[str, set[str]] = {}
+    for f in detection["facts"]:
+        if f[0] == "column_removed":
+            removed_cols.setdefault(f[1], set()).add(f[2])
     objects = (
         db.query(OntologyObject)
         .filter(OntologyObject.org_id == org_id,
@@ -275,9 +338,20 @@ def _apply_drift(db: Session, org_id: str, detection: dict,
     )
     for obj in objects:
         table = _bound_table(obj)
-        if table not in touched:
+        if not table:
             continue
-        new_status = "broken" if table in removed_tables else "stale"
+        if table in removed_tables:
+            new_status = "broken"
+        else:
+            gone = removed_cols.get(table)
+            if not gone:
+                continue  # additive-only change — binding still valid
+            mapped = {
+                p.get("column") for p in (obj.properties_json or [])
+                if isinstance(p, dict) and p.get("column")}
+            if not (mapped & gone):
+                continue  # this object doesn't map any removed column
+            new_status = "stale"
         if obj.binding_status == new_status:
             continue  # idempotent — no duplicate revisions (E1)
         obj.binding_status = new_status
@@ -289,21 +363,45 @@ def _apply_drift(db: Session, org_id: str, detection: dict,
                             f"({table})"))
         actions.append({"action": f"mark_{new_status}", "object": obj.name,
                         "table": table})
+        if report.get("apply"):
+            # Fan-out to agents bound to this object's domain (best
+            # effort — a notification failure never blocks the marking).
+            try:
+                outcome = notify_object_change(
+                    db, org_id, obj.name,
+                    change_summary=(
+                        f"binding {new_status}: source schema changed "
+                        f"({table})"),
+                    changed_by="ontology-evolution")
+                report["notifications"].append({
+                    "object": obj.name, "action": f"mark_{new_status}",
+                    "agents": outcome.get("notified", []),
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("evolution: fan-out failed for %s: %s",
+                               obj.name, exc)
     return actions
 
 
 def _check_bindings_and_metrics(db: Session, org_id: str, report: dict,
                                 *, apply: bool,
-                                skip_tables: set[str] | None = None) -> None:
+                                touched_tables: set[str] | None = None,
+                                judged_removed: set[str] | None = None,
+                                judged_cols: (dict[str, set[str]] | None)
+                                = None) -> None:
     """Binding health + metric dependency self-checks (bounded, honest).
 
-    ``skip_tables``: tables the live-schema diff already judged this run —
-    the (possibly lagging) catalog must not upgrade those bindings back
-    to ok.
+    ``touched_tables``: tables the live-schema diff judged THIS run — the
+    lagging catalog must not contradict those verdicts.
+    ``judged_removed``/``judged_cols``: removal verdicts persisted in the
+    ledger from the last applied drift — shields bindings from healing
+    back to ok while the live schema is still degraded (no flap).
     """
     from app.models.metric_definition import MetricDefinition
 
-    skip_tables = skip_tables or set()
+    touched_tables = touched_tables or set()
+    judged_removed = judged_removed or set()
+    judged_cols = judged_cols or {}
 
     objects = (
         db.query(OntologyObject)
@@ -315,7 +413,7 @@ def _check_bindings_and_metrics(db: Session, org_id: str, report: dict,
     for obj in objects:
         if obj.backing_kind == "table":
             table = _bound_table(obj)
-            if not table or table in skip_tables:
+            if not table or table in touched_tables:
                 continue
             ref_kb = obj.backing_ref.split(":")[1] \
                 if (obj.backing_ref or "").startswith("kb:") else None
@@ -331,6 +429,13 @@ def _check_bindings_and_metrics(db: Session, org_id: str, report: dict,
                 missing = {c for c in mapped_cols
                            if c not in catalog.get(table, set())}
                 status = "stale" if missing else "ok"
+                # Never UPGRADE a degraded binding while the ledger still
+                # holds an unresolved live-diff verdict against it.
+                if (status == "ok"
+                        and (table in judged_removed
+                             or (mapped_cols & judged_cols.get(table, set())))
+                        and obj.binding_status in ("stale", "broken")):
+                    continue
                 if status != obj.binding_status:
                     _mark(db, org_id, obj, status, report, apply)
         else:  # metric backing
@@ -392,7 +497,8 @@ def _mark(db: Session, org_id: str, obj: OntologyObject, status: str,
 
 
 def _upsert_state(db: Session, org_id: str, source_key: str, kind: str,
-                  signature: str, status: str, *, error: str | None = None):
+                  signature: str, status: str, *, error: str | None = None,
+                  facts: list | None = None):
     state = (
         db.query(OntologyEvolutionState)
         .filter(OntologyEvolutionState.org_id == org_id,
@@ -400,8 +506,6 @@ def _upsert_state(db: Session, org_id: str, source_key: str, kind: str,
         .first()
     )
     if state is None:
-        import uuid
-
         state = OntologyEvolutionState(
             id=str(uuid.uuid4()), org_id=org_id, source_key=source_key,
             source_kind=kind)
@@ -409,5 +513,12 @@ def _upsert_state(db: Session, org_id: str, source_key: str, kind: str,
     state.signature = signature
     state.last_status = status
     state.last_error = error
-    state.attempts = (state.attempts or 0) + 1
+    # attempts counts CONSECUTIVE failures for the retry cap — reset on a
+    # healthy run, increment on a failed one.
+    if status == "failed":
+        state.attempts = (state.attempts or 0) + 1
+    else:
+        state.attempts = 0
     state.last_run_at = _now()
+    if facts is not None:
+        state.facts_json = facts

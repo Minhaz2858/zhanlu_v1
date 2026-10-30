@@ -42,3 +42,11 @@ For each change: affected objects (backing_ref match), properties (column match)
 
 ### P6-T6 — Tests (`tests/test_ontology_evolution.py`)
 Schema addition → changed signature → stale none + proposal note; column removal → stale marking + revision via bind-status mutation? (binding_status change is a field update — record_revision change_kind="drift" per E2? YES: record P2 revision on stale marking); type change; doc version change; idempotency (second run = zero changes); duplicate-event prevention; verified preservation (verified object with vanished column → marked stale NOT deleted/rebound); cross-org isolation; retry after failure; apply=False report-only; admin gate on endpoints.
+
+## v1 scope cuts (deferred — review 2026-10-31 finding #5)
+- Type-changed column detection (facts currently cover added/removed only — a type change surfaces as no fact until the column is dropped/re-added).
+- Document re-hash / spreadsheet row-count checks (P6-T2 doc + spreadsheet sources) — file KBs are not scanned yet.
+- New-concept proposals via `discover_bindings` on changed sources (P6-T4) — v1 marks bindings only; proposals remain the discovery pipeline's job.
+- `compute_coverage` recompute after apply (P6-T4) — coverage refreshes on the existing discovery/coverage paths.
+- Health facts vs signature (review finding #4): the binding/metric self-check runs OUTSIDE the signature gate by design — catalog-health degradations (e.g. re-index removing a table) legitimately produce revisions even on an unchanged live signature. Documented, not a bug.
+

@@ -16,7 +16,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import TimestampedBase
 
 ENTITY_TYPES = ("object", "link", "action", "domain")
-CHANGE_KINDS = ("create", "update", "bind", "unbind", "retire", "rollback")
+CHANGE_KINDS = ("create", "update", "bind", "unbind", "retire", "rollback",
+                "drift")
 
 
 class OntologyRevision(TimestampedBase):

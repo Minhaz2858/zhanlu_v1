@@ -26,6 +26,7 @@ from app.models.ontology import (
     AgentDomainBinding,
     OntologyDomain,
     OntologyEvolutionState,
+    OntologyLink,
     OntologyObject,
 )
 import app.models.ontology_revision  # noqa: F401
@@ -48,7 +49,7 @@ def db():
                 KBColumnMeta.__table__, MetricDefinition.__table__,
                 OntologyDomain.__table__, OntologyObject.__table__,
                 OntologyRevision.__table__, OntologyEvolutionState.__table__,
-                AgentDomainBinding.__table__],
+                OntologyLink.__table__, AgentDomainBinding.__table__],
     )
     Session = sessionmaker(bind=eng)
     session = Session()
@@ -218,6 +219,143 @@ def test_report_only_never_consumes_pending_change(db, tmp_path):
     db.expire_all()
     assert db.get(OntologyObject, obj.id).binding_status in ("stale",
                                                              "broken")
+
+
+# ── review-fix regressions (anti-flap, additive, per-object, fan-out) ─────
+
+
+def test_no_flap_second_run_keeps_broken_with_lagging_catalog(db, tmp_path):
+    """After a drift-apply run, the NEXT run (live unchanged, catalog still
+    listing the removed table) must NOT heal the binding back to ok."""
+    from app.services.ontology.evolution import reconcile
+
+    db_path = tmp_path / "flap.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE sales_order (famount REAL)")
+    conn.commit()
+    conn.close()
+    kb = KnowledgeBase(org_id=ORG, name="flap-src", source_kind="database",
+                       db_type="sqlite", api_url=str(db_path))
+    kb.id = "kb-flap"
+    db.add(kb)
+    db.commit()
+    _catalog(db, kb.id, {"sales_order": ["famount"]})
+    obj = _object(db, kb.id, "Order", "sales_order")
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE sales_order RENAME TO sales_order_v2")
+    conn.commit()
+    conn.close()
+    r1 = reconcile(db, ORG, apply=True)
+    db.expire_all()
+    assert db.get(OntologyObject, obj.id).binding_status == "broken"
+    revs_after_1 = db.query(OntologyRevision).filter(
+        OntologyRevision.entity_id == obj.id).count()
+
+    # run 2: live unchanged → signature match, catalog still lags
+    r2 = reconcile(db, ORG, apply=True)
+    db.expire_all()
+    assert db.get(OntologyObject, obj.id).binding_status == "broken"
+    assert db.query(OntologyRevision).filter(
+        OntologyRevision.entity_id == obj.id).count() == revs_after_1
+    assert not any(a.get("action") == "mark_ok" for a in r2["actions"])
+
+
+def test_additive_change_never_degrades_binding(db, tmp_path):
+    """A purely additive column is not a degradation: no stale, no
+    revision — the signature changes but the binding stays healthy."""
+    from app.services.ontology.evolution import reconcile
+
+    db_path = tmp_path / "add.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE sales_order (famount REAL)")
+    conn.commit()
+    conn.close()
+    kb = KnowledgeBase(org_id=ORG, name="add-src", source_kind="database",
+                       db_type="sqlite", api_url=str(db_path))
+    kb.id = "kb-add"
+    db.add(kb)
+    db.commit()
+    _catalog(db, kb.id, {"sales_order": ["famount"]})
+    obj = _object(db, kb.id, "Order", "sales_order")
+    reconcile(db, ORG, apply=True)  # baseline → healthy binding marked ok
+    db.expire_all()
+    assert db.get(OntologyObject, obj.id).binding_status == "ok"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE sales_order ADD COLUMN fbillno TEXT")
+    conn.commit()
+    conn.close()
+    r = reconcile(db, ORG, apply=True)
+    assert r["changes"]  # signature changed, honestly reported
+    db.expire_all()
+    assert db.get(OntologyObject, obj.id).binding_status == "ok"
+    assert db.query(OntologyRevision).filter(
+        OntologyRevision.entity_id == obj.id).count() == 0
+
+
+def test_column_removal_stales_only_affected_objects(db, tmp_path):
+    """One removed column must stale ONLY objects that actually map it —
+    not every object bound to the table."""
+    from app.services.ontology.evolution import reconcile
+
+    db_path = tmp_path / "cols.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE sales_order (famount REAL, fbillno TEXT)")
+    conn.commit()
+    conn.close()
+    kb = KnowledgeBase(org_id=ORG, name="cols-src", source_kind="database",
+                       db_type="sqlite", api_url=str(db_path))
+    kb.id = "kb-cols"
+    db.add(kb)
+    db.commit()
+    _catalog(db, kb.id, {"sales_order": ["famount", "fbillno"]})
+    o1 = _object(db, kb.id, "Amount", "sales_order", cols=("famount",))
+    o2 = _object(db, kb.id, "BillNo", "sales_order", cols=("fbillno",))
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE sales_order DROP COLUMN fbillno")
+    conn.commit()
+    conn.close()
+    r = reconcile(db, ORG, apply=True)
+    db.expire_all()
+    # o1 maps no removed column → never degraded (never even marked)
+    assert db.get(OntologyObject, o1.id).binding_status is None
+    assert db.get(OntologyObject, o2.id).binding_status == "stale"
+    assert any(a["action"] == "mark_stale" and a["object"] == "BillNo"
+               for a in r["actions"])
+    assert not any(a.get("object") == "Amount"
+                   for a in r["actions"] if a["action"].startswith("mark"))
+
+
+def test_drift_apply_fans_out_notifications(db, tmp_path):
+    """mark_stale/mark_broken under apply=True must surface a
+    notification entry (fan-out attempted per marked object)."""
+    from app.services.ontology.evolution import reconcile
+
+    db_path = tmp_path / "fan.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE sales_order (famount REAL)")
+    conn.commit()
+    conn.close()
+    kb = KnowledgeBase(org_id=ORG, name="fan-src", source_kind="database",
+                       db_type="sqlite", api_url=str(db_path))
+    kb.id = "kb-fan"
+    db.add(kb)
+    db.commit()
+    _catalog(db, kb.id, {"sales_order": ["famount"]})
+    _object(db, kb.id, "Order", "sales_order")
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE sales_order RENAME TO sales_order_v2")
+    conn.commit()
+    conn.close()
+    r = reconcile(db, ORG, apply=True)
+    assert any(n["object"] == "Order"
+               and n["action"] in ("mark_broken", "mark_stale")
+               for n in r["notifications"])
+    assert all("agents" in n for n in r["notifications"])
 
 
 # ── live schema drift through the REAL connector (e2e) ────────────────────

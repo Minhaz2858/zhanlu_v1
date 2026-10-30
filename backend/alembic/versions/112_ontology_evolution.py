@@ -45,6 +45,7 @@ def upgrade() -> None:
         sa.Column("source_key", sa.String(255), nullable=False),
         sa.Column("source_kind", sa.String(30), nullable=False),
         sa.Column("signature", sa.String(64), nullable=False),
+        sa.Column("facts_json", sa.JSON(), nullable=True),
         sa.Column("last_status", sa.String(20), nullable=False,
                   server_default=sa.text("'ok'")),
         sa.Column("last_error", sa.Text(), nullable=True),

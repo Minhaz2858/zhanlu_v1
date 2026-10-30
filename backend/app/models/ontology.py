@@ -300,6 +300,10 @@ class OntologyEvolutionState(TimestampedBase):
     source_key: Mapped[str] = mapped_column(String(255), nullable=False)
     source_kind: Mapped[str] = mapped_column(String(30), nullable=False)
     signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Last applied REMOVAL facts ([kind, table, col?]) — shields bindings
+    # from the lagging catalog self-check healing them back to ok while
+    # the live schema is still degraded (anti-flap).
+    facts_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     last_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="ok")
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

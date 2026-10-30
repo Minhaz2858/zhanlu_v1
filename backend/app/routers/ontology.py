@@ -1067,7 +1067,9 @@ def reconcile_ontology(
     from app.services.ontology.evolution import reconcile
 
     apply = bool((body or {}).get("apply"))
-    return reconcile(db, admin.org_id, apply=apply)
+    # Manual admin runs bypass the failed-source retry cap — the cap only
+    # exists to stop the SCHEDULED loop from hammering a dead source.
+    return reconcile(db, admin.org_id, apply=apply, respect_cap=False)
 
 
 @router.get("/ontology/evolution/state")
