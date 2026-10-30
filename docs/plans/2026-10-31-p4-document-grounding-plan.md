@@ -1,8 +1,12 @@
-# P4 — Document-Grounded Ontology: Gap Audit + Implementation Plan
+# P4 — Document-Grounded Ontology: Gap Audit + Implementation Plan (v2, REVISED)
 
-**Date:** 2026-10-31
-**Status:** PLAN — presented for review. NO implementation before approval.
+**Date:** 2026-10-31 (v2 — revised after review REQUEST CHANGES)
+**Status:** PLAN v2 — presented for approval. NO implementation before approval.
 **Scope guard:** P4 only. No P5 (computed metrics), P6, P7 work.
+**Companion decision record:** `docs/plans/2026-10-31-p4-decision-record.md`
+(resolves the four review blockers: file-level document identity, dedicated
+human document-approval writer, authorization inheritance rule, atomic
+approval).
 
 ---
 
@@ -27,94 +31,125 @@
 
 ### A2. What is genuinely missing (the P4 gap list)
 
-1. **No structured provenance** — page numbers/sheet names exist only as in-text
-   markers that the chunker destroys; DOCX has no section provenance. Chunks
-   carry no page/sheet/section metadata.
-2. **No document identity/versioning** — `KnowledgeBase` has NO content hash or
-   version column; re-ingest is destructive wipe-and-replace with no change
-   detection and no invalidation hook for derived artifacts.
+1. **No structured provenance** — page numbers/sheet names exist only as
+   in-text markers that the chunker destroys; DOCX has no section provenance.
+2. **No document identity/versioning** — `KnowledgeBase` has NO content hash
+   or version column; re-ingest is destructive wipe-and-replace with no
+   change detection and no invalidation hook for derived artifacts.
 3. **No document→ontology path** — nothing reads a document and proposes
-   ontology elements; `provenance_json` has never been written from a document;
-   no proposal store; `stamp_link` unwired.
+   ontology elements; `provenance_json` has never been written from a
+   document; no proposal store; `stamp_link` unwired.
 4. **No deterministic quote verification** — nothing confirms a quoted span
    exists in the source text.
 5. **No document-evidence review surface** — no endpoints, no queue UI.
 6. **No per-document authorization beyond org scoping** — access policy is
-   table/SQL-oriented; document retrieval doesn't consult it (observation; P4
-   keeps org-scoping + admin-gated review, notes the gap, does not fix RAG).
+   table/SQL-oriented; document retrieval doesn't consult it.
 
-## Part B — Architecture (proposed)
+## Part B — Architecture (final, per decision record)
 
 ```
-file KB ingest (PDF/DOCX/XLSX/CSV)
-  └─ extract_segments()            # NEW: structured {text, location(page|sheet)} per segment
-      └─ chunk_segments()          # NEW: chunks carry location metadata (RAG path untouched)
-          └─ document_grounding.extract_document_evidence(db, kb)   # NEW, flag-gated, post-ingest
-              ├─ candidate quotes + proposed elements   # LLM step (monkeypatchable, model-version stamped)
-              ├─ deterministic verifier                  # NEW: exact normalized containment in source segment
-              │     └─ untraceable quote → DROPPED, counted honestly
+file KB ingest (PDF/DOCX/XLSX/CSV)                    [one KB = one file — D1, evidence in decision record]
+  └─ ingest_kb computes SHA-256 from actual file bytes
+      └─ document_versions row appended (append-only history; kb.content_hash = current)   [NEW, migration 107]
+  └─ extract_segments()            # NEW: structured {text, location(page|sheet|section)}   [T2]
+      └─ chunk_segments()          # NEW: chunks carry location metadata (RAG path untouched) [T3]
+          └─ document_grounding.extract_document_evidence(db, kb)   # NEW, flag-gated [T6]
+              ├─ candidates: quotes + proposed elements   # LLM step; document text = UNTRUSTED DATA,
+              │                                            #   injection-hardened prompt; model-version stamped
+              ├─ deterministic verifier                   # normalized containment; ORIGINAL verbatim span stored;
+              │     └─ untraceable quote → DROPPED, counted                                    [T5]
               └─ dedup (existing proposals, existing objects, normalized-name match)
-                    └─ ontology_document_proposals rows  # status='proposed' (+ conflict note when applicable)
-Human review (org-admin, AdminConsole tab like Identity)
-  ├─ approve → create/attach ontology element via record_revision + human stamp
-  │             (existing verified definitions are NEVER overwritten — evidence is APPENDED)
-  ├─ reject  → remembered, never re-proposed
-  └─ revise  → admin edits payload, then approve
-Re-ingest with changed content hash → proposals from the old hash flagged superseded
+                    └─ ontology_document_proposals (status='proposed', audience_json captured)  [T4]
+Human review (org-admin, AdminConsole "Doc Evidence" tab)                                   [T7-T9]
+  ├─ approve  → ATOMIC unit (single transaction, no internal commits):
+  │     create-or-attach element + append doc provenance
+  │     + stamp_human_document_approval (NEW evidence.py writer — D2)
+  │     + record_revision (P2 savepoint/lock/retry unchanged)
+  │     + document decision event (IdentityDecisionEvent pattern)
+  │     + AuditEvent + proposal status update
+  │   Authorization gate: reviewer must pass the source KB's access check;
+  │   audience-unresolvable proposals are NOT promotable (D3)
+  ├─ reject   → remembered, never re-proposed
+  └─ revise   → admin edits payload, then approve
+Re-ingest with changed hash → old proposals flagged `superseded`
+(history + decision events preserved; doc_version_id anchors them)          [D1]
 ```
 
 **Evidence contract (P1-aligned):**
-- Proposals are created `proposed` (deterministic verified-quote but no human).
-- Approve = human authorization → the resulting ontology element is stamped via
-  the human path (`verified` per P1: "directly supported AND human-authorized"),
-  with `provenance_json` carrying the full document reference; a
-  `record_revision` is written (P2).
-- Machine steps can never set `verified` (P1 guard `evidence.py:116-120` reused).
-- Attach-to-existing (dedup) appends a provenance entry + `record_revision`;
-  `verified` definitions are never silently overwritten — conflicts keep the
-  proposal in review with a conflict note.
+- Proposals are created `proposed` — a verified quote proves TRACEABILITY,
+  never semantic correctness; only human approval makes business truth.
+- Approve = human authorization via the NEW `stamp_human_document_approval`
+  (D2) → element `verified` per P1 semantics, `provenance_json` carrying the
+  full document reference; `record_revision` written (P2).
+- Machine steps can never set `verified` (P1 guard reused; the new stamp is
+  the only document-approval entry point and refuses machine callers).
+- Attach-to-existing appends provenance + revision; `verified` definitions
+  are NEVER overwritten — conflicts stay in review requiring explicit human
+  conflict resolution.
 
-**Every proposal retains (reviewer requirement):** kb_id, document (kb) id +
-content hash, page/sheet location, chunk id, exact verbatim evidence span,
-extraction method + model version, extraction timestamp.
+**Every proposal retains (reviewer requirement):** kb_id, doc_version_id
+(+ content hash), page/sheet/section location, chunk id, exact verbatim
+evidence span (original, un-normalized), extraction method + model version,
+extraction timestamp — plus `audience_json` (D3).
 
 ### New/changed artifacts
 
-- Migration `107_knowledge_base_content_hash`: `content_hash` + `content_bytes`
-  on `knowledge_bases` (computed at ingest; idempotent skip when unchanged).
-- Migration `108_ontology_document_proposals`: `ontology_document_proposals`
-  (+ RLS `tenant_isolation`, mirrors 105 pattern) — idempotency constraint
-  `(org_id, kb_id, chunk_key, proposal_kind, quote_hash)`.
-- `extractors.extract_segments(file)` + `chunker.chunk_segments()` — additive;
-  existing `extract_text`/`chunk_text` behavior unchanged.
+- Migration `107_document_versions`: append-only `document_versions`
+  (`org_id, kb_id, content_hash, content_bytes, file_url_at_ingest,
+  first_indexed_at, is_current` + RLS `tenant_isolation`, 105 pattern) AND
+  `kb.content_hash` current-hash column. SHA-256 from actual file bytes.
+- Migration `108_ontology_document_proposals`: proposal table (+ RLS) —
+  idempotency `(org_id, kb_id, doc_version_id, chunk_key, proposal_kind,
+  quote_hash)`; `source_kb_id` + `audience_json` (D3); `status` ∈
+  `proposed|approved|rejected|superseded`.
+- `extractors.extract_segments(file)` + `chunker.chunk_segments()` —
+  additive; existing `extract_text`/`chunk_text` behavior unchanged.
+- `evidence.stamp_human_document_approval` (D2) — evidence.py stays the
+  sole evidence writer.
 - `services/ontology/document_grounding.py` — extraction + verification +
-  proposal persistence.
-- `services/ontology/document_review.py` — approve/reject/revise + decision
-  events (mirrors P3 `IdentityDecisionEvent` pattern) + revision integration.
-- `routers/ontology.py` — `/ontology/document-evidence/*` endpoints (org-admin
-  for mutations, literal paths per router convention).
-- `AdminConsole.jsx` — "Doc Evidence" tab (mirror of Identity tab);
-  `EnterpriseProfile.jsx` — document provenance visible on objects
-  (EvidenceBadge reuse).
-- Flag: `ONTOLOGY_DOC_GROUNDING_ENABLED` (default False; pipeline opt-in per
-  org, consistent with P1/P2 rollout style).
+  proposal persistence (+ per-run counts: proposed / verified_quote /
+  dropped_untraceable / duplicates_skipped).
+- `services/ontology/document_review.py` — atomic approve/reject/revise +
+  decision events + revision integration (D4).
+- Runtime authorization gate (D3) in discovery / `read_object_data`
+  enrichment / external read API: document-derived elements filtered or
+  annotated when the principal lacks source-KB access.
+- `routers/ontology.py` — `/ontology/document-evidence/*` endpoints
+  (org-admin mutations, literal paths).
+- `AdminConsole.jsx` — "Doc Evidence" tab; `EnterpriseProfile.jsx` —
+  document provenance on objects (EvidenceBadge reuse).
+- Flag: `ONTOLOGY_DOC_GROUNDING_ENABLED` (default False).
 
-## Part C — Bite-sized TDD tasks
+## Part C — Bite-sized TDD tasks (revised sequence)
 
-| # | Task | Tests (RED→GREEN) |
-|---|------|-------------------|
-| T1 | `content_hash`/`content_bytes` on KB (migration 107 + model + ingest computes sha256 at index time; unchanged file → same hash) | hash stable across re-ingest; differs on content change; NULL for legacy rows |
-| T2 | `extractors.extract_segments` (pdf pages, docx paragraphs+headings, xlsx sheets, csv rows) — structured `{text, location}`; existing `extract_text` byte-identical behavior | per-type location correctness; csv row locations; docx heading capture; text-path regression |
-| T3 | `chunker.chunk_segments` — chunks carry `location` (first segment's location; boundary-safe) | location propagation; cross-segment chunk takes first location |
-| T4 | `DocumentProposal` model + migration 108 + RLS + idempotency constraint | create/dedup; org-scoped queries; cross-org invisible |
-| T5 | Deterministic quote verifier (`verify_quote(segment_text, quote)` — whitespace-normalized exact containment; untraceable → reject + counter) | exact match; whitespace variants; untraceable; empty quote; huge-span guard |
-| T6 | Extraction pipeline `extract_document_evidence` (flag-gated; LLM candidate step stubbed in tests; verifier applied; dedup vs proposals + existing objects; conflict detection) | happy path; untraceable dropped; dedup no duplicates; conflict flagged; flag-off no-op; cross-org KB rejected |
-| T7 | `document_review.py` — approve (create-or-attach via `record_revision`, human stamp, never overwrite verified), reject (remembered), revise | approve creates object with revision + verified stamp + doc provenance; attach-to-existing appends provenance + revision; verified-definition overwrite refused; reject remembered; revise→approve flow; decision events appended |
-| T8 | Router endpoints (extract, list w/ status filter, approve/reject/revise, history; org-admin mutations; literal paths) | authz (non-admin 403), 404s, org scoping, history |
-| T9 | Frontend: AdminConsole "Doc Evidence" tab + EnterpriseProfile provenance surfacing | build green; manual check |
-| T10 | Full regression (clean-worktree baseline vs closure, same methodology as P3), live verification with REAL documents (PDF + DOCX + XLSX: quote verification, missing-evidence, conflicting policy, document update → supersede), progress log + commit | 0 P3-attributable regressions; live evidence recorded |
+| # | Task | Acceptance condition |
+|---|------|----------------------|
+| T0 | Resolve document identity + authorization contracts | DONE — decision record: cardinality settled (one KB = one file, evidence cited), inheritance rule defined, atomic approval defined |
+| T1 | Document content hashing/versioning (migration 107 + `ingest_kb` computes SHA-256 from file bytes, appends `document_versions`) | Stable file-level identity; hash stable across unchanged re-ingest; differs on content change; old versions preserved; legacy rows NULL |
+| T2 | Structured extraction `extract_segments` (pdf pages, docx paragraphs+headings, xlsx sheets, csv rows) | Page/sheet/section provenance correct per type; existing `extract_text` behavior byte-identical (regression) |
+| T3 | Location-aware chunking `chunk_segments` | Location propagated; existing RAG behavior preserved |
+| T4 | Proposal model + migration 108 (+ RLS + idempotency + `source_kb_id`/`audience_json`) | Org isolation + document identity (doc_version_id) |
+| T5 | Deterministic quote verification | Every accepted quote traceable to source segment; ORIGINAL span stored; untraceable dropped + counted |
+| T6 | Extraction + dedup pipeline (flag-gated; untrusted-content prompt hardening; LLM step stubbed in tests) | No fabricated evidence; counts reported separately; cross-org KB rejected; dedup no duplicates; conflicts flagged |
+| T7 | Human review service (atomic approval; `stamp_human_document_approval`; decision events; revisions; never overwrite verified) | Atomic approval (fail = nothing applied); P1 evidence semantics; P2 revision written; inheritance gate enforced |
+| T8 | API + authorization (extract, list, approve/reject/revise, history; org-admin mutations; source-KB access check at approval; runtime visibility gate) | Org-admin mutations; appropriate read access; non-promotable proposals refuse approval with explicit reason |
+| T9 | Frontend: AdminConsole "Doc Evidence" tab + EnterpriseProfile provenance (navigable citation: document + page/sheet) | Build green; review shows quotation, location, conflicts, evidence status; approve/reject/revise work |
+| T10 | Independent review + E2E | Real documents (PDF/DOCX/XLSX): quote verification, missing evidence, conflicting policies, document update → supersede w/ history preserved, cross-source grounding, authorization, revision history; clean-worktree regression comparison (P3 methodology); progress log + commits |
 
-## Part D — Non-goals / guarantees
+## Part D — Non-negotiable architectural invariants
+
+1. Zhanlu remains an Agent Harness, not a collection of document-specific agents.
+2. No new ontology engine or graph database.
+3. Existing RAG remains the shared document retrieval system.
+4. Document extraction proposes evidence; it never authorizes business truth.
+5. P1 evidence taxonomy remains authoritative (`evidence.py` sole writer).
+6. P2 revisions remain append-only and transactional.
+7. P3 identity resolution and confirmed crosswalks remain untouched.
+8. No hardcoded department-specific schemas or document vocabularies.
+9. Every document-derived claim retains source-level provenance.
+10. No P5/P6/P7 implementation.
+
+## Part E — Non-goals / guarantees
 
 - No separate document ontology; no RAG duplication (segments feed the SAME
   Chroma store via additive metadata; the ontology reads through proposals).
@@ -123,6 +158,7 @@ extraction method + model version, extraction timestamp.
 - P2 revisions written for every approved mutation; rollback works unchanged.
 - P3 identity untouched; confirmed crosswalks remain the only cross-source
   runtime surface.
-- `knowledge_bases` RLS gap and document-level access policy are NOT fixed in
-  P4 (platform-wide concerns; noted for a future governance task).
+- `knowledge_bases` RLS gap and document-level RAG ACLs are NOT rebuilt in
+  P4 (platform-wide concerns; the D3 inheritance rule covers P4-produced
+  evidence only — noted for a future governance task).
 - No P5/P6/P7 work.
