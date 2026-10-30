@@ -18,8 +18,11 @@ AUDIT_EVENT_TYPES = [
     "policy_violation", "skill_create", "skill_publish",
     "agent_config", "template_upload", "learning_apply",
     "system_config",
+    # Ontology (written by services/ontology/{fanout,escalation}.py and
+    # permissions.py since P0-2; registered 2026-10-30 — gap audit G3-bug)
+    "ontology_fanout", "escalation_created", "escalation_resolved",
 ]
-AUDIT_EVENT_SOURCES = ["nl2sql", "studio", "agent", "governance", "system", "user"]
+AUDIT_EVENT_SOURCES = ["nl2sql", "studio", "agent", "governance", "system", "user", "ontology"]
 AUDIT_OUTCOMES = ["success", "failure", "denied", "warning"]
 
 
