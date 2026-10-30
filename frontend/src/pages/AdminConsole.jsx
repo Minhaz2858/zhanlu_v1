@@ -153,14 +153,6 @@ export default function AdminConsole() {
     setActionLoading((s) => ({ ...s, [`doc-${p.id}`]: null }));
   }
 
-  function handleDocApprove(p) {
-    const conflict = p.conflict_json?.existing_object_id;
-    // Create path needs a domain (the document cannot know the org's
-    // domain taxonomy); attach path doesn't.
-    const domainId = conflict ? null : docDomains[0]?.id;
-    handleDocAction(p, 'approve', { domain_id: domainId });
-  }
-
   function handleDocRevise(p) {
     const current = p.payload_json?.description || '';
     const next = window.prompt('Edit the proposed description:', current);

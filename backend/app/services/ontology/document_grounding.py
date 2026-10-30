@@ -176,7 +176,8 @@ def extract_document_evidence(db: Session, kb: KnowledgeBase,
         c["chunk_key"] = f"{kb.id}_{version_id[:8]}_{c['index']}"
 
     counts = {"proposed": 0, "verified_quote": 0, "dropped_untraceable": 0,
-              "duplicates_skipped": 0, "superseded": superseded}
+              "duplicates_skipped": 0, "rejected_skipped": 0,
+              "superseded": superseded}
 
     audience = _capture_audience(kb)
     for cand in _llm_propose(chunks):
@@ -214,6 +215,27 @@ def extract_document_evidence(db: Session, kb: KnowledgeBase,
         )
         if dup is not None:
             counts["duplicates_skipped"] += 1
+            continue
+
+        # Rejection memory (plan: "reject → remembered, never re-proposed"):
+        # a quote the human rejected is never re-proposed — not even from a
+        # NEW document version whose idempotency key would otherwise differ.
+        rejected = (
+            db.query(DocumentProposal)
+            .filter(
+                DocumentProposal.org_id == kb.org_id,
+                DocumentProposal.kb_id == kb.id,
+                DocumentProposal.proposal_kind == kind,
+                DocumentProposal.quote_hash == quote_hash,
+                DocumentProposal.status == "rejected",
+            )
+            .first()
+        )
+        if rejected is not None:
+            counts["rejected_skipped"] += 1
+            logger.info(
+                "document_grounding: quote previously rejected — skipped "
+                "(kb=%s quote_hash=%s)", kb.id, quote_hash[:12])
             continue
 
         # Conflict detection: an existing object with the same normalized

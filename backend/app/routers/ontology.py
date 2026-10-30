@@ -1012,6 +1012,19 @@ def identity_history(
         raise HTTPException(status_code=404, detail="Match not found")
 
 
+@router.get("/ontology/domains")
+def list_domains_ep(
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """The org's domain list (P4 T9: the Doc Evidence review UI needs the
+    domain taxonomy for the create-path approval picker; /overview seeds
+    packs as a side effect and is too heavy for a picker)."""
+    org = _org_or_404(user, org_id)
+    return {"domains": [domain_to_dict(d) for d in list_domains(db, org)]}
+
+
 # ── P4 T8: document-grounded ontology evidence (review queue) ────────────
 
 def _document_gate(db: Session, user: User, kb_id: str):
