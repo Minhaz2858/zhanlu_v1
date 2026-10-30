@@ -153,6 +153,15 @@ def bind_object(
     obj.backing_ref = body.backing_ref
     if body.properties is not None:
         obj.properties_json = body.properties
+    # P1 evidence taxonomy: explicit human authorization is the ONLY path
+    # to 'verified'; unbinding returns the object to 'proposed'.
+    from app.services.ontology.evidence import stamp_human_bind, stamp_unbind
+
+    if body.backing_kind == "manual" or not (body.backing_ref or "").strip():
+        stamp_unbind(obj)
+    else:
+        stamp_human_bind(obj, bound_by=getattr(admin, "email", None)
+                         or str(getattr(admin, "id", "") or ""))
     db.commit()
     return object_to_dict(obj)
 
@@ -229,6 +238,12 @@ def bind_action(
         action.tool_name = body.tool_name
     if body.description is not None:
         action.description = body.description
+    # P1 evidence taxonomy: wiring/unwiring the tool updates the action's
+    # evidence status (inferred when executable, proposed when not).
+    from app.services.ontology.evidence import stamp_action_binding
+
+    stamp_action_binding(action, bound_by=getattr(admin, "email", None)
+                         or str(getattr(admin, "id", "") or ""))
     db.commit()
     return action_to_dict(action)
 

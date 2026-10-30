@@ -283,7 +283,8 @@ def _llm_schema_match(
             "properties": props_out}
 
 
-def _apply_binding(obj, kb_id: str, table: str, mapped: dict[str, str]) -> None:
+def _apply_binding(obj, kb_id: str, table: str, mapped: dict[str, str],
+                   method: str = "hint_match", confidence: float | None = None) -> None:
     obj.backing_kind = "table"
     obj.backing_ref = f"kb:{kb_id}:{table}"
     # IMPORTANT: JSON columns need REASSIGNMENT to be detected by
@@ -298,6 +299,12 @@ def _apply_binding(obj, kb_id: str, table: str, mapped: dict[str, str]) -> None:
         else:
             new_props.append(prop)
     obj.properties_json = new_props
+    # P1 evidence taxonomy: machine bindings are ALWAYS 'inferred' —
+    # never 'verified' (that requires an explicit human bind).
+    from app.services.ontology.evidence import stamp_discovery
+
+    stamp_discovery(obj, method=method, confidence=confidence,
+                    kb_id=kb_id, table=table)
 
 
 def _verified_columns(schema_svc, kb_id: str, table: str) -> list[str]:
@@ -403,7 +410,7 @@ def discover_bindings(db: Session, org_id: str, *, apply: bool = True) -> dict:
                 if col:
                     mapped[pname] = col
             if apply:
-                _apply_binding(obj, kb_id, table, mapped)
+                _apply_binding(obj, kb_id, table, mapped, method="hint_match")
             discovered += 1
             report.append({
                 "object": obj.name,
@@ -456,7 +463,8 @@ def discover_bindings(db: Session, org_id: str, *, apply: bool = True) -> dict:
         conf = verdict["confidence"]
         mapped = verdict["properties"]  # already verified against cols
         if conf >= threshold and apply:
-            _apply_binding(obj, kb_id, table, mapped)
+            _apply_binding(obj, kb_id, table, mapped,
+                           method="llm_discovery", confidence=conf)
             discovered += 1
             report.append({
                 "object": obj.name, "status": "bound",

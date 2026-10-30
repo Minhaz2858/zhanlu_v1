@@ -80,6 +80,13 @@ class OntologyObject(TimestampedBase):
     # [{name, type, column?, description?}] — the object's properties.
     properties_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # P1 evidence taxonomy (PRD 2026-10-30) — canonical statuses live in
+    # services/ontology/evidence.py. Writers: evidence.stamp_* ONLY.
+    evidence_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="proposed", server_default="proposed"
+    )
+    confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
+    provenance_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
 class OntologyLink(TimestampedBase):
@@ -94,6 +101,12 @@ class OntologyLink(TimestampedBase):
     )
     cardinality: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # P1 evidence taxonomy (writers: services/ontology/evidence.py)
+    evidence_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="proposed", server_default="proposed"
+    )
+    confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
+    provenance_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
 class OntologyAction(TimestampedBase):
@@ -120,6 +133,12 @@ class OntologyAction(TimestampedBase):
     # Default argument template for the bound tool.
     params_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # P1 evidence taxonomy (writers: services/ontology/evidence.py)
+    evidence_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="proposed", server_default="proposed"
+    )
+    confidence: Mapped[Optional[float]] = mapped_column(nullable=True)
+    provenance_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
 class AgentDomainBinding(TimestampedBase):
