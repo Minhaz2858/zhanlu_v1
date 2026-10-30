@@ -65,6 +65,150 @@ def _extract_txt(file_path: str) -> str:
     return Path(file_path).read_text(encoding="utf-8", errors="replace")
 
 
+def extract_segments(file_path: str, file_type: str) -> list[dict]:
+    """P4 T2 — structured extraction with location provenance.
+
+    Returns ``[{"text": str, "location": dict}]`` where ``location`` is
+    ``{"page": n}`` (pdf/pptx slide→page semantics kept separate:
+    pptx uses ``{"slide": n}``), ``{"sheet": name}`` (excel),
+    ``{"row": n}`` (csv, 1-based, header included), ``{"section": heading}``
+    (docx) or ``{}`` (plain text / unknown). Empty-text segments are
+    dropped; the existing ``extract_text`` behavior is untouched.
+    """
+    ft = (file_type or "").lower().strip().lstrip(".")
+    try:
+        if ft in ("txt", "text"):
+            return _segments_txt(file_path)
+        if ft == "md":
+            return _segments_txt(file_path)
+        if ft == "csv":
+            return _segments_csv(file_path)
+        if ft in ("excel", "xlsx", "xls"):
+            return _segments_excel(file_path)
+        if ft == "pdf":
+            return _segments_pdf(file_path)
+        if ft == "docx":
+            return _segments_docx(file_path)
+        if ft in ("ppt", "pptx"):
+            return _segments_pptx(file_path)
+        if ft in ("html", "htm", "json"):
+            return _segments_txt(file_path)
+        if ft in ("png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif"):
+            text = _extract_image(file_path)
+            return [{"text": text, "location": {}}] if text.strip() else []
+        logger.warning("extract_segments: unsupported file_type=%r", ft)
+        return []
+    except Exception as e:
+        logger.exception("extract_segments failed for %s (type=%s): %s",
+                         file_path, ft, e)
+        return []
+
+
+def _seg(text: str, location: dict) -> dict | None:
+    text = (text or "").strip()
+    return {"text": text, "location": location} if text else None
+
+
+def _segments_txt(file_path: str) -> list[dict]:
+    text = _extract_txt(file_path)
+    return [_seg(text, {})] if text.strip() else []
+
+
+def _segments_csv(file_path: str) -> list[dict]:
+    segs: list[dict] = []
+    with open(file_path, newline="", encoding="utf-8", errors="replace") as f:
+        for i, r in enumerate(csv.reader(f), start=1):
+            s = _seg(", ".join(r), {"row": i})
+            if s:
+                segs.append(s)
+    return segs
+
+
+def _segments_excel(file_path: str) -> list[dict]:
+    from openpyxl import load_workbook  # lazy
+
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    segs: list[dict] = []
+    try:
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(values_only=True):
+                cells = ["" if c is None else str(c) for c in row]
+                if any(c.strip() for c in cells):
+                    s = _seg(", ".join(cells), {"sheet": ws.title})
+                    if s:
+                        segs.append(s)
+    finally:
+        wb.close()
+    return segs
+
+
+def _segments_pdf(file_path: str) -> list[dict]:
+    from pypdf import PdfReader  # lazy
+
+    reader = PdfReader(file_path)
+    segs: list[dict] = []
+    for i, page in enumerate(reader.pages, start=1):
+        s = _seg(page.extract_text() or "", {"page": i})
+        if s:
+            segs.append(s)
+    return segs
+
+
+def _segments_docx(file_path: str) -> list[dict]:
+    """Paragraphs grouped under their nearest Heading; text before the
+    first heading is unlocated ({})."""
+    from docx import Document  # lazy (python-docx)
+
+    doc = Document(file_path)
+    segs: list[dict] = []
+    section: str | None = None
+    buf: list[str] = []
+
+    def _flush():
+        if buf:
+            loc = {"section": section} if section else {}
+            s = _seg("\n".join(buf), loc)
+            if s:
+                segs.append(s)
+            buf.clear()
+
+    for p in doc.paragraphs:
+        if not p.text.strip():
+            continue
+        style = (p.style.name or "").lower() if p.style is not None else ""
+        if style.startswith("heading"):
+            _flush()
+            section = p.text.strip()
+            continue
+        buf.append(p.text.strip())
+    _flush()
+    return segs
+
+
+def _segments_pptx(file_path: str) -> list[dict]:
+    from pptx import Presentation  # lazy
+
+    prs = Presentation(file_path)
+    segs: list[dict] = []
+    for i, slide in enumerate(prs.slides, start=1):
+        lines: list[str] = []
+        for shape in slide.shapes:
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            for para in shape.text_frame.paragraphs:
+                line = "".join(run.text for run in para.runs).strip()
+                if line:
+                    lines.append(line)
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+            notes = (slide.notes_slide.notes_text_frame.text or "").strip()
+            if notes:
+                lines.append(f"[Notes]\n{notes}")
+        s = _seg("\n".join(lines), {"slide": i})
+        if s:
+            segs.append(s)
+    return segs
+
+
 def _extract_markdown(file_path: str) -> str:
     import markdown as md  # lazy
 
