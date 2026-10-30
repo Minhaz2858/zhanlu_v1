@@ -6,6 +6,7 @@ import {
 import { toast } from 'sonner';
 import { authFetch } from '@/api/authFetch';
 import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
+import OntologyGraph from '@/components/ontology/OntologyGraph';
 
 /**
  * Enterprise Profile — the org's ontology coverage map (P0-2/P1-1).
@@ -634,6 +635,11 @@ export default function EnterpriseProfile() {
               />
             ))}
           </div>
+        </div>
+
+        {/* P7 — Ontology Graph Explorer */}
+        <div className="mt-8">
+          <OntologyGraph />
         </div>
 
         {domain && <div className="mt-4"><ObjectsPanel domain={domain} objects={objects} /></div>}

@@ -45,6 +45,11 @@ def object_to_dict(o: OntologyObject, *, doc_ctx: dict | None = None) -> dict:
         "evidence_status": o.evidence_status,
         "confidence": o.confidence,
         "provenance": provenance,
+        # P6 binding health — maintained ONLY by ontology.evolution.reconcile
+        "binding_status": o.binding_status,
+        "last_validated_at": (
+            o.last_validated_at.isoformat()
+            if o.last_validated_at else None),
     }
 
 

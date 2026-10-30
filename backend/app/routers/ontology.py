@@ -108,6 +108,57 @@ def get_links(
     return [link_to_dict(l) for l in list_links(db, org, domain_id)]
 
 
+@router.get("/ontology/graph")
+def ontology_graph(
+    domain_id: str | None = Query(default=None),
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P7 — aggregate graph payload for the Ontology Explorer. One
+    READ-ONLY call: domains + objects (per-viewer document filtering,
+    exactly like /ontology/objects) + links + agent bindings + governed
+    metric definitions (ALL lifecycles — governance state must be
+    visible, never implied published)."""
+    from app.models.metric_definition import MetricDefinition
+
+    org = _org_or_404(user, org_id)
+    domains = list_domains(db, org)
+    objects = list_objects(db, org, domain_id)
+    links = list_links(db, org, domain_id)
+    metrics = (
+        db.query(MetricDefinition)
+        .filter(MetricDefinition.org_id == org,
+                MetricDefinition.is_deleted == False)  # noqa: E712
+        .order_by(MetricDefinition.name)
+        .limit(200)
+        .all()
+    )
+    return {
+        "org_id": org,
+        "domains": [
+            {"id": d.id, "code": d.code, "name": d.name,
+             "object_count": sum(1 for o in objects
+                                 if o.domain_id == d.id)}
+            for d in domains
+        ],
+        "objects": [object_to_dict(o, doc_ctx={"db": db, "user": user})
+                    for o in objects],
+        "links": [link_to_dict(l) for l in links],
+        "bindings": [binding_to_dict(b) for b in list_bindings(db, org)],
+        "metrics": [
+            {"id": m.id, "name": m.name,
+             "lifecycle": m.lifecycle, "version": m.version,
+             "evidence_status": m.evidence_status,
+             "reviewed_by": m.reviewed_by,
+             "base_table": m.base_table,
+             "datasource_id": m.datasource_id,
+             "aggregation": m.aggregation, "unit": m.unit}
+            for m in metrics
+        ],
+    }
+
+
 @router.get("/ontology/actions")
 def get_actions(
     domain_id: str | None = Query(default=None),
