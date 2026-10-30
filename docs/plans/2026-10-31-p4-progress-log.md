@@ -4,6 +4,23 @@ Branch: `fix/automation-chat-artifacts-ordering` · Plan: `2026-10-31-p4-documen
 
 ## Status: T0–T10 COMPLETE (2026-10-31). P5/P6/P7 untouched (non-goals honored).
 
+## Final acceptance pass (2026-10-31, commit <see git log> — sign-off questions closed)
+
+The six recommended acceptance checks, all executed:
+
+1. **Restricted quotation hidden from unauthorized members** — `tests/test_p4_acceptance.py::test_a1_a2_member_sees_definition_never_quote`: plain member gets 403 on the admin-only review queue; an admin WITHOUT source access sees the queue with restricted proposals hidden + honest `hidden` count; whole-response JSON substring checks (the quote appears NOWHERE). PASS.
+2. **Approved definition org-wide per policy** — same test: a member with no source access sees name/description/`verified` on the object. PASS (pins the design interpretation — flipping it now breaks this test deliberately).
+3. **Revision history never exposes the restricted quotation** — `test_a3_revision_history_member_scrubbed_owner_sees`: member's snapshot scrubbed; owner (document creator) still sees the entry; the stored revision ROW is untouched (append-only intact). PASS.
+4. **External API-key principals get no document-derived content by default** — `test_a4_no_auth_context_default_strips_document_content`: `object_to_dict` without auth context strips `document_provenance` entirely; quote absent from the whole payload. PASS.
+5. **Real PDF page-level citations** — `test_a5_real_pdf_page_level_citations`: reportlab-generated 2-page PDF parsed by the real extractor; sentences land on pages 1 and 2; proposals carry `location_json.page` = 1 / 2. PASS.
+6. **Real LLM extraction (staging)** — `scripts/p4_staging_llm_check.py` (env-gated `ONTOLOGY_DOC_LLM_LIVE=1`, never in CI). LIVE RUN EXECUTED against the production DashScope compatible-mode endpoint with model `qwen-flash`: **3 candidates proposed, 3/3 passed deterministic verbatim verification, 0 dropped — VERDICT: PASS.**
+
+Two production hardenings fell out of the live run:
+- `_llm_propose` now accepts a bare JSON array response (models don't always honor `response_json_schema`), not just `{"candidates": [...]}`.
+- The staging script pins an LLM endpoint (`ONTOLOGY_DOC_LLM_BASE_URL/_MODEL/_API_KEY`) because the production default endpoint lives in the DB (`llm_models`), not `.env`. Operational note: the DB default model `qwen3.7-flash` currently returns `AllocationQuota.FreeTierOnly` (free quota exhausted, 403) — `qwen-flash` works; the chat stack may be silently degrading for JSON-classifier calls until quota/funding is fixed.
+
+Acceptance ring: 139/139 (P4 suites + acceptance + ontology core/governance/evidence/revisions).
+
 | Task | Commit | What |
 |---|---|---|
 | T0 | 5bb1b715c / aa9fba20b / 5de97ff4c | Plan v3 + decision record D1–D7 (3 review rounds) |

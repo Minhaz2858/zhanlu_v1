@@ -91,7 +91,19 @@ def _llm_propose(chunks: list[dict]) -> list[dict]:
         except Exception as exc:  # noqa: BLE001 — honest skip, never fatal
             logger.warning("document_grounding: LLM step failed (%s)", exc)
             continue
-        for cand in (data or {}).get("candidates") or []:
+        # Models don't always honor response_json_schema: accept BOTH the
+        # {"candidates": [...]} contract and a bare JSON array.
+        if isinstance(data, list):
+            candidates = data
+        elif isinstance(data, dict):
+            candidates = data.get("candidates")
+            if candidates is None:
+                # last resort: first list-valued entry
+                candidates = next(
+                    (v for v in data.values() if isinstance(v, list)), [])
+        else:
+            candidates = []
+        for cand in candidates or []:
             if isinstance(cand, dict) and cand.get("quote"):
                 cand["_chunk_key"] = c["chunk_key"]
                 out.append(cand)
