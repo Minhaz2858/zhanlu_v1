@@ -306,6 +306,15 @@ def execute_action(
 
     from app.services.agent_tools import execute_tool
 
+    # P0 review fix: identity claims (caller_kind/authenticated_user_id) are
+    # NEVER forwarded to bound tools. Otherwise a read action bound to
+    # execute_ontology_action could inherit the console claim and fire a
+    # nested WRITE with no approval — nested ontology executes re-enter
+    # check_action_permission with no identity and fail closed instead.
+    forward_ctx = {
+        k: v for k, v in (context or {}).items()
+        if k not in ("caller_kind", "authenticated_user_id")
+    }
     try:
         result = asyncio.run(
             execute_tool(
@@ -317,7 +326,7 @@ def execute_action(
                     "org_id": org_id,
                     "ontology_action_id": action.id,
                     "ontology_object_id": action.object_id,
-                    **(context or {}),
+                    **forward_ctx,
                 },
             )
         )
@@ -417,10 +426,34 @@ def execute_approved_action(
         if expires < datetime.now(timezone.utc):
             return {"success": False, "reason": "approval has expired"}
 
-    merged = {**(ctx.get("params") or {}), **(action.params_json or {}),
+    # P0 review fix: the approval is proof for ONE specific write — params
+    # may not drift from what was approved. Runtime params that are absent
+    # from (or differ with) the approved params are refused honestly.
+    approved_params = dict(ctx.get("params") or {})
+    if params:
+        drift = {
+            k: v for k, v in params.items()
+            if k not in approved_params or approved_params[k] != v
+        }
+        if drift:
+            return {
+                "success": False,
+                "reason": (
+                    "approval does not cover changed params: "
+                    f"{sorted(drift)} — request a new approval"
+                ),
+            }
+
+    merged = {**approved_params, **(action.params_json or {}),
               **(params or {})}
     import asyncio
 
+    # Identity claims are never forwarded to bound tools (P0 review fix —
+    # same rule as the read path in execute_action).
+    forward_ctx = {
+        k: v for k, v in (context or {}).items()
+        if k not in ("caller_kind", "authenticated_user_id")
+    }
     try:
         result = asyncio.run(
             execute_tool(
@@ -433,7 +466,7 @@ def execute_approved_action(
                     "ontology_action_id": action.id,
                     "ontology_object_id": action.object_id,
                     "approval_id": approval.id,
-                    **(context or {}),
+                    **forward_ctx,
                 },
             )
         )

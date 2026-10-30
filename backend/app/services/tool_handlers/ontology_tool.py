@@ -24,9 +24,12 @@ from app.services.tool_registry import registry
 logger = logging.getLogger(__name__)
 
 
-def _org_and_agent(ctx: dict) -> tuple[str, str]:
+def _org_and_agent(ctx: dict) -> tuple[str, str | None]:
     org_id = ctx.get("org_id") or "default-org"
-    agent_name = ctx.get("agent_name") or "general_assistant"
+    # P0 2026-10-30: NO masquerade default — a missing agent_name must never
+    # silently become "general_assistant" (permissions.resolve_caller treats
+    # missing identity as unidentified, fail closed for writes).
+    agent_name = ctx.get("agent_name")
     return org_id, agent_name
 
 

@@ -145,7 +145,13 @@ def audit_permission_denial(
       into an execution failure, and
     - the caller's session is never committed as a side effect (no
       unrelated pending changes get flushed by the audit).
-    Tests inject session_factory to point at a specific engine."""
+    Tests inject session_factory to point at a specific engine.
+
+    Note: on Postgres the independent session uses its own pooled
+    connection. Under SQLite StaticPool (tests) the "independent" session
+    shares the caller's DBAPI connection, so its commit would also commit
+    the caller's pending writes — acceptable in tests where the denial
+    path has only run SELECTs, but do not rely on isolation there."""
     from datetime import datetime, timezone
 
     from sqlalchemy.orm import Session as _Session
@@ -154,10 +160,17 @@ def audit_permission_denial(
 
     caller = resolve_caller(context)
     if session_factory is None:
-        bind = db.get_bind()
+        try:
+            bind = db.get_bind()
 
-        def session_factory():
-            return _Session(bind=bind)
+            def session_factory():
+                return _Session(bind=bind)
+        except Exception as exc:  # noqa: BLE001 — detached session etc.
+            logger.warning(
+                "ontology permission denial audit: no bind available "
+                "(refusal stands): %s", exc,
+            )
+            return
     try:
         s = session_factory()
         try:

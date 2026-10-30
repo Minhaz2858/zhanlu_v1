@@ -78,7 +78,8 @@ def _async_fake(fn):
 def test_audit_vocabularies_whitelist_ontology():
     from app.models.audit_event import AUDIT_EVENT_SOURCES, AUDIT_EVENT_TYPES
     assert "ontology" in AUDIT_EVENT_SOURCES
-    for t in ("ontology_fanout", "escalation_created", "escalation_resolved"):
+    for t in ("ontology_fanout", "escalation_created", "escalation_resolved",
+              "policy_violation"):
         assert t in AUDIT_EVENT_TYPES
 
 
@@ -335,25 +336,113 @@ def test_denial_writes_structured_audit_event(db):
 
 
 def test_denial_audit_failure_never_masks_refusal(db, monkeypatch):
-    """Refinement: if the audit write fails (e.g. broken session factory),
-    the security refusal STILL returns cleanly — the audit failure never
-    becomes an execution failure, and the caller's session is untouched."""
-    from app.services.ontology import permissions as perm
+    """Refinement: if the audit write fails through the REAL wiring (the
+    denial path in execute_action), the security refusal STILL returns
+    cleanly — the audit failure never becomes an execution failure."""
     from app.services.ontology.data import execute_action
 
     act = _make_write_action(db)
     _add_binding(db, "some_agent", "read")
 
-    def broken_factory():
-        raise RuntimeError("audit store down")
+    # Make the audit INSERT itself fail, through the real wiring:
+    class _BoomAudit:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("audit store down")
+
+    monkeypatch.setattr("app.models.audit_event.AuditEvent", _BoomAudit)
 
     res = execute_action(
         db, ORG, "u1", act.id, params={},
         context={"org_id": ORG, "agent_name": "some_agent"},
     )
     assert res["success"] is False and res.get("denied") is True
-    # And the audit helper itself swallows the failure:
-    perm.audit_permission_denial(
-        db, ORG, act, {"org_id": ORG, "agent_name": "some_agent"},
-        "read-only", session_factory=broken_factory,
+    assert "read-only" in res["reason"]
+
+
+def test_nested_ontology_write_via_read_action_cannot_inherit_identity(db, monkeypatch):
+    """Review fix (blocking): a READ action bound to execute_ontology_action
+    must not forward its console identity claim into the nested execute —
+    the nested WRITE must re-enter the permission gate with no identity and
+    fail closed (no approval is created, nothing runs)."""
+    import app.services.agent_tools as agent_tools
+    from app.models.ontology import OntologyAction
+    from app.services.ontology.data import execute_action
+
+    write_act = _make_write_action(db, tool_name="po_tool")
+
+    read_act = OntologyAction(
+        org_id=ORG, object_id=write_act.object_id,
+        name="TriggerPO", tool_name="execute_ontology_action",
+        risk_level="read", requires_confirmation=False,
+        params_json={"action_id": write_act.id},
     )
+    db.add(read_act)
+    db.commit()
+
+    calls: list = []
+
+    def fake_execute_tool(name, args, session, user_id, context=None):
+        calls.append((name, dict(context or {})))
+        # The nested call re-enters the real execute_tool → for
+        # execute_ontology_action the registry handler runs; simulate the
+        # dispatcher faithfully by calling the ontology handler logic via
+        # execute_action with the context the dispatcher would pass.
+        if name == "execute_ontology_action":
+            from app.services.ontology.data import execute_action as _ea
+            return _ea(session, ORG, user_id, args["action_id"],
+                       params=args.get("params") or {}, context=context)
+        return {"success": True}
+
+    monkeypatch.setattr(agent_tools, "execute_tool", _async_fake(fake_execute_tool))
+
+    res = execute_action(
+        db, ORG, "u1", read_act.id, params={},
+        context={"user_id": "u1", "authenticated_user_id": "u1",
+                 "caller_kind": "console_user"},
+    )
+    # The read action itself runs (auto), but the nested write is DENIED —
+    # the console identity claim must not have been forwarded.
+    nested = [c for c in calls if c[0] == "execute_ontology_action"]
+    assert nested, "nested tool should have been invoked"
+    ctx = nested[0][1]
+    assert "caller_kind" not in ctx and "authenticated_user_id" not in ctx
+    assert res["success"] is False           # overall reflects the nested denial
+    assert res["result"].get("denied") is True
+    assert "requires an identified caller" in res["result"]["reason"]
+
+
+def test_read_scope_agent_can_still_run_read_actions(db, monkeypatch):
+    """Read-scope agents keep the read=auto contract end to end (agent
+    path, not just empty context)."""
+    import app.services.agent_tools as agent_tools
+    from app.models.ontology import OntologyAction
+    from app.services.ontology.data import execute_action
+
+    _make_write_action(db)
+    obj = (
+        db.query(OntologyObject)
+        .filter(OntologyObject.org_id == ORG, OntologyObject.name == "PurchaseOrder")
+        .one()
+    )
+    _add_binding(db, "some_agent", "read")
+    act = OntologyAction(
+        org_id=ORG, object_id=obj.id, name="ListPOs",
+        tool_name="po_lister", risk_level="read", requires_confirmation=False,
+    )
+    db.add(act)
+    db.commit()
+
+    calls: list = []
+
+    def fake_execute_tool(name, args, session, user_id, context=None):
+        calls.append(name)
+        return {"success": True}
+
+    monkeypatch.setattr(agent_tools, "execute_tool", _async_fake(fake_execute_tool))
+
+    res = execute_action(
+        db, ORG, "u1", act.id, params={},
+        context={"org_id": ORG, "agent_name": "some_agent"},
+    )
+    assert res["success"] is True
+    assert calls == ["po_lister"]
