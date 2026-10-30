@@ -253,7 +253,21 @@ def execute_action(
             ),
         }
     merged = {**(action.params_json or {}), **(params or {})}
-    if action.risk_level == "write" or action.requires_confirmation:
+    from app.services.ontology.permissions import is_write_action
+
+    if is_write_action(action):
+        # P0 governance (fail closed): scope check BEFORE any approval is
+        # created — an unbound or read-only agent can never originate a write.
+        from app.services.ontology.permissions import (
+            audit_permission_denial,
+            check_action_permission,
+        )
+
+        denial = check_action_permission(db, org_id, action, context)
+        if denial:
+            audit_permission_denial(db, org_id, action, context, denial["reason"])
+            return {"success": False, "denied": True, "reason": denial["reason"]}
+
         # P0-3: writes go through the governance approval flow — a pending
         # ApprovalRequest is created; an org admin approves via the existing
         # governance API; the caller then re-runs through
@@ -359,6 +373,18 @@ def execute_approved_action(
         return {"success": False, "reason": "action not found"}
     if not action.tool_name:
         return {"success": False, "reason": "action has no bound tool"}
+
+    # P0 governance (fail closed): a valid approval does NOT upgrade the
+    # caller's domain scope — the same write predicate applies here.
+    from app.services.ontology.permissions import (
+        audit_permission_denial,
+        check_action_permission,
+    )
+
+    denial = check_action_permission(db, org_id, action, context)
+    if denial:
+        audit_permission_denial(db, org_id, action, context, denial["reason"])
+        return {"success": False, "denied": True, "reason": denial["reason"]}
 
     approval = (
         db.query(ApprovalRequest)

@@ -155,7 +155,12 @@ def test_write_action_creates_governance_approval(db):
                          tool_name="some_tool", risk_level="write")
     db.add(act)
     db.commit()
-    res = execute_action(db, ORG, "u1", act.id, params={"qty": 5})
+    # P0 2026-10-30: writes are fail-closed — the console (human) path is
+    # simulated with authenticated console identity.
+    res = execute_action(db, ORG, "u1", act.id, params={"qty": 5},
+                         context={"user_id": "u1",
+                                  "authenticated_user_id": "u1",
+                                  "caller_kind": "console_user"})
     assert res["success"] is False
     assert res["blocked"] == "confirmation_required"
     approval = db.query(ApprovalRequest).filter(
@@ -176,7 +181,11 @@ def test_execute_approved_action_full_contract(db, monkeypatch):
                          tool_name="po_tool", risk_level="write")
     db.add(act)
     db.commit()
-    res = execute_action(db, ORG, "u1", act.id)
+    # P0 2026-10-30: console identity for the write request (fail-closed gate)
+    res = execute_action(db, ORG, "u1", act.id,
+                         context={"user_id": "u1",
+                                  "authenticated_user_id": "u1",
+                                  "caller_kind": "console_user"})
     approval_id = res["approval_id"]
 
     calls = []
@@ -190,8 +199,12 @@ def test_execute_approved_action_full_contract(db, monkeypatch):
     from app.services.governance.approval_service import ApprovalService
     from app.services.ontology.data import execute_approved_action
 
+    console_ctx = {"user_id": "u1", "authenticated_user_id": "u1",
+                   "caller_kind": "console_user"}
+
     # Not yet approved → refused
-    res = execute_approved_action(db, ORG, "u1", act.id, approval_id)
+    res = execute_approved_action(db, ORG, "u1", act.id, approval_id,
+                                  context=console_ctx)
     assert res["success"] is False and res["blocked"] == "confirmation_required"
 
     ApprovalService(db).approve(approval_id, reviewed_by="boss")
@@ -201,11 +214,13 @@ def test_execute_approved_action_full_contract(db, monkeypatch):
                            tool_name="po_tool", risk_level="write")
     db.add(other)
     db.commit()
-    res = execute_approved_action(db, ORG, "u1", other.id, approval_id)
+    res = execute_approved_action(db, ORG, "u1", other.id, approval_id,
+                                  context=console_ctx)
     assert res["success"] is False and "mismatch" in res["reason"]
 
     # The real one → runs, with the approval threaded into context
-    res = execute_approved_action(db, ORG, "u1", act.id, approval_id)
+    res = execute_approved_action(db, ORG, "u1", act.id, approval_id,
+                                  context=console_ctx)
     assert res["success"] is True
     assert res["approved_by"] == "boss"
     assert calls == [("po_tool", approval_id)]

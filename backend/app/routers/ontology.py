@@ -192,7 +192,9 @@ def execute_ontology_action(
     body = body or ActionExecuteBody()
     return execute_action(
         db, org, getattr(user, "id", None), action_id,
-        body.params, context={"user_id": getattr(user, "id", None)},
+        body.params, context={"user_id": getattr(user, "id", None),
+                              "authenticated_user_id": str(getattr(user, "id", "") or ""),
+                              "caller_kind": "console_user"},
     )
 
 
@@ -616,7 +618,9 @@ def execute_approved_ontology_action(
     return execute_approved_action(
         db, org, getattr(user, "id", None), action_id,
         body.approval_id, body.params,
-        context={"user_id": getattr(user, "id", None)},
+        context={"user_id": getattr(user, "id", None),
+                 "authenticated_user_id": str(getattr(user, "id", "") or ""),
+                 "caller_kind": "console_user"},
     )
 
 
