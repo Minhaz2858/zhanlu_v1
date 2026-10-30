@@ -145,20 +145,25 @@ export default function OntologyGraph() {
   const [selected, setSelected] = useState(null);
   const [showMetrics, setShowMetrics] = useState(true);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (alive) => {
     setLoading(true);
     try {
       const res = await authFetch('/api/ontology/graph');
       if (!res.ok) throw new Error(`graph ${res.status}`);
-      setPayload(await res.json());
+      const body = await res.json();
+      if (alive) setPayload(body);
     } catch (e) {
-      toast.error(`Graph load failed: ${e.message || e}`);
+      if (alive) toast.error(`Graph load failed: ${e.message || e}`);
     } finally {
-      setLoading(false);
+      if (alive) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    let alive = true;
+    load(alive);
+    return () => { alive = false; };
+  }, [load]);
 
   const { nodes, edges } = useMemo(
     () => (payload ? layoutGraph(payload) : { nodes: [], edges: [] }),
@@ -241,6 +246,8 @@ export default function OntologyGraph() {
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
+            nodesDraggable={false}
+            nodesConnectable={false}
             fitView
             minZoom={0.2}
             onNodeClick={(_, node) => {

@@ -135,6 +135,7 @@ def test_graph_happy_path_shape(db):
     assert {"id", "name", "lifecycle", "version", "evidence_status",
             "reviewed_by", "base_table", "datasource_id", "unit",
             "aggregation"} <= set(m0.keys())
+    assert body["metrics_truncated"] is False
 
 
 def test_graph_document_evidence_per_viewer(db):

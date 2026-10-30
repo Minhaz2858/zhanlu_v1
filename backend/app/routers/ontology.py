@@ -108,6 +108,9 @@ def get_links(
     return [link_to_dict(l) for l in list_links(db, org, domain_id)]
 
 
+METRIC_GRAPH_LIMIT = 200
+
+
 @router.get("/ontology/graph")
 def ontology_graph(
     domain_id: str | None = Query(default=None),
@@ -131,9 +134,11 @@ def ontology_graph(
         .filter(MetricDefinition.org_id == org,
                 MetricDefinition.is_deleted == False)  # noqa: E712
         .order_by(MetricDefinition.name)
-        .limit(200)
+        .limit(METRIC_GRAPH_LIMIT + 1)
         .all()
     )
+    metrics_truncated = len(metrics) > METRIC_GRAPH_LIMIT
+    metrics = metrics[:METRIC_GRAPH_LIMIT]
     return {
         "org_id": org,
         "domains": [
@@ -156,6 +161,8 @@ def ontology_graph(
              "aggregation": m.aggregation, "unit": m.unit}
             for m in metrics
         ],
+        # governance honesty: never silently drop metrics past the cap
+        "metrics_truncated": metrics_truncated,
     }
 
 
