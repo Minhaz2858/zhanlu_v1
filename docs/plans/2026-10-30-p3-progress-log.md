@@ -1,11 +1,138 @@
 # P3 — Cross-source Identity Resolution: Progress Log
 
 **Date:** 2026-10-30
-**Status:** IMPLEMENTED & LIVE-VERIFIED — presented for review (not yet accepted)
+**Status:** IMPLEMENTED, CLOSURE PASS COMPLETE — presented for acceptance review
 **Plan:** `docs/plans/2026-10-30-p3-identity-resolution-plan.md`
-**Branch base:** P2 accepted (`70cd60dc9` impl, `0ca4388a9` review fixes, `bda7c79a0` docs)
+**Commits:** `c50fa034b` (P3 impl), `2839e1c30` (closure C1+C2+C3 fix)
 
 ## What shipped
+
+## CLOSURE PASS (2026-10-30, review-driven) — commit `2839e1c30`
+
+### C1 — confirmation semantics corrected
+
+The first implementation auto-confirmed tiers 1-2 (`reviewed_by='system:exact'`
+/ `'system:normalization'`). That conflated system-generated MATCHING EVIDENCE
+with a human-confirmed IDENTITY DECISION. Corrected contract (all four tiers):
+
+| Tier | Status after resolve | Confidence | Human gate |
+|------|---------------------|------------|------------|
+| 1 exact | `inferred` | 1.0 | confirm to activate |
+| 2 normalization | `inferred` | containment | confirm to activate |
+| 3 semantic | `inferred` | cosine | **requires review** |
+| 4 probabilistic | `inferred` | cosine | **requires review** |
+
+- `reviewed_by` is now reserved for HUMANS (system runs leave it NULL).
+- Only `review_match` (org-admin) sets `confirmed`, which is the ONLY status
+  the runtime exposes: `crosswalk_summary` / `read_object_data.cross_sources`
+  surface confirmed pairs exclusively — verified by a dedicated
+  activation-gate test (`test_tier1_and_2_not_active_until_human_confirm`).
+- No-op re-review (same decision) is rejected with a validation error.
+- Documented in resolver/review/endpoint docstrings + tested.
+
+### C2 — append-only identity decision history
+
+New `identity_decision_events` table (added to migration `105` in place —
+not yet applied via alembic anywhere; see Environment note):
+
+- One append-only row per decision: `created` (system), `confirm`, `reject`,
+  and REVERSALS (`confirmed→rejected`, `rejected→confirmed`).
+- Each event preserves: previous decision, new decision, reviewer identity,
+  matching method (tier), confidence, evidence JSON, source record
+  identifiers (`source_a_key/source_b_key/pk_a/pk_b`), timestamp; sequence
+  number enforced org-scoped (`uq_identity_decision_event_seq`).
+- Reconstructable via `decision_history` +
+  `GET /api/ontology/identity/matches/{id}/history` (org-scoped; cross-org
+  raises → 404).
+- The unaudited `mark_review` shortcut was REMOVED — every mutation of
+  `IdentityMatch.status` flows through the audited `review_match`
+  (regression-tested: `test_no_unaudited_decision_path_survives`).
+- Rationale for a dedicated table vs `ontology_revisions`: identity matches
+  are crosswalks, not ontology elements (P2 revisions are element-scoped);
+  forcing them into `ontology_revisions` would break the P2 entity model.
+  The platform `identity_review` AuditEvent is ALSO still written per
+  decision — both trails coexist (domain history + platform audit).
+
+### C3 — DB-to-file live integration fixture (found a real bug)
+
+Live fixture: `p3_live_crm.customers` in the zhanlu-mysql container
+(:3308, C-prefixed ids) as a DB-source KB vs the uploaded `p3_crm.xlsx`
+(bare ids) as a file-source KB, resolved for the bound ontology object.
+
+1. Staging/access: file rows from staging; DB rows through `QueryService`
+   (org-checked, row-capped) against live MySQL. ✓
+2. Candidate generation + matching: tier 2 fired `tier2: 4` with the
+   recorded `strip_alpha_prefix, b_to_a, containment 1.0, shared_pairs 4`
+   rule. ✓
+3. Human confirmation (new semantics): confirm → `confirmed,
+   admin@zhanlu.dev`; decision history shows `created (None→inferred)` then
+   `confirm (inferred→confirmed)` with reviewer/tier/confidence/evidence. ✓
+4. Runtime provenance: `read_object_data` on the bound object returned 4
+   live rows from MySQL PLUS the `cross_sources` block listing both active
+   crosswalks (file↔file 3 confirmed pairs, file↔db 1 confirmed pair). ✓
+5. Org isolation: moving the DB KB to `other-org` → resolve returns all
+   zeros (no candidates cross-org); reverted after the probe. ✓
+
+**Bug found and fixed (commit `2839e1c30`):** on drifted-schema deployments,
+`execution_gate.enforce` swallows its own internal DB errors — but those
+failures abort the SHARED request transaction, and the next resolver
+statement died with `InFailedSqlTransaction` (500). Fix: after each
+DB-source read, the resolver probes the transaction and rolls back if
+poisoned (reads are read-only; the resolver commits only after all
+fetches). Regression-tested with a real SQLite DB source and a poisoned
+gate (`test_db_source_gate_poisoning_does_not_abort_resolution`).
+
+### C4 — defensible regression comparison
+
+Methodology: identical command
+(`pytest tests/ -q --timeout=90 -n 4`) in clean git worktrees — baseline at
+the pre-P3 commit `bda7c79a0` (P2 accepted state), comparison at closure
+commit `2839e1c30`:
+
+| Run | passed | failed | errors |
+|-----|--------|--------|--------|
+| baseline `bda7c79a0` | 10,307 | 771 | 148 |
+| P3 closure `2839e1c30` | 10,356 | 790 | 114 |
+
+- **+49 passed, −34 errors.**
+- 27 tests failed at HEAD but passed at baseline — **every one passes on a
+  serial re-run at HEAD** (26 individually + the 27th's whole file 4/4):
+  xdist worker-distribution flakes, not P3 regressions. Zero P3-attributable
+  failures.
+- 130 tests that failed at baseline pass at HEAD (incl. the P2 regression
+  fix: `test_ontology_core` now imports `ontology_revision` for
+  `create_all`).
+- A 46-test "regression" list produced by comparing against the MAIN TREE
+  (which carries another session's uncommitted in-flight changes to
+  config.py, synexia/*, nl2sql/*, db_tools, delegation_tools,
+  access_policy_service, …) was run at the clean HEAD worktree: **46/46
+  pass** — those failures belong to the unrelated in-flight work, not P3.
+
+### C5 — migration 105 verification
+
+- **The repo's alembic chain does not build from scratch** — `alembic
+  upgrade head` on an empty database fails at an early migration
+  (`intelligence_events RENAME relevance_to_sample_market`, ~051: the
+  rename assumes a column no prior migration creates). Pre-existing, NOT
+  concealed, NOT fixed here (out of P3 scope).
+- 105 itself verified on a CLEAN database stamped at the accepted P2 head
+  (`104_ontology_revisions`): `alembic upgrade 105_identity_resolution` →
+  `alembic_version = 105_identity_resolution`; all 4 tables exist;
+  RLS **enabled AND forced** on all 4 with `tenant_isolation` policy (ALL);
+  all expected indexes present (incl. `ix_file_table_rows_kb_sheet`
+  composite, `ix_identity_matches_status`, decision-event indexes); both
+  unique constraints present (`uq_identity_match_pair`,
+  `uq_identity_decision_event_seq`).
+- Chain topology: the pre-existing `106_schema_classification` declares
+  `down_revision = "105_identity_resolution"` — the chain links cleanly
+  through this migration.
+- Local dev `zhanlu` DB: its `alembic_version` is `095_ontology_core`,
+  which matches NO revision in this repo (stamped by a foreign lineage) —
+  the P3 tables + RLS were applied there via idempotent SQL mirroring
+  migration 105 (documented workaround, consistent with prior practice on
+  this deployment).
+
+## Original implementation notes
 
 ### P3a — structured spreadsheet ingestion (prerequisite)
 
@@ -86,17 +213,23 @@
 
 - `tests/test_identity_file_rows.py` — 7 (P3a: xlsx/csv, idempotent re-ingest,
   bounds, traversal rejection, cross-org rejection).
-- `tests/test_identity_resolver.py` — 8 (tier1 prefix exclusion, tier2
+- `tests/test_identity_resolver.py` — 9 (tier1 prefix exclusion, tier2
   evidence+direction, tier2 no-evidence, tier3 review queue, tier4 weak
-  signal, rejection memory, bounded sampling).
+  signal, rejection memory, bounded sampling, human-only activation gate,
+  gate-poisoning recovery with a real DB source).
 - `tests/test_identity_review.py` — 5 (org-scoped list, confirm/reject audit,
   unknown/bad-decision errors, cross-org guard).
+- `tests/test_identity_decision_history.py` — 6 (created/confirm/reject
+  events, reversal, no-op re-review rejection, org-scoped history, no
+  unaudited path).
 - `tests/test_identity_crosswalk_runtime.py` — 4 (summary confirmed+org-scope,
   empty case, read enrichment, no-block-when-absent).
 - `tests/test_identity_row_staging_hook.py` — 4 (ingest_kb stages rows,
   re-stage endpoint, non-tabular 400, unknown 404).
-- Fixed a P2 regression found during regression: `test_ontology_core` needed
-  `app.models.ontology_revision` imported for `create_all`.
+- `tests/test_ontology_core.py` — P2 regression fix (import
+  `app.models.ontology_revision` for `create_all`).
+- **48/48 green at the clean closure commit** (35 identity + 13 ontology
+  core/review-adjacent).
 
 ## Live verification (local backend :8123, local Postgres `zhanlu`)
 
