@@ -338,3 +338,20 @@ Boundaries respected (NOT implemented in 1A): no Business Context Service, no ru
 
 Phase 1B handoff: (1) bridge enabled `applies_to='sql'` BusinessRules → `SemanticGuidelines` (backfill is a bridge only, keep BusinessRule authoritative); (2) review-center API (list/proposed-queue + confirm/reject/enable with `record_review` + AuditEvent); (3) Business Context Service reads rules by `(org, scope, scope_ref_id)` for prompt/process/action consumption; (4) rule extraction from existing evidence stays out of scope until the review loop exists.
 
+### Phase 1B.1 — BusinessRule Governance & Review Lifecycle (2026-11-01, DONE)
+
+New `app/services/ontology/business_rules.py` — the procedural transition contract (the DB stores the status vocabulary; the lifecycle is enforced here): `confirm` proposed→verified, `reject` proposed→rejected, `enable` verified→enabled, `disable` enabled→verified, `resubmit` rejected→proposed. **`proposed → enabled` is never allowed** (409). Per decision: appends to the rule's `review_history` via `record_review()` (append-only; invalid attempts never append) + one `AuditEvent` (`business_rule_{confirmed|rejected|enabled|disabled|resubmitted}`, `event_source="ontology"`, from/to status + reason in `detail_json`). Org-scoped fail-closed loads (missing/cross-org → None → 404, zero writes). Defensive shape validation (422): scope/applies_to vocabulary + scoped-rule-must-name-target + non-empty statement. Evidence ids are read-only inputs — never touched by review.
+
+Endpoints on the existing enterprise ontology router (mounted `/api`), reusing `require_org_admin` (403 for non-admin) / `_org_or_404` / the `page`/`page_size` pagination convention:
+- `GET /ontology/enterprise/business-rules` — status / scope / applies_to filters, pagination, evidence ids + review history per item (any org member).
+- `GET /ontology/enterprise/business-rules/{id}` — detail; 404 cross-org.
+- `POST .../confirm | reject | enable | disable | resubmit` — org-admin only; reject/enable/disable/resubmit take optional `{reason}`.
+
+Route-ordering note: the block sits BEFORE the generic `/ontology/enterprise/{kind}/{entity_id}/confirm|reject` routes — otherwise the generic route captures `kind="business-rules"` and shadows the specific lifecycle endpoints (caught by the HTTP-level tests).
+
+"Do not let rediscovery overwrite human decisions": review only ever moves status forward through the allowed map; a rule with any human decision can never silently return to `proposed` except via explicit resubmit, and future discovery integration (1B.2+) must treat `review_history`-bearing rows as decided (to be enforced in the discovery bridge).
+
+Tests: `tests/test_business_rule_lifecycle.py` (13, HTTP-level with ephemeral SQLite + dependency overrides) — cross-org 404 reads+writes with zero side-effects, viewer 403 on all five write ops (reads open), all five valid transitions, proposed→enable blocked (409), rejected cannot be enabled (409; only path back is resubmit), append-only history across repeated reviews with invalid attempts non-appending, AuditEvent per decision (type/org/actor/from→to/reason), list filters + pagination + evidence/history visibility, missing rule 404. Plus `test_business_rule_model.py` 18. Regression: 51 passed across ontology core/governance/P3/escalations suites.
+
+Phase 1B.2 handoff: (1) discovery-side rule proposal must create rows ONLY as `proposed` and must skip rows already carrying a `review_history` decision (no overwrite); (2) `review-queue` aggregation can union proposed BusinessRules alongside EBPM proposals; (3) BCS (1B.3) consumes ONLY `status='enabled'` rules by `(org, scope, scope_ref_id)`; (4) SemanticGuidelines bridge reads enabled `applies_to='sql'` rules.
+

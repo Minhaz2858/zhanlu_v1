@@ -1102,6 +1102,132 @@ def enterprise_review_queue(
     return list_review_queue(db, admin.org_id)
 
 
+# --- BusinessRule governance & review lifecycle (Phase 1B.1) -------------
+#
+# Transitions (org-admin only, audited, history appended): confirm
+# proposed→verified, reject proposed→rejected, enable verified→enabled,
+# disable enabled→verified, resubmit rejected→proposed. proposed→enabled
+# is NEVER allowed. 404 on missing/cross-org; 409 on invalid transitions.
+
+
+class _ReviewBody(BaseModel):
+    reason: str | None = None
+
+
+@router.get("/ontology/enterprise/business-rules")
+def business_rule_list(
+    org_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
+    applies_to: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Governed business rules — org-scoped listing with status / scope /
+    applies_to filters, pagination, evidence references and review
+    history. Proposed rules await org-admin review; only enabled rules
+    may influence runtime behavior."""
+    from app.services.ontology.business_rules import list_business_rules
+
+    return list_business_rules(
+        db, _org_or_404(user, org_id), status=status, scope=scope,
+        applies_to=applies_to, page=page, page_size=page_size)
+
+
+@router.get("/ontology/enterprise/business-rules/{rule_id}")
+def business_rule_detail(
+    rule_id: str,
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Single rule with full evidence references and review history.
+    404 on missing or cross-org (fail closed)."""
+    from app.services.ontology.business_rules import get_business_rule
+
+    rule = get_business_rule(db, _org_or_404(user, org_id), rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Business rule not found")
+    return rule
+
+
+def _business_rule_action(rule_id: str, action: str, db: Session,
+                          admin: User, reason: str | None):
+    from app.services.ontology.business_rules import (
+        RuleLifecycleError, review_business_rule)
+
+    try:
+        result = review_business_rule(db, admin.org_id, rule_id, action,
+                                      admin, reason=reason)
+    except RuleLifecycleError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Business rule not found")
+    return result
+
+
+@router.post("/ontology/enterprise/business-rules/{rule_id}/confirm")
+def business_rule_confirm(
+    rule_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Org-admin confirm: proposed → verified (audited, history appended)."""
+    return _business_rule_action(rule_id, "confirm", db, admin, None)
+
+
+@router.post("/ontology/enterprise/business-rules/{rule_id}/reject")
+def business_rule_reject(
+    rule_id: str,
+    body: _ReviewBody | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Org-admin reject: proposed → rejected. Rejected rules never
+    influence runtime behavior; resubmission is explicit."""
+    return _business_rule_action(rule_id, "reject", db, admin,
+                                 (body.reason if body else None))
+
+
+@router.post("/ontology/enterprise/business-rules/{rule_id}/enable")
+def business_rule_enable(
+    rule_id: str,
+    body: _ReviewBody | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Org-admin enable: verified → enabled ONLY (never directly from
+    proposed). Enabled rules may influence SQL/actions."""
+    return _business_rule_action(rule_id, "enable", db, admin,
+                                 (body.reason if body else None))
+
+
+@router.post("/ontology/enterprise/business-rules/{rule_id}/disable")
+def business_rule_disable(
+    rule_id: str,
+    body: _ReviewBody | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Org-admin disable: enabled → verified (stops runtime influence)."""
+    return _business_rule_action(rule_id, "disable", db, admin,
+                                 (body.reason if body else None))
+
+
+@router.post("/ontology/enterprise/business-rules/{rule_id}/resubmit")
+def business_rule_resubmit(
+    rule_id: str,
+    body: _ReviewBody | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Explicit resubmission: rejected → proposed (the only path back)."""
+    return _business_rule_action(rule_id, "resubmit", db, admin,
+                                 (body.reason if body else None))
+
+
 @router.post("/ontology/enterprise/{kind}/{entity_id}/confirm")
 def enterprise_entity_confirm(
     kind: str, entity_id: str,
@@ -1244,6 +1370,8 @@ def enterprise_process_reject(
     if result is None:
         raise HTTPException(status_code=404, detail="Process not found")
     return result
+
+
 
 
 @router.post("/ontology/outcomes/{outcome_id}/measure")
