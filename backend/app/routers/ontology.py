@@ -1084,6 +1084,86 @@ def enterprise_resources(
     ]
 
 
+@router.get("/ontology/enterprise/processes")
+def enterprise_process_list(
+    org_id: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    family: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Discovered process catalogue — search / family / status filters,
+    pagination, family grouping, evidence+activity counts. Honest empty
+    states; discovery_status (documented/configured/observed) is never
+    conflated; needs_review flags AI proposals awaiting human decision."""
+    from app.services.ontology.enterprise_discovery import list_processes
+
+    return list_processes(db, _org_or_404(user, org_id), q=q, family=family,
+                          status=status, page=page, page_size=page_size)
+
+
+@router.get("/ontology/enterprise/processes/{process_id}")
+def enterprise_process_detail(
+    process_id: str,
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Full process detail: ordered activities, performers, verbatim
+    evidence, related processes, ontology connections, review history.
+    404 on missing or cross-org (fail closed)."""
+    from app.services.ontology.enterprise_discovery import get_process
+
+    detail = get_process(db, _org_or_404(user, org_id), process_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Process not found")
+    return detail
+
+
+@router.post("/ontology/enterprise/processes/{process_id}/confirm")
+def enterprise_process_confirm(
+    process_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Human confirm (org-admin): AI proposal → verified. Records the
+    reviewer, timestamp and prior AI provenance in the review history and
+    the audit log; verified rows survive rediscovery unchanged."""
+    from app.services.ontology.enterprise_discovery import confirm_process
+
+    result = confirm_process(db, admin.org_id, process_id, admin)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Process not found")
+    return result
+
+
+class _RejectBody(BaseModel):
+    reason: str | None = None
+
+
+@router.post("/ontology/enterprise/processes/{process_id}/reject")
+def enterprise_process_reject(
+    process_id: str,
+    body: _RejectBody | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Human reject (org-admin): AI proposal → rejected, with an optional
+    reason recorded in the review history and audit log. The rejected row
+    (and its decision) survive rediscovery — it is never silently
+    re-proposed."""
+    from app.services.ontology.enterprise_discovery import reject_process
+
+    result = reject_process(db, admin.org_id, process_id, admin,
+                            reason=(body.reason if body else None))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Process not found")
+    return result
+
+
 @router.post("/ontology/outcomes/{outcome_id}/measure")
 def measure_outcome_ep(
     outcome_id: str,

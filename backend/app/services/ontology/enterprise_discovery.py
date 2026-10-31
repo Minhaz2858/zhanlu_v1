@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -478,7 +479,8 @@ def _persist_proposals(db: Session, org_id: str, payload: dict,
             db.add(row)
             db.flush()
             counts["proposals_created"] += 1
-        elif row.evidence_status != "verified":
+        elif row.evidence_status not in ("verified", "rejected"):
+            # Human decisions (verified/rejected) survive rediscovery.
             for f in ("purpose", "trigger_event", "objective",
                       "start_condition", "completion_condition"):
                 if pr.get(f):
@@ -654,3 +656,299 @@ def propose_operating_model(db: Session, org_id: str,
     counts = _persist_proposals(db, org_id, payload, evidence)
     result.update({"status": "ok", "llm_ok": True, **counts})
     return result
+
+
+# ---------------------------------------------------------------------------
+# Increment 3 — Enterprise Process Management (catalogue / detail / review)
+# ---------------------------------------------------------------------------
+
+def _process_evidence_counts(db: Session, org_id: str, process_ids: list) -> dict:
+    from sqlalchemy import func
+
+    from app.models.enterprise_process import ProcessEvidence
+    if not process_ids:
+        return {}
+    rows = (
+        db.query(ProcessEvidence.process_id, func.count(ProcessEvidence.id))
+        .filter(ProcessEvidence.org_id == org_id,
+                ProcessEvidence.process_id.in_(process_ids),
+                ProcessEvidence.is_deleted == False)  # noqa: E712
+        .group_by(ProcessEvidence.process_id)
+        .all()
+    )
+    return {pid: cnt for pid, cnt in rows}
+
+
+def list_processes(db: Session, org_id: str, *, q: str | None = None,
+                   family: str | None = None, status: str | None = None,
+                   page: int = 1, page_size: int = 20) -> dict:
+    """Process catalogue — search / filter / paginate with honest counts.
+
+    Every process carries its discovery_status (documented/configured/
+    observed — never conflated), evidence_status and evidence/activity
+    counts. ``needs_review`` is true for AI proposals awaiting a human
+    decision. Responsible units come from ACTIVITY performers (observed
+    in evidence), never from a hardcoded department mapping.
+    """
+    from app.models.enterprise_process import BusinessProcess, ProcessActivity
+
+    page = max(1, int(page or 1))
+    page_size = min(100, max(1, int(page_size or 20)))
+
+    base = db.query(BusinessProcess).filter(
+        BusinessProcess.org_id == org_id,
+        BusinessProcess.is_deleted == False)  # noqa: E712
+    if q:
+        like = f"%{q}%"
+        base = base.filter(
+            or_(BusinessProcess.name.ilike(like),
+                BusinessProcess.purpose.ilike(like)))
+    if family:
+        base = base.filter(BusinessProcess.process_family == family)
+    if status:
+        base = base.filter(BusinessProcess.evidence_status == status)
+
+    total = base.count()
+    rows = (
+        base.order_by(BusinessProcess.process_family.asc().nullslast(),
+                      BusinessProcess.name.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    ids = [r.id for r in rows]
+    ev_counts = _process_evidence_counts(db, org_id, ids)
+    act_counts: dict = {}
+    performers: dict = {}
+    if ids:
+        acts = (
+            db.query(ProcessActivity)
+            .filter(ProcessActivity.org_id == org_id,
+                    ProcessActivity.process_id.in_(ids),
+                    ProcessActivity.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        for a in acts:
+            act_counts[a.process_id] = act_counts.get(a.process_id, 0) + 1
+            if a.performer:
+                performers.setdefault(a.process_id, set()).add(a.performer)
+
+    items = [
+        {
+            "id": r.id, "name": r.name,
+            "process_family": r.process_family,
+            "discovery_status": r.discovery_status,
+            "evidence_status": r.evidence_status,
+            "needs_review": r.evidence_status == "proposed",
+            "purpose": r.purpose,
+            "evidence_count": ev_counts.get(r.id, 0),
+            "activities_count": act_counts.get(r.id, 0),
+            "responsible_units": sorted(performers.get(r.id, set())),
+            "updated_date": r.updated_date.isoformat() if r.updated_date else None,
+        }
+        for r in rows
+    ]
+    from sqlalchemy import func
+
+    families = [
+        {"family": f or None, "count": c}
+        for f, c in (
+            db.query(BusinessProcess.process_family,
+                     func.count(BusinessProcess.id))
+            .filter(BusinessProcess.org_id == org_id,
+                    BusinessProcess.is_deleted == False)  # noqa: E712
+            .group_by(BusinessProcess.process_family)
+            .order_by(func.count(BusinessProcess.id).desc())
+            .all()
+        )
+    ]
+    return {"total": total, "page": page, "page_size": page_size,
+            "families": families, "items": items}
+
+
+def get_process(db: Session, org_id: str, process_id: str) -> dict | None:
+    """Full process detail — ordered activities, verbatim evidence,
+    related processes (both link directions), ontology connections from
+    evidence source_refs, and the human review history. Cross-org or
+    missing ids return None (fail closed)."""
+    from app.models.enterprise_process import (
+        BusinessProcess, ProcessActivity, ProcessEvidence, ProcessLink,
+    )
+    from app.models.ontology import OntologyLink, OntologyObject
+
+    row = db.query(BusinessProcess).filter(
+        BusinessProcess.org_id == org_id, BusinessProcess.id == process_id,
+        BusinessProcess.is_deleted == False).first()  # noqa: E712
+    if row is None:
+        return None
+
+    activities = [
+        {
+            "seq": a.seq, "name": a.name, "activity_type": a.activity_type,
+            "performer": a.performer, "business_rules": a.business_rules,
+            "exception_paths": a.exception_paths,
+            "evidence_status": a.evidence_status,
+            "provenance": a.provenance_json,
+        }
+        for a in db.query(ProcessActivity)
+        .filter(ProcessActivity.org_id == org_id,
+                ProcessActivity.process_id == process_id,
+                ProcessActivity.is_deleted == False)  # noqa: E712
+        .order_by(ProcessActivity.seq.asc())
+        .all()
+    ]
+    evidence = [
+        {"id": e.id, "evidence_kind": e.evidence_kind,
+         "source_ref": e.source_ref, "quote": e.quote,
+         "confidence": e.confidence}
+        for e in db.query(ProcessEvidence)
+        .filter(ProcessEvidence.org_id == org_id,
+                ProcessEvidence.process_id == process_id,
+                ProcessEvidence.is_deleted == False)  # noqa: E712
+        .order_by(ProcessEvidence.evidence_kind, ProcessEvidence.source_ref)
+        .all()
+    ]
+
+    peer_ids = set()
+    links = db.query(ProcessLink).filter(
+        ProcessLink.org_id == org_id,
+        or_(ProcessLink.predecessor_id == process_id,
+            ProcessLink.successor_id == process_id),
+        ProcessLink.is_deleted == False).all()  # noqa: E712
+    peer_ids = {l.predecessor_id for l in links} | {l.successor_id for l in links}
+    peer_ids.add(process_id)
+    peers = {p.id: p for p in db.query(BusinessProcess).filter(
+        BusinessProcess.org_id == org_id,
+        BusinessProcess.is_deleted == False,  # noqa: E712
+        BusinessProcess.id.in_(list(peer_ids))).all()}
+    related = [
+        {"direction": "successor" if l.predecessor_id == process_id
+         else "predecessor",
+         "peer_id": (l.successor_id if l.predecessor_id == process_id
+                     else l.predecessor_id),
+         "peer_name": getattr(peers.get(
+             l.successor_id if l.predecessor_id == process_id
+             else l.predecessor_id), "name", None),
+         "handoff_note": l.handoff_note,
+         "evidence_status": l.evidence_status}
+        for l in links
+    ]
+
+    # Ontology connections referenced by this process's evidence.
+    ontology_refs = []
+    for e in evidence:
+        if e["source_ref"].startswith("ontology:"):
+            ref_id = e["source_ref"].split(":", 1)[1]
+            obj = db.query(OntologyObject).filter(
+                OntologyObject.org_id == org_id,
+                OntologyObject.id == ref_id).first()
+            if obj:
+                ontology_refs.append({"kind": "object", "id": obj.id,
+                                      "name": obj.name,
+                                      "source_ref": e["source_ref"]})
+                continue
+            link = db.query(OntologyLink).filter(
+                OntologyLink.org_id == org_id,
+                OntologyLink.id == ref_id).first()
+            if link:
+                ontology_refs.append({"kind": "link", "id": link.id,
+                                      "link_type": link.link_type,
+                                      "source_ref": e["source_ref"]})
+
+    prov = row.provenance_json or {}
+    return {
+        "id": row.id, "name": row.name, "purpose": row.purpose,
+        "trigger_event": row.trigger_event, "objective": row.objective,
+        "start_condition": row.start_condition,
+        "completion_condition": row.completion_condition,
+        "process_family": row.process_family,
+        "discovery_status": row.discovery_status,
+        "evidence_status": row.evidence_status,
+        "confidence": row.confidence,
+        "provenance": prov,
+        "review_history": prov.get("review_history") or [],
+        "activities": activities,
+        "evidence": evidence,
+        "related_processes": related,
+        "ontology_connections": ontology_refs,
+        "updated_date": row.updated_date.isoformat() if row.updated_date else None,
+    }
+
+
+def _record_process_review(db: Session, org_id: str, process,
+                           decision: str, reviewer, reason: str | None):
+    """Shared review bookkeeping: provenance review_history + AuditEvent.
+
+    The AI provenance (discovery_method, evidence_ids) is PRESERVED — the
+    review decision is appended, never overwritten.
+    """
+    from app.models.audit_event import AuditEvent
+
+    prov = dict(process.provenance_json or {})
+    history = list(prov.get("review_history") or [])
+    history.append({
+        "decision": decision,
+        "reviewer_id": getattr(reviewer, "id", None),
+        "reviewer_name": getattr(reviewer, "full_name", None)
+        or getattr(reviewer, "email", None),
+        "reason": reason,
+        "at": datetime.now(timezone.utc).isoformat(),
+    })
+    prov["review_history"] = history
+    process.provenance_json = prov
+    db.add(AuditEvent(
+        org_id=org_id,
+        event_type=f"process_{decision}",
+        event_source="ontology",
+        actor_type="user",
+        actor_id=getattr(reviewer, "id", None),
+        actor_name=getattr(reviewer, "full_name", None)
+        or getattr(reviewer, "email", None),
+        resource_type="business_process",
+        resource_id=process.id,
+        outcome="success",
+        detail_json={"process_name": process.name, "reason": reason},
+        occurred_at=datetime.now(timezone.utc),
+    ))
+
+
+def confirm_process(db: Session, org_id: str, process_id: str,
+                    reviewer) -> dict | None:
+    """Human confirm (org-admin): proposed/inferred → verified. The row
+    then survives rediscovery unchanged."""
+    from app.models.enterprise_process import BusinessProcess
+
+    row = db.query(BusinessProcess).filter(
+        BusinessProcess.org_id == org_id, BusinessProcess.id == process_id,
+        BusinessProcess.is_deleted == False).first()  # noqa: E712
+    if row is None:
+        return None
+    _record_process_review(db, org_id, row, "confirmed", reviewer, None)
+    row.evidence_status = "verified"
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "name": row.name,
+            "evidence_status": row.evidence_status,
+            "review_history": (row.provenance_json or {}).get("review_history")}
+
+
+def reject_process(db: Session, org_id: str, process_id: str,
+                   reviewer, reason: str | None = None) -> dict | None:
+    """Human reject (org-admin): proposed/inferred → rejected. The row AND
+    its rejection decision survive rediscovery — the proposal is never
+    silently re-created."""
+    from app.models.enterprise_process import BusinessProcess
+
+    row = db.query(BusinessProcess).filter(
+        BusinessProcess.org_id == org_id, BusinessProcess.id == process_id,
+        BusinessProcess.is_deleted == False).first()  # noqa: E712
+    if row is None:
+        return None
+    _record_process_review(db, org_id, row, "rejected", reviewer, reason)
+    row.evidence_status = "rejected"
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "name": row.name,
+            "evidence_status": row.evidence_status,
+            "reason": reason,
+            "review_history": (row.provenance_json or {}).get("review_history")}

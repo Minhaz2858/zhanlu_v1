@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { authFetch } from '@/api/authFetch';
+import { useAuth } from '@/lib/AuthContext';
 import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
 import OntologyGraph from '@/components/ontology/OntologyGraph';
 import {
@@ -1147,13 +1148,409 @@ function OperationalHealth({ overview, value, selectedDomain, setSelectedDomain 
 // ---------------------------------------------------------------------------
 // SHELL
 // ---------------------------------------------------------------------------
+const DISCOVERY_STATUS_STYLE = {
+  documented: 'bg-sky-50 text-sky-700 border-sky-200',
+  configured: 'bg-violet-50 text-violet-700 border-violet-200',
+  observed: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+};
+const ACTIVITY_TYPE_LABEL = {
+  start_event: 'Start', end_event: 'End', human_task: 'Human task',
+  system_task: 'System task', decision: 'Decision', approval: 'Approval',
+  subprocess: 'Subprocess',
+};
+
+function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin }) {
+  const [detail, setDetail] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [showReject, setShowReject] = useState(false);
+  const [reason, setReason] = useState('');
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await authFetch(`/api/ontology/enterprise/processes/${processId}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setDetail(await res.json());
+    } catch (e) { setError(e.message || String(e)); }
+  }, [processId]);
+  useEffect(() => { load(); }, [load]);
+
+  const review = async (decision) => {
+    setBusy(true);
+    try {
+      const res = await authFetch(
+        `/api/ontology/enterprise/processes/${processId}/${decision}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: decision === 'reject' ? JSON.stringify({ reason: reason || null }) : '{}',
+        },
+      );
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b.detail || `HTTP ${res.status}`);
+      }
+      toast.success(decision === 'confirm' ? 'Process confirmed (verified)' : 'Process rejected');
+      setShowReject(false);
+      setReason('');
+      await load();
+      onChanged?.();
+    } catch (e) { toast.error(`Review failed: ${e.message || e}`); }
+    finally { setBusy(false); }
+  };
+
+  const d = detail;
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
+      <div className="w-full max-w-2xl h-full overflow-y-auto bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="sticky top-0 bg-white/95 backdrop-blur border-b border-stone-200 px-6 py-4 flex items-start gap-3">
+          <div className="min-w-0">
+            <h2 className="text-[15px] font-semibold text-stone-900 truncate">
+              {d ? d.name : 'Process'}
+            </h2>
+            {d && (
+              <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                {d.process_family && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">
+                    family: {d.process_family}
+                  </span>
+                )}
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${DISCOVERY_STATUS_STYLE[d.discovery_status] || DISCOVERY_STATUS_STYLE.documented}`}>
+                  {d.discovery_status}
+                </span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${EVIDENCE_BADGE_STYLE[d.evidence_status] || EVIDENCE_BADGE_STYLE.proposed}`}>
+                  {d.evidence_status}
+                </span>
+              </div>
+            )}
+          </div>
+          <button onClick={onClose} className="ml-auto text-stone-400 hover:text-stone-700 text-lg leading-none px-1">×</button>
+        </div>
+
+        {error && (
+          <div className="mx-6 mt-4 text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+            Failed to load process: {error}
+          </div>
+        )}
+        {!d && !error && (
+          <div className="flex items-center justify-center py-20 text-stone-400">
+            <Loader2 size={16} className="animate-spin mr-2" /> Loading…
+          </div>
+        )}
+        {d && (
+          <div className="px-6 py-5 space-y-6">
+            {/* Review actions — org-admin only (server enforces 403) */}
+            {isAdmin && (
+              <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+                <p className="text-[11px] text-stone-500 mb-2.5">
+                  Human review: confirm only if the evidence genuinely supports this process.
+                </p>
+                {!showReject ? (
+                  <div className="flex gap-2">
+                    <button onClick={() => review('confirm')} disabled={busy}
+                      className="flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+                      {busy ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />} Confirm
+                    </button>
+                    <button onClick={() => setShowReject(true)} disabled={busy}
+                      className="flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md border border-red-200 text-red-600 bg-white hover:bg-red-50 disabled:opacity-50">
+                      <AlertTriangle size={12} /> Reject
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <textarea value={reason} onChange={(e) => setReason(e.target.value)}
+                      placeholder="Reason for rejection (recorded in the review history)…"
+                      rows={2}
+                      className="w-full text-[12px] border border-stone-300 rounded-md px-2.5 py-2 focus:outline-none focus:ring-1 focus:ring-stone-400" />
+                    <div className="flex gap-2">
+                      <button onClick={() => review('reject')} disabled={busy}
+                        className="text-[12px] px-3 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
+                        {busy ? 'Rejecting…' : 'Reject process'}
+                      </button>
+                      <button onClick={() => { setShowReject(false); setReason(''); }}
+                        className="text-[12px] px-3 py-1.5 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-100">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Overview */}
+            <section>
+              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">Overview</h3>
+              <dl className="grid grid-cols-1 gap-2 text-[12px]">
+                {[['Purpose', d.purpose], ['Trigger event', d.trigger_event],
+                  ['Objective', d.objective], ['Start condition', d.start_condition],
+                  ['Completion condition', d.completion_condition]].map(([k, v]) => (
+                  v ? (
+                    <div key={k} className="flex gap-2">
+                      <dt className="w-36 shrink-0 text-stone-400">{k}</dt>
+                      <dd className="text-stone-700">{v}</dd>
+                    </div>
+                  ) : null
+                ))}
+                {!d.purpose && !d.trigger_event && !d.objective && (
+                  <p className="text-stone-400">No overview fields were discovered from evidence.</p>
+                )}
+              </dl>
+            </section>
+
+            {/* Activity sequence */}
+            <section>
+              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">
+                Activity sequence ({d.activities.length})
+              </h3>
+              {d.activities.length === 0 ? (
+                <p className="text-[12px] text-stone-400">No activities discovered yet.</p>
+              ) : (
+                <ol className="space-y-1.5">
+                  {d.activities.map((a, i) => (
+                    <li key={`${a.seq}-${a.name}`} className="flex items-start gap-3 rounded-lg border border-stone-200 px-3 py-2">
+                      <span className="mt-0.5 w-6 h-6 shrink-0 rounded-full bg-stone-100 text-stone-600 text-[11px] flex items-center justify-center">{a.seq}</span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[12px] font-medium text-stone-800">{a.name}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">
+                            {ACTIVITY_TYPE_LABEL[a.activity_type] || a.activity_type}
+                          </span>
+                          {a.performer && (
+                            <span className="text-[10px] text-stone-400">by {a.performer}</span>
+                          )}
+                        </div>
+                        {a.business_rules && <p className="mt-0.5 text-[11px] text-stone-500">Rule: {a.business_rules}</p>}
+                        {a.exception_paths && <p className="text-[11px] text-amber-700">Exception: {a.exception_paths}</p>}
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </section>
+
+            {/* Evidence / provenance */}
+            <section>
+              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">
+                Evidence ({d.evidence.length})
+              </h3>
+              {d.evidence.length === 0 ? (
+                <p className="text-[12px] text-stone-400">No evidence rows recorded.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {d.evidence.map((e) => (
+                    <li key={e.id} className="rounded-lg border border-stone-200 px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">{e.evidence_kind}</span>
+                        <span className="text-[10px] text-stone-400 truncate">{e.source_ref}</span>
+                      </div>
+                      {e.quote && <p className="mt-1 text-[11px] text-stone-600 italic line-clamp-3">“{e.quote}”</p>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            {/* Related processes + ontology connections */}
+            <section className="grid grid-cols-1 gap-4">
+              <div>
+                <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">Related processes</h3>
+                {d.related_processes.length === 0 ? (
+                  <p className="text-[12px] text-stone-400">No discovered handoffs yet.</p>
+                ) : d.related_processes.map((r, i) => (
+                  <p key={i} className="text-[12px] text-stone-700">
+                    <span className="text-stone-400">{r.direction}:</span> {r.peer_name || r.peer_id}
+                    {r.handoff_note && <span className="text-stone-400"> — {r.handoff_note}</span>}
+                  </p>
+                ))}
+              </div>
+              <div>
+                <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">Ontology connections</h3>
+                {d.ontology_connections.length === 0 ? (
+                  <p className="text-[12px] text-stone-400">None referenced by evidence.</p>
+                ) : d.ontology_connections.map((c, i) => (
+                  <p key={i} className="text-[12px] text-stone-700">
+                    <span className="text-stone-400">{c.kind}:</span> {c.name || c.link_type || c.id}
+                  </p>
+                ))}
+              </div>
+            </section>
+
+            {/* Review history */}
+            <section>
+              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">
+                Review history ({d.review_history.length})
+              </h3>
+              {d.review_history.length === 0 ? (
+                <p className="text-[12px] text-stone-400">Awaiting first human review.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {d.review_history.map((h, i) => (
+                    <li key={i} className="text-[12px] flex items-start gap-2">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${
+                        h.decision === 'confirmed' ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                          : 'border-red-200 bg-red-50 text-red-700'}`}>
+                        {h.decision}
+                      </span>
+                      <span className="text-stone-600">
+                        {h.reviewer_name || h.reviewer_id || 'unknown'}
+                        {h.reason && <span className="text-stone-400"> — {h.reason}</span>}
+                        <span className="text-stone-400 ml-1">{h.at ? new Date(h.at).toLocaleString() : ''}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BusinessProcesses() {
+  const { isAdmin } = useAuth();
+  const [data, setData] = useState(null);
+  const [q, setQ] = useState('');
+  const [family, setFamily] = useState('');
+  const [status, setStatus] = useState('');
+  const [page, setPage] = useState(1);
+  const [selected, setSelected] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ page: String(page), page_size: '20' });
+      if (q) params.set('q', q);
+      if (family) params.set('family', family);
+      if (status) params.set('status', status);
+      const res = await authFetch(`/api/ontology/enterprise/processes?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setData(await res.json());
+    } catch {
+      setData({ total: 0, page: 1, page_size: 20, families: [], items: [], error: true });
+    }
+  }, [q, family, status, page]);
+  useEffect(() => { load(); }, [load]);
+
+  const grouped = useMemo(() => {
+    const map = new Map();
+    for (const it of data?.items || []) {
+      const key = it.process_family || 'Unassigned';
+      (map.get(key) || map.set(key, []).get(key)).push(it);
+    }
+    return [...map.entries()];
+  }, [data]);
+
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative">
+          <Search size={13} className="absolute left-2.5 top-2.5 text-stone-400" />
+          <input value={q} onChange={(e) => { setQ(e.target.value); setPage(1); }}
+            placeholder="Search processes…"
+            className="text-[12px] pl-8 pr-3 py-2 w-56 border border-stone-300 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-stone-400" />
+        </div>
+        <select value={family} onChange={(e) => { setFamily(e.target.value); setPage(1); }}
+          className="text-[12px] px-2.5 py-2 border border-stone-300 rounded-md bg-white text-stone-600">
+          <option value="">All families</option>
+          {(data?.families || []).filter((f) => f.family).map((f) => (
+            <option key={f.family} value={f.family}>{f.family} ({f.count})</option>
+          ))}
+        </select>
+        <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}
+          className="text-[12px] px-2.5 py-2 border border-stone-300 rounded-md bg-white text-stone-600 capitalize">
+          <option value="">All statuses</option>
+          <option value="proposed">Needs review</option>
+          <option value="verified">Verified</option>
+          <option value="rejected">Rejected</option>
+        </select>
+        <span className="ml-auto text-[11px] text-stone-400">
+          {data ? `${data.total} discovered process${data.total === 1 ? '' : 'es'}` : ''}
+        </span>
+      </div>
+
+      {!data ? (
+        <div className="flex items-center justify-center py-20 text-stone-400">
+          <Loader2 size={16} className="animate-spin mr-2" /> Loading processes…
+        </div>
+      ) : data.error ? (
+        <div className="mt-6 flex items-center gap-2 text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+          <AlertTriangle size={13} /> Failed to load the process catalogue — run discovery first.
+        </div>
+      ) : data.total === 0 ? (
+        <div className="mt-6 rounded-xl border border-dashed border-stone-300 bg-white px-6 py-10 text-center">
+          <Workflow size={20} className="mx-auto text-stone-300" />
+          <p className="mt-2 text-[13px] text-stone-500">No business processes discovered yet.</p>
+          <p className="mt-1 text-[11px] text-stone-400">
+            Run AI discovery from authorized resources — proposed processes appear here for human review.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-5 space-y-6">
+          {grouped.map(([fam, items]) => (
+            <div key={fam}>
+              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">{fam}</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {items.map((p) => (
+                  <button key={p.id} onClick={() => setSelected(p.id)}
+                    className="text-left rounded-xl border border-stone-200 bg-white px-4 py-3.5 hover:border-stone-300 transition-colors">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] font-medium text-stone-800 truncate">{p.name}</span>
+                      <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${DISCOVERY_STATUS_STYLE[p.discovery_status] || DISCOVERY_STATUS_STYLE.documented}`}>
+                        {p.discovery_status}
+                      </span>
+                    </div>
+                    {p.purpose && <p className="mt-1 text-[11px] text-stone-400 line-clamp-1">{p.purpose}</p>}
+                    <div className="mt-2 flex items-center gap-3 flex-wrap text-[10px] text-stone-500">
+                      <span className={`px-1.5 py-0.5 rounded-full border capitalize ${EVIDENCE_BADGE_STYLE[p.evidence_status] || EVIDENCE_BADGE_STYLE.proposed}`}>
+                        {p.evidence_status}
+                      </span>
+                      {p.needs_review && (
+                        <span className="px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700">needs review</span>
+                      )}
+                      <span>{p.evidence_count} evidence</span>
+                      <span>{p.activities_count} activities</span>
+                      {p.responsible_units.length > 0 && (
+                        <span className="truncate max-w-[180px]">{p.responsible_units.join(', ')}</span>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 text-[12px] text-stone-500">
+              <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}
+                className="px-2.5 py-1 rounded-md border border-stone-300 bg-white disabled:opacity-40 hover:bg-stone-100">Prev</button>
+              <span>page {data.page} / {totalPages}</span>
+              <button disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}
+                className="px-2.5 py-1 rounded-md border border-stone-300 bg-white disabled:opacity-40 hover:bg-stone-100">Next</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {selected && (
+        <ProcessDetailDrawer processId={selected} isAdmin={isAdmin}
+          onClose={() => setSelected(null)} onChanged={load} />
+      )}
+    </div>
+  );
+}
+
 const EXPERIENCES = [
   { key: 'A', label: 'Executive', icon: Gauge },
   { key: 'B', label: 'Situation Room', icon: FileSearch },
   { key: 'C', label: 'Object Explorer', icon: Network },
   { key: 'D', label: 'Decisions', icon: Workflow },
   { key: 'E', label: 'Outcomes', icon: Activity },
-  { key: 'F', label: 'Health', icon: ShieldCheck },
+  { key: 'F', label: 'Processes', icon: GitBranch },
+  { key: 'G', label: 'Health', icon: ShieldCheck },
 ];
 
 export default function EnterpriseProfile() {
@@ -1232,7 +1629,8 @@ export default function EnterpriseProfile() {
           {exp === 'C' && <BusinessObjectExplorer />}
           {exp === 'D' && <DecisionCenter />}
           {exp === 'E' && <OutcomeTracking />}
-          {exp === 'F' && (
+          {exp === 'F' && <BusinessProcesses />}
+          {exp === 'G' && (
             <OperationalHealth overview={overview} value={value}
               selectedDomain={selectedDomain} setSelectedDomain={setSelectedDomain} />
           )}
