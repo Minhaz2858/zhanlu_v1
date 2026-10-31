@@ -1721,6 +1721,16 @@ class Settings(BaseSettings):
     # LOOP_POSTMORTEM_ENABLED: scheduled mining of failed agent loops into
     #   AgentMemory "LESSON" rows (failure-side counterpart of q_sql_examples).
     LOOP_POSTMORTEM_ENABLED: bool = False
+    # BCS_ENABLED (Phase 2B, 2026-11-01): inject the Business Context
+    #   Service block (enterprise/business_context.py) into the chat system
+    #   prompt and the data-source runtime extras. Default OFF — when
+    #   disabled the runtime performs ZERO BCS queries and existing prompt
+    #   content is byte-identical. Rollback: set False in env.
+    BCS_ENABLED: bool = False
+    # BCS_BUDGET_TOKENS: token budget for the injected context block
+    #   (compaction estimator; bounded selection drops lowest-relevance
+    #   items first).
+    BCS_BUDGET_TOKENS: int = 2000
     # CREDENTIAL_ENCRYPTION_KEY (IBM framework-audit #3): Fernet key (or any
     # passphrase — SHA-256-derived) encrypting stored credentials at rest
     # (MCP OAuth tokens, external-agent bearer tokens). Empty = derived from

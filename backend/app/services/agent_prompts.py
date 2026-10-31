@@ -2377,10 +2377,50 @@ FINAL ANSWER DELIVERY CONTRACT (HARD RULES — apply to every turn):
 """
 
 
+def build_bcs_block(
+    db,
+    user,
+    org_id: str | None,
+    project_id: str | None = None,
+    query: str | None = None,
+    budget_tokens: int | None = None,
+) -> tuple[str | None, dict | None]:
+    """Phase 2B: build the Enterprise Business Context block via the BCS.
+
+    Flag-gated (``BCS_ENABLED``, default False — zero queries, zero
+    latency when off) and fail-open (any BCS failure returns
+    ``(None, None)`` so ordinary chat continues). Authorization is
+    enforced INSIDE the BCS (existing ``project_access`` wall); the
+    department is contextual metadata only.
+
+    Returns ``(rendered_block, structured_context)`` — the block is
+    injected into the system prompt by ``get_system_prompt(bcs_block=)‘
+    and the structured context is forwarded to the data-source runtime
+    extras, so the context is built ONCE per request.
+    """
+    try:
+        from app.config import settings
+
+        if not getattr(settings, "BCS_ENABLED", False) or not org_id:
+            return None, None
+        from app.services.enterprise.business_context import (
+            build_business_context, render_prompt_block)
+
+        ctx = build_business_context(
+            db, user, org_id, project_id=project_id, query=query,
+            budget_tokens=(budget_tokens
+                           or getattr(settings, "BCS_BUDGET_TOKENS", 2000)))
+        return render_prompt_block(ctx), ctx
+    except Exception as exc:  # noqa: BLE001 — context must never break chat
+        _logger.warning("bcs: context build failed (non-fatal): %s", exc)
+        return None, None
+
+
 def get_system_prompt(
     agent_name: str | None,
     agent_app=None,
     user_message: str | None = None,
+    bcs_block: str | None = None,
 ) -> str:
     """Return the appropriate system prompt for the given agent_name.
 
@@ -2596,6 +2636,18 @@ def get_system_prompt(
             prompt = prompt + _nudge
     except Exception:  # noqa: BLE001 — never break chat on sentiment
         pass
+
+    # Phase 2B (2026-11-01): Enterprise Business Context block — ONLY when
+    # the caller explicitly passed a prebuilt ``bcs_block`` (built once per
+    # request by ``build_bcs_block``, flag-gated). When absent (the default
+    # for every existing caller, incl. subagents) the prompt is unchanged.
+    if bcs_block:
+        prompt = (
+            (prompt or "")
+            + "\n\n<enterprise_business_context>\n"
+            + bcs_block
+            + "\n</enterprise_business_context>"
+        )
 
     _log_prompt_token_budget(agent_name, prompt)
 

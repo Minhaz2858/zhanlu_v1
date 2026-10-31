@@ -6923,7 +6923,15 @@ async def add_message(
         # Build system prompt with memory + todo injection. Pass
         # user_content so the hard-MUST grounding heuristic can append a
         # [GROUNDING REQUIRED] block for time-sensitive questions.
-        system_prompt = get_system_prompt(agent_name, agent_app, user_message=user_content)
+        # Phase 2B: Enterprise Business Context — built ONCE per request,
+        # flag-gated (BCS_ENABLED, default off), fail-open. Authorization
+        # is enforced inside the BCS via the existing project_access wall.
+        from app.services.agent_prompts import build_bcs_block
+        _bcs_block, _bcs_ctx = build_bcs_block(
+            db, user, conv.org_id,
+            project_id=getattr(conv, "project_id", None),
+            query=user_content)
+        system_prompt = get_system_prompt(agent_name, agent_app, user_message=user_content, bcs_block=_bcs_block)
 
         # P8: Unified system prompt assembly (memory + todos + coding context + learning graph)
         try:
@@ -7065,6 +7073,7 @@ async def add_message(
                 selected_project_name=_sel_proj_name,
                 user_id=user.id if user else None,
                 user_message=user_content,
+                bcs_context=_bcs_ctx,
                 # P1-5: pass the user-selected model's context window so
                 # the Bound Data Sources block auto-compresses for small
                 # models (e.g. qwen3.6-27b 65k) and stays full for big
@@ -12965,7 +12974,14 @@ async def add_message_stream(
         if agent_app and agent_app.tool_config:
             tool_config = agent_app.tool_config
 
-    system_prompt = get_system_prompt(agent_name, agent_app, user_message=user_content)
+    # Phase 2B: Enterprise Business Context — built ONCE per request,
+    # flag-gated (BCS_ENABLED, default off), fail-open. Uses the
+    # authorized effective project; authorization re-verified inside BCS.
+    from app.services.agent_prompts import build_bcs_block
+    _bcs_block, _bcs_ctx = build_bcs_block(
+        db, user, conv.org_id,
+        project_id=getattr(conv, "project_id", None), query=user_content)
+    system_prompt = get_system_prompt(agent_name, agent_app, user_message=user_content, bcs_block=_bcs_block)
     agent_app_id = agent_app.id if agent_app else agent_name
 
     # ── 2026-08-25: Project Knowledge Cache -- Qwen fast-path ─────────
@@ -13337,6 +13353,10 @@ async def add_message_stream(
     except Exception as e:
         logger.debug("Data source runtime prep failed (non-fatal): %s", e)
     data_ctx_extras = _v3_data_ctx_extras or {}
+    if _bcs_ctx:
+        # Phase 2B: structured BCS in the tool context (metadata only —
+        # NEVER an authorization grant; KB/RLS/policy scoping unchanged)
+        data_ctx_extras["business_context"] = _bcs_ctx
 
     # Dashboard preflight: a live-dashboard request with ZERO bound data
     # sources must not run an open-ended prepare loop. Deepseek-class models

@@ -1368,6 +1368,54 @@ def prepare_data_source_runtime(
     user_id: str | None = None,
     target_context_window: int | None = None,
     user_message: str | None = None,
+    user=None,
+    bcs_context: dict | None = None,
+) -> tuple[list[dict], str, dict]:
+    """Phase 2B wrapper: delegate to the implementation, then attach the
+    prebuilt Business Context (built ONCE per request by
+    ``agent_prompts.build_bcs_block``, flag-gated BCS_ENABLED) to the
+    tool-context extras as structured data. Fail-open; when
+    ``bcs_context`` is absent (default) the extras are unchanged."""
+    tools, system_prompt, ctx_extras = _prepare_data_source_runtime_impl(
+        db, agent_app, base_tools, base_system_prompt,
+        selected_project_id=selected_project_id,
+        selected_project_name=selected_project_name,
+        pinned_data_source_id=pinned_data_source_id,
+        user_id=user_id, target_context_window=target_context_window,
+        user_message=user_message,
+    )
+    try:
+        if bcs_context:
+            ctx_extras["business_context"] = {
+                "enabled_rules": [
+                    r["statement"]
+                    for r in (bcs_context.get("business_rules") or [])
+                    if r.get("status") == "enabled"
+                ],
+                "department": bcs_context.get("department"),
+                "project_authorized":
+                    (bcs_context.get("authorization_summary") or {})
+                    .get("project_authorized", False),
+                "warnings": bcs_context.get("warnings") or [],
+                # Metadata only — NEVER an authorization grant; the
+                # ResourceAccessPolicy / KB bindings remain authoritative.
+            }
+    except Exception:  # noqa: BLE001 — decorative context must never break a turn
+        pass
+    return tools, system_prompt, ctx_extras
+
+
+def _prepare_data_source_runtime_impl(
+    db: Session,
+    agent_app: AgentApp | None,
+    base_tools: list[dict],
+    base_system_prompt: str,
+    selected_project_id: str | None = None,
+    selected_project_name: str | None = None,
+    pinned_data_source_id: str | None = None,
+    user_id: str | None = None,
+    target_context_window: int | None = None,
+    user_message: str | None = None,
 ) -> tuple[list[dict], str, dict]:
     """Augment the agent's tool list + system prompt for data source support.
 

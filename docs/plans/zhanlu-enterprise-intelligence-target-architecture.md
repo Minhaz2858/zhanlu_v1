@@ -403,3 +403,18 @@ Tests: `tests/test_business_context.py` (9) — honest empty context, relevance-
 
 Phase 2B handoff: wire `build_business_context` into the two verified choke points (`get_system_prompt` block injection, `prepare_data_source_runtime` extras) behind a flag (BCS_ENABLED), budget from prompt-size config, and decide on caching; renderer output is the prompt block contract.
 
+### Phase 2B — Business Context Runtime Integration (2026-11-01, DONE)
+
+BCS is now available to the existing agent runtime behind **`BCS_ENABLED` (default False)** + `BCS_BUDGET_TOKENS` (default 2000) in `app/config.py`. When disabled: zero BCS queries, zero added latency, byte-identical prompts.
+
+- **Build-once-per-request helper** `agent_prompts.build_bcs_block(db, user, org_id, project_id=None, query=None, budget_tokens=None)` → `(rendered_block, structured_context)`; flag-gated + fail-open (any failure → `(None, None)`, ordinary chat continues). Authorization enforced INSIDE the BCS via the existing `project_access` wall.
+- **Choke point A — system prompt:** `get_system_prompt(..., bcs_block=None)` (additive kwarg) appends a `<enterprise_business_context>…</enterprise_business_context>` delimited block when one is passed. Wired at the v2 and v3 chat call sites in `agents.py` (built once with the conv's org + effective project + `user_content`, following the `_append_department_block` precedent). Subagents / red-team / every other existing caller pass no block → prompt byte-identical, authorization surfaces untouched.
+- **Choke point B — data-source runtime:** `prepare_data_source_runtime(..., user=None, bcs_context=None)` thin wrapper (impl renamed `_prepare_data_source_runtime_impl`) attaches a COMPACT structured payload to `ctx_extras["business_context"]` (enabled rule statements, department, project_authorized, warnings) — metadata only, never an authorization grant; KB/RLS/policy scoping untouched. v2 passes the prebuilt context; v3 attaches it to `data_ctx_extras` after the pre-flight (same single build). Duplicate construction avoided: one `build_bcs_block` per request feeds both choke points.
+- **Graceful degradation:** missing/cross-org project → `unavailable_reason` in the block, empty resources; BCS failure → no block, prompt unchanged; per-section failures → `section_unavailable:*` warnings. Proposed rules render ONLY under the UNVERIFIED/hypotheses header; verified-but-not-enabled under "do not act on them"; enabled under "executable guidance".
+
+All four edited runtime files (`config.py`, `agent_prompts.py`, `data_source_runtime.py`, `agents.py`) were foreign-dirty — staged surgically (HEAD content + only the listed edits, py_compile-verified); foreign WIP untouched in the worktree.
+
+Tests: `tests/test_bcs_runtime_integration.py` (9) — flag off → zero BCS invocation + unchanged prompt; flag on → delimited injection at the system prompt and structured extras via the runtime wrapper; missing project graceful; cross-org project denied (no name/KB leak); rule tiers in the rendered block; BCS failure fail-open; subagent path receives nothing + payload carries no grants; budget bounded (`estimated ≤ budget`, wrapper extras + flag-off extras unchanged). Regression: 17 across BCS foundation + 64 across data-source-runtime/prompt-builder/multiagent/global-project-resolution suites (2 `test_data_source_runtime_driver_error.py` failures verified pre-existing on stashed HEAD).
+
+Phase 3 handoff: BCS runtime path is live behind the flag — next phases (per roadmap) are the evidence/provenance unification envelope, BCS consumption by governed actions (enabled `applies_to='action'` rules as pre-checks), and observed-execution linkage; NL2SQL/planning/delegation architecture remain untouched by design.
+
