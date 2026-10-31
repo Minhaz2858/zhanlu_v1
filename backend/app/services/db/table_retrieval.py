@@ -103,6 +103,11 @@ class RetrievalResult:
     notes: list[str] = field(default_factory=list)
     # Which components contributed, largest first: {"text": 34, "column": 12, …}
     component_counts: dict[str, int] = field(default_factory=dict)
+    # Phase 3A: provenance of the enterprise-ontology evidence used for this
+    # ranking (selected objects/links/terms/hypotheses + enabled rules).
+    # None when no ontology context was supplied — the field is additive and
+    # every consumer must tolerate its absence.
+    ontology_provenance: dict | None = None
 
     @property
     def names(self) -> list[str]:
@@ -228,6 +233,7 @@ def retrieve_for_question(
     store: Any | None = None,
     embedder: Any | None = None,
     use_embeddings: bool | None = None,
+    ontology_context: dict | None = None,
 ) -> RetrievalResult:
     """Rank the catalog tables for this question. Deterministic, read-only.
 
@@ -373,6 +379,91 @@ def retrieve_for_question(
                         )
         except Exception as e:
             logger.debug("table_retrieval: workload pair-boost unavailable: %s", e)
+
+    # ── 3c. enterprise ontology evidence (Phase 3A, flag-gated upstream) ────
+    # ``ontology_context`` comes from build_ontology_planning_context (org-
+    # scoped). VERIFIED objects/links are evidence; proposed ones are
+    # hypotheses (tiny/nul boost, always labeled). Ontology NEVER invents
+    # joins — links only hint that two catalog tables belong together; the
+    # actual join conditions still come from the authorized schema catalog.
+    if ontology_context:
+        try:
+            _W_OBJ, _W_HYP, _W_LINK, _W_TERM = 1.25, 0.25, 0.75, 1.0
+            _q = set(lexical_tokens(question))
+            prov: dict = {"objects": [], "links": [], "terms": [],
+                          "hypotheses": [], "enabled_sql_rules": []}
+
+            for obj in ontology_context.get("objects_verified") or []:
+                prov["objects"].append({"name": obj.get("name"),
+                                        "table": obj.get("backing_table")})
+                if not (_q & set(lexical_tokens(
+                        f"{obj.get('name')} {obj.get('display_name') or ''}"))):
+                    continue
+                if obj.get("backing_table"):
+                    _add(obj["backing_table"], _W_OBJ,
+                         f"ontology object '{obj['name']}' (verified) "
+                         f"maps to this table", "ontology")
+            for obj in ontology_context.get("objects_hypotheses") or []:
+                prov["hypotheses"].append({"name": obj.get("name"),
+                                           "table": obj.get("backing_table")})
+                if _q & set(lexical_tokens(obj.get("name") or "")) \
+                        and obj.get("backing_table"):
+                    _add(obj["backing_table"], _W_HYP,
+                         f"ontology object '{obj['name']}' (PROPOSED — "
+                         f"hypothesis only)", "ontology-hypothesis")
+
+            scored_now = {n.lower() for n, s in scores.items()
+                          if s >= _W_LINK}
+            scored_any = {n.lower() for n in scores}
+            for link in ontology_context.get("links") or []:
+                a, b = (link.get("from_table") or "").lower(), \
+                    (link.get("to_table") or "").lower()
+                if not a or not b:
+                    continue
+                pair_hint = a if (b in scored_now and a not in scored_now) \
+                    else (b if (a in scored_now and b not in scored_now) else None)
+                if link.get("evidence_status") == "verified":
+                    prov["links"].append({"from": link.get("from"),
+                                          "to": link.get("to"),
+                                          "tables": [a, b]})
+                    if pair_hint:
+                        _add(pair_hint, _W_LINK,
+                             f"verified ontology relationship "
+                             f"{link.get('from')} --{link.get('type')}--> "
+                             f"{link.get('to')} (candidate hint, not a join)",
+                             "ontology-link")
+                elif pair_hint is None and (a in scored_any or b in scored_any):
+                    # hypothesis links: provenance only, NEVER scored
+                    prov["hypotheses"].append({
+                        "link": f"{link.get('from')}--{link.get('type')}"
+                                f"-->{link.get('to')}"})
+
+            for term in ontology_context.get("terms") or []:
+                term_toks = set(lexical_tokens(
+                    f"{term.get('word')} {term.get('description') or ''}"))
+                if not (_q & set(lexical_tokens(term.get("word") or ""))):
+                    continue
+                prov["terms"].append({"word": term.get("word")})
+                matched = 0
+                for name, toc_entry in by_name.items():
+                    desc_toks = set(lexical_tokens(" ".join(filter(None, [
+                        (toc_entry or {}).get("description_zh"),
+                        (toc_entry or {}).get("description_en"),
+                    ]))))
+                    if len(term_toks & desc_toks) >= 2 and matched < 3:
+                        matched += 1
+                        _add(name, _W_TERM,
+                             f"terminology '{term.get('word')}' matches this "
+                             f"table's business description", "terminology")
+
+            for rule in ontology_context.get("enabled_sql_rules") or []:
+                prov["enabled_sql_rules"].append({
+                    "id": rule.get("id"), "statement": rule.get("statement"),
+                    "scope": rule.get("scope"),
+                    "datasource_ids": rule.get("datasource_ids") or []})
+            result.ontology_provenance = prov
+        except Exception as e:  # never let retrieval break answering
+            logger.warning("table_retrieval: ontology evidence unavailable: %s", e)
 
     # ── 4. fused catalog evidence: text / columns / metrics / similarity ────
     if enabled:

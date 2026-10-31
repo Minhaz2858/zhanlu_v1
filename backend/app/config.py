@@ -1731,6 +1731,11 @@ class Settings(BaseSettings):
     #   (compaction estimator; bounded selection drops lowest-relevance
     #   items first).
     BCS_BUDGET_TOKENS: int = 2000
+    # NL2SQL_ONTOLOGY_ENABLED (Phase 3A, 2026-11-01): feed the ontology-
+    #   aware planning context (verified objects/links, terminology,
+    #   enabled SQL rules) into table candidate ranking. Default OFF —
+    #   retrieval is byte-identical when disabled. Rollback: set False.
+    NL2SQL_ONTOLOGY_ENABLED: bool = False
     # CREDENTIAL_ENCRYPTION_KEY (IBM framework-audit #3): Fernet key (or any
     # passphrase — SHA-256-derived) encrypting stored credentials at rest
     # (MCP OAuth tokens, external-agent bearer tokens). Empty = derived from

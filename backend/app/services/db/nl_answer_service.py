@@ -570,10 +570,38 @@ class NLAnswerService:
                         _window = parse_relative_window(question)
                     except Exception:
                         _window = None
+                    # Phase 3A: ontology-aware planning context (flag-gated,
+                    # fail-open — org-scoped verified objects/links,
+                    # terminology, enabled SQL rules for candidate ranking).
+                    _ontology_ctx = None
+                    try:
+                        from app.config import settings as _settings
+
+                        if getattr(_settings, "NL2SQL_ONTOLOGY_ENABLED",
+                                   False):
+                            from app.models.knowledge_base import (
+                                KnowledgeBase as _KB,
+                            )
+                            from app.services.enterprise.business_context import (
+                                build_ontology_planning_context,
+                            )
+
+                            _kb_row = self._db.get(_KB, kb_id)
+                            _kb_org = getattr(_kb_row, "org_id", None)
+                            if _kb_org:
+                                _ontology_ctx = build_ontology_planning_context(
+                                    self._db, _kb_org, query=question)
+                    except Exception as _ont_err:
+                        logger.warning(
+                            "NLAnswer: ontology planning context unavailable "
+                            "(non-fatal): %s", _ont_err,
+                        )
+                        _ontology_ctx = None
                     _retrieval = await asyncio.to_thread(
                         lambda: retrieve_for_question(
                             self._db, [kb_id], question, toc,
                             project_id=project_id, window=_window,
+                            ontology_context=_ontology_ctx,
                         )
                     )
                     logger.info(

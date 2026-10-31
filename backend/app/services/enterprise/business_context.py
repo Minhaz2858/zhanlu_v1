@@ -480,6 +480,129 @@ def build_business_context(
     }
 
 
+def build_ontology_planning_context(
+    db: Session, org_id: str, *, query: str | None = None,
+    max_objects: int = 12,
+) -> dict:
+    """Phase 3A — ontology-aware NL2SQL PLANNING context (internal data,
+    NOT a prompt block). Org-scoped, read-only:
+
+    - objects: verified ontology objects first (name + backing TABLE when
+      ``backing_kind='table'``), then proposed ones explicitly labeled
+      ``hypothesis``; rejected/orphaned rows are never included.
+    - links: relationships between the selected objects — VERIFIED links
+      are facts; proposed/inferred ones are labeled hypotheses and must
+      never become executable joins.
+    - terms: enabled terminology ranked by query relevance (aliases for
+      candidate retrieval).
+    - enabled_sql_rules: ONLY ``status='enabled'`` AND
+      ``applies_to='sql'`` rules (proposed/verified-not-enabled/rejected
+      are excluded — they cannot guide SQL).
+
+    Ranking uses the same token-overlap approach as build_business_context.
+    The caller (table retrieval) decides how to use this; nothing here
+    invents joins or fabricates citations.
+    """
+    q_tokens = _tokens(query)
+    from app.models.business_rule import BusinessRule
+    from app.models.ontology import OntologyLink, OntologyObject
+    from app.models.terminology import Terminology
+
+    def _ranked(rows, text_fn):
+        return sorted(
+            rows, key=lambda r: -_score(text_fn(r), q_tokens)) if q_tokens \
+            else list(rows)
+
+    objects: list[dict] = []
+    obj_rows = db.query(OntologyObject).filter(
+        OntologyObject.org_id == org_id,
+        OntologyObject.is_deleted == False,  # noqa: E712
+    ).all()
+    verified, hypo = [], []
+    for o in obj_rows:
+        status = getattr(o, "evidence_status", None) or "proposed"
+        backing_table = None
+        if getattr(o, "backing_kind", None) == "table" and getattr(
+                o, "backing_ref", None):
+            # backing_ref format: kb:<kb_id>:<table> — split(":", 2) so the
+            # table name (which may contain colons... it may not) survives
+            parts = str(o.backing_ref).split(":", 2)
+            if len(parts) == 3:
+                backing_table = parts[2]
+        entry = {"id": o.id, "name": o.name,
+                 "display_name": o.display_name, "domain_id": o.domain_id,
+                 "evidence_status": status, "backing_table": backing_table}
+        if status == "verified":
+            verified.append(entry)
+        elif status in ("proposed", "inferred"):
+            entry["hypothesis"] = True
+            hypo.append(entry)
+        # anything else (rejected/orphaned) is excluded entirely
+    text_of = lambda e: f"{e['name']} {e.get('display_name') or ''}"  # noqa: E731
+    objects = [_ranked(verified, text_of)[:max_objects],
+               _ranked(hypo, text_of)[:max(2, max_objects // 4)]]
+
+    sel = objects[0] + objects[1]
+    by_id = {e["id"]: e for e in sel}
+    links: list[dict] = []
+    link_rows = db.query(OntologyLink).filter(
+        OntologyLink.org_id == org_id,
+        OntologyLink.is_deleted == False,  # noqa: E712
+    ).all()
+    for l in link_rows:
+        a, b = by_id.get(getattr(l, "from_object_id")), \
+            by_id.get(getattr(l, "to_object_id"))
+        if not a or not b:
+            continue
+        status = getattr(l, "evidence_status", None) or "proposed"
+        entry = {
+            "from": a["name"], "to": b["name"], "type": l.link_type,
+            "from_table": a.get("backing_table"),
+            "to_table": b.get("backing_table"),
+            "evidence_status": status,
+        }
+        if status == "verified":
+            links.append(entry)
+        else:
+            entry["hypothesis"] = True
+            links.append(entry)
+
+    terms = [
+        {"id": t.id, "word": t.word, "description": t.description}
+        for t in _ranked(
+            db.query(Terminology).filter(
+                Terminology.org_id == org_id,
+                Terminology.is_deleted == False,  # noqa: E712
+                Terminology.enabled.is_(True),
+            ).all(),
+            lambda t: f"{t.word} {t.description or ''}")[:8]
+    ]
+    rules = [
+        {"id": r.id, "statement": r.statement, "scope": r.scope,
+         "scope_ref_id": r.scope_ref_id,
+         "datasource_ids": list(r.datasource_ids or [])}
+        for r in db.query(BusinessRule).filter(
+            BusinessRule.org_id == org_id,
+            BusinessRule.is_deleted == False,  # noqa: E712
+            BusinessRule.status == "enabled",
+            BusinessRule.applies_to == "sql",
+        ).all()
+    ]
+    return {
+        "org_id": org_id,
+        "objects_verified": objects[0],
+        "objects_hypotheses": objects[1],
+        "links": links,
+        "terms": terms,
+        "enabled_sql_rules": rules,
+        "provenance": {
+            "sources": ["ontology_objects", "ontology_links",
+                        "terminologies", "business_rules"],
+            "hypotheses_labeled": True,
+        },
+    }
+
+
 def render_prompt_block(context: dict) -> str:
     """Render the context as a labeled prompt block. Tiers are EXPLICIT:
     verified facts, executable rules, informational rules, proposed
