@@ -5,6 +5,8 @@ admin may pass org_id explicitly, 404 otherwise); writes are Org-Admin
 only. The overview endpoint lazily seeds the 14 domain packs.
 """
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -170,6 +172,80 @@ def ontology_graph(
         # governance honesty: never silently drop metrics past the cap
         "metrics_truncated": metrics_truncated,
     }
+
+
+@router.get("/ontology/metrics")
+def list_metrics(
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Governed metric catalog for this org (ALL lifecycles, like the graph) —
+    lets the Executive Overview enumerate KPI candidates without hardcoding any
+    business schema. Disabled/draft/retired metrics are returned with their
+    lifecycle so the UI can show an unavailable state, never a fake value."""
+    from app.models.metric_definition import MetricDefinition
+
+    org = _org_or_404(user, org_id)
+    rows = (
+        db.query(MetricDefinition)
+        .filter(MetricDefinition.org_id == org,
+                MetricDefinition.is_deleted == False)  # noqa: E712
+        .order_by(MetricDefinition.name)
+        .all()
+    )
+    return {
+        "org_id": org,
+        "metrics": [
+            {
+                "id": m.id,
+                "name": m.name,
+                "display_name": m.display_name,
+                "lifecycle": m.lifecycle,
+                "version": m.version,
+                "is_enabled": m.is_enabled,
+                "evidence_status": m.evidence_status,
+                "base_table": m.base_table,
+                "base_column": m.base_column,
+                "aggregation": m.aggregation,
+                "unit": m.unit,
+                "currency": m.currency,
+                "time_column": m.time_column,
+                "datasource_id": m.datasource_id,
+                "depends_on_metrics": m.depends_on_metrics or [],
+            }
+            for m in rows
+        ],
+    }
+
+
+@router.get("/ontology/metrics/{metric_ref}/compute")
+def compute_metric_endpoint(
+    metric_ref: str,
+    filters: str | None = Query(
+        default=None,
+        description='JSON object of extra equality filters, e.g. {"sale_month":"2026-10"}'),
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P5 — ONE authoritative governed-metric computation path for the frontend.
+    Reuses app.services.ontology.metrics.compute_metric (deterministic SQL
+    through the execution gate; typed UNAVAILABLE on any refusal — never a
+    fabricated number, never an LLM-computed figure)."""
+    from app.services.ontology.metrics import compute_metric
+
+    org = _org_or_404(user, org_id)
+    parsed: dict = {}
+    if filters:
+        try:
+            parsed = json.loads(filters)
+            if not isinstance(parsed, dict):
+                raise ValueError("filters must be a JSON object")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid filters JSON: {exc}")
+    return compute_metric(db, org, metric_ref, filters=parsed)
 
 
 @router.get("/ontology/actions")
