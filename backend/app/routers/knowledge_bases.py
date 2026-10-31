@@ -733,10 +733,27 @@ async def update_kb_metric(
     if "reviewed_by" in (body or {}):
         row.reviewed_by = str(body["reviewed_by"] or "").strip() or None
         mutated = True
+    if "depends_on_metrics" in (body or {}):
+        # D3 — validate references / org boundary / cycle / version consistency.
+        # Circular dependencies are REJECTED, never silently accepted.
+        from app.services.ontology.metric_dependencies import (
+            validate_metric_dependencies,
+        )
+
+        ok, errs = validate_metric_dependencies(
+            db, row.org_id, str(row.id), body["depends_on_metrics"])
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "invalid depends_on_metrics", "details": errs})
+        row.depends_on_metrics = (
+            list(body["depends_on_metrics"] or []) or None)
+        mutated = True
     if mutated:
-        # P5-T1: every mutation bumps the version — consumers pin results
-        # to (metric_id, version) so a silent definition change is visible.
-        row.version = (row.version or 1) + 1
+        # version is bumped centrally by MetricDefinition.before_update so the
+        # promotion bridge and this CRUD path share ONE mechanism (F5 — no
+        # duplicated bump, no foreign-file edit).
+        pass
     db.commit()
     return {"id": str(row.id), "ok": True, "version": row.version}
 

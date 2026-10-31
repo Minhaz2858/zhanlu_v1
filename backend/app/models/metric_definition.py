@@ -64,3 +64,34 @@ class MetricDefinition(TimestampedBase):
     reviewed_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     # ontology object ids this metric backs (P5: ontology metric backing)
     source_object_refs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # D3 — explicit metric-to-metric dependencies (ids/names). Validated for
+    # reference existence, org boundary, version consistency, and cycles at
+    # write time; circular dependencies are REJECTED, never silently accepted.
+    depends_on_metrics: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# F5 — centralized version bump (service layer, NOT the foreign-modified
+# metric_bootstrap.py). Any definition-bearing mutation — whether through this
+# CRUD path or the promotion bridge — increments version so consumers can pin
+# results to (metric_id, version) and detect silent definition changes.
+# ---------------------------------------------------------------------------
+from sqlalchemy import event, inspect as _orm_inspect  # noqa: E402
+
+_VERSION_TRACKED = {
+    "name", "description", "datasource_id", "base_sql", "base_table",
+    "base_column", "aggregation", "display_name", "unit", "format_pattern",
+    "synonyms", "requires_approval", "is_enabled", "time_column", "dimensions",
+    "currency", "zero_denominator_behavior", "filters_json", "evidence_status",
+    "lifecycle", "reviewed_by", "source_object_refs", "depends_on_metrics",
+}
+
+
+@event.listens_for(MetricDefinition, "before_update")
+def _bump_version_on_definition_change(mapper, connection, target):
+    state = _orm_inspect(target)
+    for col in _VERSION_TRACKED:
+        attr = state.attrs.get(col)
+        if attr is not None and attr.history.has_changes():
+            target.version = (target.version or 1) + 1
+            break

@@ -241,6 +241,7 @@ def compute_metric(
             "unit": metric.unit,
             "currency": metric.currency,
             "evidence_status": metric.evidence_status,
+            "depends_on_metrics": metric.depends_on_metrics or [],
         },
         "provenance": {
             "datasource_id": kb.id,

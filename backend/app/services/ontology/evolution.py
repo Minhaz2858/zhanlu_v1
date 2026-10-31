@@ -114,9 +114,14 @@ def _impact(db: Session, org_id: str, tables: set[str]) -> dict:
         from app.services.ontology.queries import list_bindings
 
         domain_ids = {o.domain_id for o in affected}
-        for b in list_bindings(db, org_id):
-            if b.domain_id in domain_ids:
-                agent_names.add(b.agent_name)
+        try:
+            for b in list_bindings(db, org_id):
+                if b.domain_id in domain_ids:
+                    agent_names.add(b.agent_name)
+        except Exception as exc:  # noqa: BLE001 — bindings lookup must not
+            # abort drift detection; agent fan-out is best-effort enrichment.
+            logger.warning("evolution: bindings lookup failed for %s: %s",
+                           org_id, exc)
     return {
         "objects": [{"id": o.id, "name": o.name,
                      "evidence_status": o.evidence_status}
@@ -263,6 +268,11 @@ def reconcile(db: Session, org_id: str, *, apply: bool = False,
                                   {f[1] for f in detection["facts"]}),
             }
             report["changes"].append(change)
+            # The source inventory must list EVERY scanned source, including
+            # those with detected drift — otherwise a drifted source silently
+            # disappears from the report (E1-style visibility gap).
+            report["sources"].append(
+                {"source_key": source_key, "status": "changed"})
             # Tables the live diff just judged — the catalog self-check
             # must not "heal" these back to ok (the catalog may lag the
             # live source).

@@ -124,6 +124,7 @@ def ontology_graph(
     metric definitions (ALL lifecycles — governance state must be
     visible, never implied published)."""
     from app.models.metric_definition import MetricDefinition
+    from app.services.ontology.metric_dependencies import build_dependency_edges
 
     org = _org_or_404(user, org_id)
     domains = list_domains(db, org)
@@ -139,6 +140,8 @@ def ontology_graph(
     )
     metrics_truncated = len(metrics) > METRIC_GRAPH_LIMIT
     metrics = metrics[:METRIC_GRAPH_LIMIT]
+    # D3 — explicit metric-to-metric dependency edges (cycles dropped, surfaced)
+    metric_deps = build_dependency_edges(db, org)
     return {
         "org_id": org,
         "domains": [
@@ -158,9 +161,12 @@ def ontology_graph(
              "reviewed_by": m.reviewed_by,
              "base_table": m.base_table,
              "datasource_id": m.datasource_id,
-             "aggregation": m.aggregation, "unit": m.unit}
+             "aggregation": m.aggregation, "unit": m.unit,
+             "depends_on_metrics": m.depends_on_metrics or []}
             for m in metrics
         ],
+        # D3 — dependency edges for the graph renderer (from=dependent)
+        "metric_dependencies": metric_deps,
         # governance honesty: never silently drop metrics past the cap
         "metrics_truncated": metrics_truncated,
     }
