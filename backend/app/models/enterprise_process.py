@@ -131,6 +131,7 @@ class ProcessActivity(TimestampedBase, Base):
     evidence_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="inferred", server_default="inferred")
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    provenance_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class ProcessLink(TimestampedBase, Base):

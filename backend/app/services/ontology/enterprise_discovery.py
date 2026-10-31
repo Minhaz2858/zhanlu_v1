@@ -164,3 +164,493 @@ def refresh_inventory(db: Session, org_id: str) -> dict:
                 evidence_status=ev, discovered_at=now))
     db.commit()
     return inv
+
+
+# ---------------------------------------------------------------------------
+# Increment 2 — evidence extraction + AI-assisted operating-model proposal
+# ---------------------------------------------------------------------------
+
+_MAX_TABLE_EVIDENCE = 14
+_MAX_RELATION_EVIDENCE = 20
+_MAX_OBJECT_EVIDENCE = 30
+_MAX_CHUNKS_PER_DOC = 8
+
+_PROPOSAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "org_units": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "unit_type": {"type": "string",
+                                  "enum": ["department", "team", "role"]},
+                    "responsibilities": {"type": "string"},
+                    "evidence_ids": {"type": "array",
+                                     "items": {"type": "string"}},
+                },
+                "required": ["name", "unit_type"],
+            },
+        },
+        "capabilities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "evidence_ids": {"type": "array",
+                                     "items": {"type": "string"}},
+                },
+                "required": ["name"],
+            },
+        },
+        "processes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "purpose": {"type": "string"},
+                    "trigger_event": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "start_condition": {"type": "string"},
+                    "completion_condition": {"type": "string"},
+                    "process_family": {"type": "string"},
+                    "discovery_status": {"type": "string",
+                                         "enum": ["documented",
+                                                  "configured",
+                                                  "observed"]},
+                    "evidence_ids": {"type": "array",
+                                     "items": {"type": "string"}},
+                    "activities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "seq": {"type": "integer"},
+                                "name": {"type": "string"},
+                                "activity_type": {"type": "string"},
+                                "performer": {"type": "string"},
+                                "business_rules": {"type": "string"},
+                                "exception_paths": {"type": "string"},
+                                "evidence_ids": {"type": "array",
+                                                 "items": {"type": "string"}},
+                            },
+                            "required": ["seq", "name"],
+                        },
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    "required": ["org_units", "capabilities", "processes"],
+}
+
+_DISCOVERY_PROMPT = """You are reconstructing how an enterprise operates from
+AUTHORIZED evidence only. Below is evidence extracted from the organization's
+own systems: database catalog metadata, table relations, ontology objects and
+links, document excerpts, and workflow/automation configurations.
+
+Rules:
+- Propose ONLY what the evidence supports. Never invent departments,
+  activities, systems, or execution history.
+- Each proposal MUST reference the evidence ids that support it (evidence_ids).
+- discovery_status: "documented" only when document/policy evidence says so;
+  "configured" only when workflow/automation configuration shows it;
+  "observed" ONLY when timestamped execution records were provided (they are
+  NOT part of this evidence set — do not use it).
+- If evidence is insufficient for a concept, omit it. An empty proposal is
+  better than an invented one.
+- activity_type one of: start_event, end_event, human_task, system_task,
+  decision, approval, subprocess.
+
+Return JSON matching the schema. Evidence:
+{evidence}
+"""
+
+
+def extract_evidence(db: Session, org_id: str, inv: dict) -> tuple[list, list]:
+    """Phase B — deterministic evidence extraction from authorized rows.
+
+    Every item: {id, kind, source_ref, quote}. Quotes are VERBATIM metadata
+    or chunk text — never synthesized. Bounded; per-resource error isolation.
+    """
+    from app.models.enterprise_process import EnterpriseResource  # noqa: F401
+    from app.models.knowledge_catalog import (
+        KBColumnMeta, KBTableMeta, KBTableRelation,
+    )
+    from app.models.ontology import OntologyLink, OntologyObject
+
+    evidence: list[dict] = []
+    skipped: list[dict] = []
+
+    def _add(kind, source_ref, quote):
+        evidence.append({
+            "id": f"ev-{len(evidence) + 1}", "kind": kind,
+            "source_ref": source_ref, "quote": (quote or "")[:1200],
+        })
+
+    # 1) Database catalog metadata (per authorized datasource KB).
+    for ds in inv["datasources"]:
+        try:
+            tmetas = (
+                db.query(KBTableMeta)
+                .filter(KBTableMeta.kb_id == ds["id"],
+                        KBTableMeta.is_deleted == False)  # noqa: E712
+                .limit(_MAX_TABLE_EVIDENCE).all()
+            )
+            for tm in tmetas:
+                cols = [
+                    c.column_name for c in db.query(KBColumnMeta)
+                    .filter(KBColumnMeta.table_meta_id == tm.id,
+                            KBColumnMeta.is_deleted == False)  # noqa: E712
+                    .limit(12).all()
+                ]
+                desc = tm.description_en or tm.description_zh or tm.source_comment or ""
+                _add("table_catalog", f"{ds['id']}:{tm.table_name}",
+                     f"table {tm.table_name} ({tm.table_role or 'table'})"
+                     f" — {desc} — columns: {', '.join(cols)}")
+            rels = (
+                db.query(KBTableRelation)
+                .filter(KBTableRelation.kb_id == ds["id"],
+                        KBTableRelation.is_deleted == False)  # noqa: E712
+                .limit(_MAX_RELATION_EVIDENCE).all()
+            )
+            for rel in rels:
+                src = db.query(KBTableMeta).filter(
+                    KBTableMeta.id == rel.source_table_meta_id).first()
+                dst = db.query(KBTableMeta).filter(
+                    KBTableMeta.id == rel.target_table_meta_id).first()
+                if src and dst:
+                    _add("relation", f"{ds['id']}:{rel.id}",
+                         f"{src.table_name} -> {dst.table_name} "
+                         f"({rel.relation_type})")
+        except Exception as exc:  # noqa: BLE001 — error isolation per resource
+            skipped.append({"resource": ds["name"],
+                            "reason": f"catalog read failed: {exc}"})
+
+    # 2) Ontology objects + links (evidence for entity handoffs).
+    try:
+        objs = {
+            o.id: o for o in db.query(OntologyObject)
+            .filter(OntologyObject.org_id == org_id,
+                    OntologyObject.is_deleted == False)  # noqa: E712
+            .limit(_MAX_OBJECT_EVIDENCE).all()
+        }
+        for o in objs.values():
+            _add("ontology_object", f"ontology:{o.id}",
+                 f"business object {o.name}"
+                 f" — {getattr(o, 'description', None) or ''}")
+        links = (
+            db.query(OntologyLink)
+            .filter(OntologyLink.org_id == org_id,
+                    OntologyLink.is_deleted == False)  # noqa: E712
+            .limit(_MAX_OBJECT_EVIDENCE).all()
+        )
+        for l in links:
+            a = objs.get(l.from_object_id) or db.query(OntologyObject).filter(
+                OntologyObject.id == l.from_object_id).first()
+            b = objs.get(l.to_object_id) or db.query(OntologyObject).filter(
+                OntologyObject.id == l.to_object_id).first()
+            if a and b:
+                _add("ontology_link", f"ontology:{l.id}",
+                     f"{a.name} --{l.link_type}--> {b.name}")
+    except Exception as exc:  # noqa: BLE001
+        skipped.append({"resource": "ontology", "reason": str(exc)})
+
+    # 3) Document evidence: catalog rows + best-effort verbatim chunk sample.
+    for doc in inv["documents"]:
+        _add("document_catalog", f"kb:{doc['id']}",
+             f"document '{doc['name']}' ({doc.get('file_type') or 'file'}, "
+             f"{doc.get('chunk_count') or 0} indexed chunks)")
+        try:
+            from app.services.document_ingestion.store import _get_collection
+            coll = _get_collection(org_id)
+            res = coll.get(where={"kb_id": doc["id"]},
+                           limit=_MAX_CHUNKS_PER_DOC,
+                           include=["documents", "metadatas"])
+            for text in (res.get("documents") or [])[:_MAX_CHUNKS_PER_DOC]:
+                if text:
+                    _add("document_chunk", f"kb:{doc['id']}", text)
+        except Exception as exc:  # noqa: BLE001 — store unavailable is honest
+            skipped.append({
+                "resource": doc["name"],
+                "reason": f"chunk store unavailable: {type(exc).__name__}"})
+
+    # 4) Configured workflows: automations + governed actions.
+    for auto in inv["automations"]:
+        _add("automation_config", f"automation:{auto['id']}",
+             f"scheduled automation '{auto['name']}' "
+             f"(status: {auto.get('status')})")
+    for act in inv["ontology"]["actions"]:
+        _add("action_interface", f"action:{act['id']}",
+             f"governed action '{act['name']}' tool={act.get('tool_name')} "
+             f"risk={act.get('risk_level')}")
+
+    return evidence, skipped
+
+
+def _clean_evidence_ids(raw, valid_ids):
+    return [e for e in (raw or []) if e in valid_ids]
+
+
+def _persist_proposals(db: Session, org_id: str, payload: dict,
+                       evidence: list) -> dict:
+    """Phase C persistence — upsert with dedup + verified-preservation.
+
+    - dedup by (org, name) — repeated runs UPDATE, never duplicate;
+    - evidence rows upsert by (org, process, source_ref);
+    - rows already VERIFIED by a human are never weakened by proposals.
+    """
+    from app.models.enterprise_process import (
+        BusinessCapability, BusinessProcess, OrgUnit, ProcessActivity,
+        ProcessEvidence,
+    )
+
+    valid = {e["id"]: e for e in evidence}
+    counts = {"proposals_created": 0, "proposals_updated": 0,
+              "evidence_created": 0, "needs_review": 0}
+
+    def _prov(ids):
+        return {"discovery_method": "ai_proposal",
+                "evidence_ids": _clean_evidence_ids(ids, valid)}
+
+    for u in payload.get("org_units") or []:
+        name = (u.get("name") or "").strip()[:255]
+        if not name:
+            continue
+        row = db.query(OrgUnit).filter(
+            OrgUnit.org_id == org_id, OrgUnit.name == name,
+            OrgUnit.is_deleted == False).first()  # noqa: E712
+        prov = _prov(u.get("evidence_ids"))
+        if row is None:
+            db.add(OrgUnit(
+                org_id=org_id, name=name,
+                unit_type=u.get("unit_type") or "department",
+                responsibilities=u.get("responsibilities"),
+                evidence_status="proposed", provenance_json=prov))
+            counts["proposals_created"] += 1
+        elif row.evidence_status != "verified":
+            row.responsibilities = u.get("responsibilities") or row.responsibilities
+            row.provenance_json = prov
+            counts["proposals_updated"] += 1
+
+    for cp in payload.get("capabilities") or []:
+        name = (cp.get("name") or "").strip()[:255]
+        if not name:
+            continue
+        row = db.query(BusinessCapability).filter(
+            BusinessCapability.org_id == org_id, BusinessCapability.name == name,
+            BusinessCapability.is_deleted == False).first()  # noqa: E712
+        prov = _prov(cp.get("evidence_ids"))
+        if row is None:
+            db.add(BusinessCapability(
+                org_id=org_id, name=name, description=cp.get("description"),
+                evidence_status="proposed", provenance_json=prov))
+            counts["proposals_created"] += 1
+        elif row.evidence_status != "verified":
+            row.description = cp.get("description") or row.description
+            row.provenance_json = prov
+            counts["proposals_updated"] += 1
+
+    for pr in payload.get("processes") or []:
+        name = (pr.get("name") or "").strip()[:255]
+        if not name:
+            continue
+        prov = _prov(pr.get("evidence_ids"))
+        row = db.query(BusinessProcess).filter(
+            BusinessProcess.org_id == org_id, BusinessProcess.name == name,
+            BusinessProcess.is_deleted == False).first()  # noqa: E712
+        if row is None:
+            row = BusinessProcess(
+                org_id=org_id, name=name,
+                purpose=pr.get("purpose"), trigger_event=pr.get("trigger_event"),
+                objective=pr.get("objective"),
+                start_condition=pr.get("start_condition"),
+                completion_condition=pr.get("completion_condition"),
+                process_family=(pr.get("process_family") or "")[:120] or None,
+                discovery_status=pr.get("discovery_status") or "documented",
+                evidence_status="proposed", confidence=None,
+                provenance_json=prov)
+            db.add(row)
+            db.flush()
+            counts["proposals_created"] += 1
+        elif row.evidence_status != "verified":
+            for f in ("purpose", "trigger_event", "objective",
+                      "start_condition", "completion_condition"):
+                if pr.get(f):
+                    setattr(row, f, pr[f])
+            row.process_family = ((pr.get("process_family") or "")[:120]
+                                  or row.process_family)
+            row.provenance_json = prov
+            counts["proposals_updated"] += 1
+        counts["needs_review"] += 1  # every proposal awaits human review
+
+        # Activities — replace-by-upsert per (seq, name).
+        existing_acts = {
+            (a.seq, a.name): a for a in db.query(ProcessActivity)
+            .filter(ProcessActivity.org_id == org_id,
+                    ProcessActivity.process_id == row.id,
+                    ProcessActivity.is_deleted == False).all()  # noqa: E712
+        }
+        allowed_types = {"start_event", "end_event", "human_task",
+                         "system_task", "decision", "approval", "subprocess"}
+        for act in pr.get("activities") or []:
+            try:
+                seq = int(act.get("seq"))
+            except (TypeError, ValueError):
+                continue
+            aname = (act.get("name") or "").strip()[:255]
+            if not aname:
+                continue
+            prov = _prov(act.get("evidence_ids"))
+            atype = act.get("activity_type") or "human_task"
+            if atype not in allowed_types:
+                atype = "human_task"
+            key = (seq, aname)
+            if key in existing_acts:
+                a = existing_acts.pop(key)
+                if a.evidence_status != "verified":
+                    a.activity_type = atype
+                    a.performer = act.get("performer") or a.performer
+                    a.business_rules = act.get("business_rules") or a.business_rules
+                    a.exception_paths = (act.get("exception_paths")
+                                         or a.exception_paths)
+                    a.provenance_json = prov
+            else:
+                db.add(ProcessActivity(
+                    org_id=org_id, process_id=row.id, seq=seq, name=aname,
+                    activity_type=atype, performer=act.get("performer"),
+                    business_rules=act.get("business_rules"),
+                    exception_paths=act.get("exception_paths"),
+                    evidence_status="proposed", provenance_json=prov))
+        # activities removed from the latest proposal stay (evidence history).
+
+        # Evidence rows — upsert by source_ref, never duplicate.
+        seen_refs = set()
+        for eid in _clean_evidence_ids(pr.get("evidence_ids"), valid):
+            ev = valid[eid]
+            if ev["source_ref"] in seen_refs:
+                continue
+            seen_refs.add(ev["source_ref"])
+            erow = db.query(ProcessEvidence).filter(
+                ProcessEvidence.org_id == org_id,
+                ProcessEvidence.process_id == row.id,
+                ProcessEvidence.source_ref == ev["source_ref"],
+                ProcessEvidence.is_deleted == False).first()  # noqa: E712
+            if erow is None:
+                db.add(ProcessEvidence(
+                    org_id=org_id, process_id=row.id,
+                    evidence_kind=ev["kind"], source_ref=ev["source_ref"],
+                    quote=ev["quote"]))
+                counts["evidence_created"] += 1
+
+    db.commit()
+    return counts
+
+
+_MAX_PROMPT_ITEMS = 40
+_MAX_PROMPT_CHARS = 24_000
+
+
+def _bounded_prompt_evidence(evidence: list) -> list:
+    """Bounded LLM input (directive §7): cap items and total chars, keeping
+    kind diversity — document chunks and relations carry the process signal."""
+    by_kind: dict[str, list] = {}
+    for e in evidence:
+        by_kind.setdefault(e["kind"], []).append(e)
+    quota = {"document_chunk": 10, "relation": 8, "ontology_link": 6,
+             "table_catalog": 8, "document_catalog": 4, "ontology_object": 8,
+             "automation_config": 4, "action_interface": 6}
+    picked: list[dict] = []
+    for kind, items in by_kind.items():
+        picked.extend(items[:quota.get(kind, 3)])
+    out, total = [], 0
+    for e in picked:
+        if len(out) >= _MAX_PROMPT_ITEMS or total + len(e["quote"]) > _MAX_PROMPT_CHARS:
+            break
+        out.append(e)
+        total += len(e["quote"])
+    return out
+
+
+def propose_operating_model(db: Session, org_id: str,
+                            llm_fn=None) -> dict:
+    """Full discovery pass: refresh inventory → extract evidence → one
+    bounded structured LLM call → validate → persist proposals.
+
+    Honest degradation: LLM unavailable/malformed ⇒ inventory-only result
+    with ``llm_ok: false``; insufficient evidence ⇒ empty proposals.
+    """
+    inv = refresh_inventory(db, org_id)
+    evidence, skipped = extract_evidence(db, org_id, inv)
+
+    result = {
+        "org_id": org_id,
+        "resources_inspected": inv["summary"]["datasources"] + inv["summary"]["documents"],
+        "documents_inspected": len(inv["documents"]),
+        "catalog_entries_inspected": sum(d.get("tables", 0) for d in inv["datasources"]),
+        "evidence_extracted": len(evidence),
+        "skipped": skipped,
+        "llm_ok": False,
+    }
+    if not evidence:
+        result.update({
+            "status": "insufficient_evidence",
+            "note": ("no authorized resource evidence available — nothing "
+                     "proposed (honest empty result)"),
+            **{k: 0 for k in ("proposals_created", "proposals_updated",
+                              "evidence_created", "needs_review")},
+        })
+        return result
+
+    if llm_fn is None:
+        from app.services.llm_service import chat_completion_json_sync as llm_fn
+    # Reuse the existing hierarchical LLM resolution (org/workspace endpoint
+    # config) — the discovery engine never hardcodes providers or keys.
+    endpoint = None
+    try:
+        from app.services.llm_router import resolve_effective_llm
+        eff = resolve_effective_llm(db, org_id=org_id, user_is_admin=True)
+        endpoint = getattr(eff, "endpoint", None)
+    except Exception:  # noqa: BLE001 — fall back to the legacy env provider
+        endpoint = None
+    prompt_evidence = _bounded_prompt_evidence(evidence)
+    prompt = _DISCOVERY_PROMPT.format(
+        evidence="\n".join(
+            f"[{e['id']}] {e['kind']} {e['source_ref']}: {e['quote']}"
+            for e in prompt_evidence))
+    try:
+        payload = llm_fn(prompt, schema=_PROPOSAL_SCHEMA, endpoint=endpoint)
+        if not payload:
+            # One bounded retry without the JSON-schema wrapper — some
+            # compatible-mode providers reject response_json_schema.
+            payload = llm_fn(prompt, endpoint=endpoint)
+            if isinstance(payload, dict) and "response" in payload and len(payload) == 1:
+                import json as _json
+                try:
+                    payload = _json.loads(payload["response"])
+                except (ValueError, TypeError):
+                    pass
+    except Exception as exc:  # noqa: BLE001 — degrade honestly
+        result.update({"status": "llm_error", "reason": str(exc),
+                       **{k: 0 for k in ("proposals_created",
+                                         "proposals_updated",
+                                         "evidence_created",
+                                         "needs_review")}})
+        return result
+    if not payload or not isinstance(payload, dict):
+        result.update({"status": "llm_malformed",
+                       "reason": "empty or non-object model response",
+                       **{k: 0 for k in ("proposals_created",
+                                         "proposals_updated",
+                                         "evidence_created",
+                                         "needs_review")}})
+        return result
+
+    counts = _persist_proposals(db, org_id, payload, evidence)
+    result.update({"status": "ok", "llm_ok": True, **counts})
+    return result

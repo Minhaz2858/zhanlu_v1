@@ -1042,11 +1042,21 @@ def enterprise_discover(
     admin: User = Depends(require_org_admin),
 ):
     """Run a discovery pass (org-admin): refresh the persistent resource
-    inventory. LLM-assisted process/capability proposal is a follow-up
-    increment and is always marked inferred/proposed with evidence."""
-    from app.services.ontology.enterprise_discovery import refresh_inventory
+    inventory, extract evidence from authorized resources, then run the
+    bounded structured-LLM proposal (Phase C). Honest degradation: an LLM
+    failure yields the refreshed inventory with an explicit partial status —
+    never a fabricated operating model. All proposals are evidence_status
+    'proposed' and require human review; verified rows are never weakened."""
+    from app.services.ontology.enterprise_discovery import (
+        propose_operating_model, refresh_inventory,
+    )
 
-    return refresh_inventory(db, admin.org_id)
+    inv = refresh_inventory(db, admin.org_id)
+    try:
+        discovery = propose_operating_model(db, admin.org_id)
+    except Exception as exc:  # noqa: BLE001 — error isolation
+        discovery = {"status": "error", "reason": str(exc), "llm_ok": False}
+    return {"inventory_summary": inv["summary"], "discovery": discovery}
 
 
 @router.get("/ontology/enterprise/resources")

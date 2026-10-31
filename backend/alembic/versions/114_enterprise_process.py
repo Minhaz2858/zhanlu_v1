@@ -111,6 +111,7 @@ TABLES = [
         sa.Column("evidence_status", sa.String(20), nullable=False,
                   server_default="inferred"),
         sa.Column("confidence", sa.Float(), nullable=True),
+        sa.Column("provenance_json", sa.JSON(), nullable=True),
         sa.UniqueConstraint("org_id", "process_id", "seq", "name",
                             name="uq_activity"),
     ]),
