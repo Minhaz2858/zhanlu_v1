@@ -94,6 +94,7 @@ from app.models.enterprise_process import (  # EBPM: discovered process models
     BusinessCapability, BusinessProcess, EnterpriseResource, OrgUnit,
     ProcessActivity, ProcessEvidence, ProcessLink,
 )
+from app.models.business_rule import BusinessRule
 from app.models.nl2sql_query_log import Nl2sqlQueryLog  # Gap 4: literacy mining source
 from app.models.removed_curated_url import RemovedCuratedUrl
 from app.models.hook_rule import HookRule
@@ -213,6 +214,7 @@ __all__ = [
     "SkillSource",
     "ExternalSkill",
     "HookRule",
+    "BusinessRule",
     "ForecastTarget",
     "ForecastRun",
     "ForecastAccuracyLog",

@@ -320,3 +320,21 @@ Wired into BOTH real deletion paths (post-authorization): generic entity DELETE 
 Unsupported/limitations: `Datasource` has no deletion endpoint (cleanup supported programmatically only); `EnterpriseResource` for `agent`/`ontology`/`action_interface` kinds cleans only when their ref_id matches the deleted resource id; agent-side MCP grants (`granted_agents`) are handled by the pre-existing MCP unregister flow, not the cleanup service.
 
 Tests: `tests/test_enterprise_cleanup.py` (8) — catalog/binding/ontology/EBPM behavior, unrelated-binding survival, other-org immunity, object+link survival with verified status preserved, evidence survival, cross-org rejection with zero writes, idempotency, missing-records safety, type coverage. Regression: 55 passed across entity tenant-scoping/router/master-filter/backing suites.
+
+### Phase 1A — BusinessRule Unified Model (2026-11-01, DONE)
+
+New `app/models/business_rule.py` — `BusinessRule` (table `business_rules`), the ONE authoritative, evidence-backed home for enterprise business rules:
+
+- Fields (TimestampedBase conventions — `org_id`/`app_id`/`created_by_id`/`is_deleted`/`created_date`/`updated_date`): `scope` (`org|domain|object|process`, default `org`), `scope_ref_id` (nullable; required by constraint when scope ≠ `org`), `statement` (Text, NOT NULL), `source_evidence_ids` (JSON list of EBPM `ProcessEvidence` ids — traceability only, evidence rows never modified), `status` (`proposed|verified|rejected|enabled`, default `proposed`), `applies_to` (`sql|action|process`, default `sql`), `review_history` (JSON, append-only via `record_review()`).
+- Governance: every rule is born `proposed`; NO auto-enabling; only `enabled` rules may influence SQL/actions (consumed by callers, enforced procedurally — the DB stores the status vocabulary; `verified → enabled` is the review transition). Review decisions append to `review_history` with ISO timestamps; callers persist the AuditEvent.
+- Constraints: 4 CheckConstraints (scope/status/applies_to vocabularies + `ck_business_rule_scoped_needs_ref` — scoped rules must name a target) and indexes `ix_business_rules_org_status` / `ix_business_rules_org_scope` (plus `status` and `scope_ref_id` single-column indexes).
+- Relationship to existing machinery (no duplication): `SemanticGuidelines` remain the NL2SQL prompt representation; a Phase 1B+ bridge maps enabled `applies_to='sql'` rules onto them. `ForecastBusinessRule` is an unrelated forecasting concept (different table).
+
+Migration `alembic/versions/119_business_rule.py` — additive `create_table` chained on the worktree head `118_kb_multi_project`, explicit-column style with `server_default`s, tenant RLS policy (`tenant_isolation`, same as 118), no backfill (empty table), reversible downgrade.
+
+Tests: `tests/test_business_rule_model.py` (18 passed) — proposed-by-default creation, org isolation, all valid enum values accepted, parametrized rejection of invalid scope/status/applies_to, scoped-rule-without-target rejection, enabled/verified/rejected storability, evidence-id preservation across expiry, append-not-replace review history, constraint/index definitions match the migration. Regression: `tests/test_enterprise_cleanup.py` 8 passed; `app.models` package imports clean.
+
+Boundaries respected (NOT implemented in 1A): no Business Context Service, no runtime/NL2SQL consumption, no SemanticGuidelines backfill, no Terminology/Project changes, no frontend, no new discovery engine, no review API.
+
+Phase 1B handoff: (1) bridge enabled `applies_to='sql'` BusinessRules → `SemanticGuidelines` (backfill is a bridge only, keep BusinessRule authoritative); (2) review-center API (list/proposed-queue + confirm/reject/enable with `record_review` + AuditEvent); (3) Business Context Service reads rules by `(org, scope, scope_ref_id)` for prompt/process/action consumption; (4) rule extraction from existing evidence stays out of scope until the review loop exists.
+
