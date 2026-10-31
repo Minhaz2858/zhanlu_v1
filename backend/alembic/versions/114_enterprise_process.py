@@ -131,6 +131,8 @@ TABLES = [
         sa.Column("source_ref", sa.String(255), nullable=False),
         sa.Column("quote", sa.Text(), nullable=True),
         sa.Column("confidence", sa.Float(), nullable=True),
+        sa.Column("evidence_status", sa.String(20), nullable=False,
+                  server_default="proposed"),
         sa.UniqueConstraint("org_id", "process_id", "source_ref",
                             name="uq_pevidence"),
     ]),

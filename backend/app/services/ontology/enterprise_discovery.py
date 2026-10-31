@@ -434,7 +434,8 @@ def _persist_proposals(db: Session, org_id: str, payload: dict,
                 responsibilities=u.get("responsibilities"),
                 evidence_status="proposed", provenance_json=prov))
             counts["proposals_created"] += 1
-        elif row.evidence_status != "verified":
+        elif row.evidence_status not in ("verified", "rejected"):
+            # Human decisions (verified/rejected) survive rediscovery.
             row.responsibilities = u.get("responsibilities") or row.responsibilities
             row.provenance_json = prov
             counts["proposals_updated"] += 1
@@ -452,7 +453,8 @@ def _persist_proposals(db: Session, org_id: str, payload: dict,
                 org_id=org_id, name=name, description=cp.get("description"),
                 evidence_status="proposed", provenance_json=prov))
             counts["proposals_created"] += 1
-        elif row.evidence_status != "verified":
+        elif row.evidence_status not in ("verified", "rejected"):
+            # Human decisions (verified/rejected) survive rediscovery.
             row.description = cp.get("description") or row.description
             row.provenance_json = prov
             counts["proposals_updated"] += 1
@@ -515,7 +517,8 @@ def _persist_proposals(db: Session, org_id: str, payload: dict,
             key = (seq, aname)
             if key in existing_acts:
                 a = existing_acts.pop(key)
-                if a.evidence_status != "verified":
+                if a.evidence_status not in ("verified", "rejected"):
+                    # Human decisions (verified/rejected) survive rediscovery.
                     a.activity_type = atype
                     a.performer = act.get("performer") or a.performer
                     a.business_rules = act.get("business_rules") or a.business_rules
@@ -800,7 +803,8 @@ def get_process(db: Session, org_id: str, process_id: str) -> dict | None:
     evidence = [
         {"id": e.id, "evidence_kind": e.evidence_kind,
          "source_ref": e.source_ref, "quote": e.quote,
-         "confidence": e.confidence}
+         "confidence": e.confidence,
+         "evidence_status": e.evidence_status}
         for e in db.query(ProcessEvidence)
         .filter(ProcessEvidence.org_id == org_id,
                 ProcessEvidence.process_id == process_id,
@@ -875,16 +879,17 @@ def get_process(db: Session, org_id: str, process_id: str) -> dict | None:
     }
 
 
-def _record_process_review(db: Session, org_id: str, process,
-                           decision: str, reviewer, reason: str | None):
-    """Shared review bookkeeping: provenance review_history + AuditEvent.
-
-    The AI provenance (discovery_method, evidence_ids) is PRESERVED — the
-    review decision is appended, never overwritten.
-    """
+def _record_review(db: Session, org_id: str, resource_type: str, row,
+                   decision: str, reviewer, reason: str | None,
+                   label: str | None = None, event_prefix: str | None = None):
+    """Shared review bookkeeping for ALL reviewable kinds: append to
+    provenance review_history + AuditEvent. AI provenance
+    (discovery_method, evidence_ids) is PRESERVED — decisions append,
+    never overwrite. ``event_prefix`` keeps legacy event types stable
+    (process → 'process_*')."""
     from app.models.audit_event import AuditEvent
 
-    prov = dict(process.provenance_json or {})
+    prov = dict(getattr(row, "provenance_json", None) or {})
     history = list(prov.get("review_history") or [])
     history.append({
         "decision": decision,
@@ -895,21 +900,24 @@ def _record_process_review(db: Session, org_id: str, process,
         "at": datetime.now(timezone.utc).isoformat(),
     })
     prov["review_history"] = history
-    process.provenance_json = prov
+    if "provenance_json" in row.__table__.columns:
+        row.provenance_json = prov  # evidence rows carry no provenance column
     db.add(AuditEvent(
         org_id=org_id,
-        event_type=f"process_{decision}",
+        event_type=f"{event_prefix or resource_type}_{decision}",
         event_source="ontology",
         actor_type="user",
         actor_id=getattr(reviewer, "id", None),
         actor_name=getattr(reviewer, "full_name", None)
         or getattr(reviewer, "email", None),
-        resource_type="business_process",
-        resource_id=process.id,
+        resource_type=resource_type,
+        resource_id=row.id,
         outcome="success",
-        detail_json={"process_name": process.name, "reason": reason},
+        detail_json={"label": (label or getattr(row, "name", None) or "")[:300],
+                     "reason": reason},
         occurred_at=datetime.now(timezone.utc),
     ))
+    return prov
 
 
 def confirm_process(db: Session, org_id: str, process_id: str,
@@ -923,7 +931,8 @@ def confirm_process(db: Session, org_id: str, process_id: str,
         BusinessProcess.is_deleted == False).first()  # noqa: E712
     if row is None:
         return None
-    _record_process_review(db, org_id, row, "confirmed", reviewer, None)
+    _record_review(db, org_id, "business_process", row, "confirmed",
+                   reviewer, None, label=row.name, event_prefix="process")
     row.evidence_status = "verified"
     db.commit()
     db.refresh(row)
@@ -944,7 +953,8 @@ def reject_process(db: Session, org_id: str, process_id: str,
         BusinessProcess.is_deleted == False).first()  # noqa: E712
     if row is None:
         return None
-    _record_process_review(db, org_id, row, "rejected", reviewer, reason)
+    _record_review(db, org_id, "business_process", row, "rejected",
+                   reviewer, reason, label=row.name, event_prefix="process")
     row.evidence_status = "rejected"
     db.commit()
     db.refresh(row)
@@ -952,6 +962,142 @@ def reject_process(db: Session, org_id: str, process_id: str,
             "evidence_status": row.evidence_status,
             "reason": reason,
             "review_history": (row.provenance_json or {}).get("review_history")}
+
+
+# Kinds reviewable via the generic entity review API (process has its own
+# dedicated endpoints from Increment 3 and is routed there by the router).
+_REVIEW_KINDS = {
+    "org_unit": ("org_unit", "evidence_status"),
+    "capability": ("business_capability", "evidence_status"),
+    "activity": ("process_activity", "evidence_status"),
+    "evidence": ("process_evidence", "evidence_status"),
+}
+
+
+def _reviewable_row(db: Session, org_id: str, kind: str, entity_id: str):
+    from app.models.enterprise_process import (
+        BusinessCapability, OrgUnit, ProcessActivity, ProcessEvidence,
+    )
+    model = {
+        "org_unit": OrgUnit, "capability": BusinessCapability,
+        "activity": ProcessActivity, "evidence": ProcessEvidence,
+    }[kind]
+    return db.query(model).filter(
+        model.org_id == org_id, model.id == entity_id,
+        model.is_deleted == False).first()  # noqa: E712
+
+
+def review_entity(db: Session, org_id: str, kind: str, entity_id: str,
+                  decision: str, reviewer, reason: str | None = None) -> dict | None:
+    """Generic human review (org-admin) for org units, capabilities,
+    activities and process evidence: proposed/inferred → verified/rejected.
+    Decisions are audited, provenance is preserved, and BOTH terminal
+    states survive rediscovery. Never auto-promotes anything."""
+    if kind not in _REVIEW_KINDS or decision not in ("confirm", "reject"):
+        return None
+    row = _reviewable_row(db, org_id, kind, entity_id)
+    if row is None:
+        return None
+    resource_type, status_col = _REVIEW_KINDS[kind]
+    label = getattr(row, "name", None) or getattr(row, "source_ref", None) or ""
+    _record_review(db, org_id, resource_type, row,
+                   "confirmed" if decision == "confirm" else "rejected",
+                   reviewer, reason, label=str(label)[:300])
+    setattr(row, status_col, "verified" if decision == "confirm" else "rejected")
+    db.commit()
+    db.refresh(row)
+    return {
+        "kind": kind, "id": row.id,
+        "evidence_status": getattr(row, status_col),
+        "reason": reason,
+        "review_history": (getattr(row, "provenance_json", None) or {})
+        .get("review_history"),
+    }
+
+
+def list_review_queue(db: Session, org_id: str) -> dict:
+    """Central Review Queue (org-admin): every AI proposal awaiting a human
+    decision, across all kinds — pending org units, capabilities, processes,
+    activities, and evidence rows. Each item carries confidence, provenance
+    (discovery_method + evidence ids) and source references. Honestly
+    empty sections are normal; nothing is ever auto-promoted."""
+    from app.models.enterprise_process import (
+        BusinessCapability, BusinessProcess, OrgUnit, ProcessActivity,
+        ProcessEvidence,
+    )
+
+    def _item(kind, row, label, extra=None):
+        prov = getattr(row, "provenance_json", None) or {}
+        item = {
+            "kind": kind, "id": row.id, "label": label,
+            "evidence_status": row.evidence_status,
+            "confidence": row.confidence,
+            "discovery_method": prov.get("discovery_method"),
+            "evidence_ids": prov.get("evidence_ids") or [],
+            "review_history": prov.get("review_history") or [],
+        }
+        if extra:
+            item.update(extra)
+        return item
+
+    units = [
+        _item("org_unit", u, u.name,
+              {"unit_type": u.unit_type, "responsibilities": u.responsibilities})
+        for u in db.query(OrgUnit)
+        .filter(OrgUnit.org_id == org_id,
+                OrgUnit.evidence_status.in_(("proposed", "inferred")),
+                OrgUnit.is_deleted == False)  # noqa: E712
+        .order_by(OrgUnit.name).all()
+    ]
+    capabilities = [
+        _item("capability", c, c.name, {"description": c.description})
+        for c in db.query(BusinessCapability)
+        .filter(BusinessCapability.org_id == org_id,
+                BusinessCapability.evidence_status.in_(("proposed", "inferred")),
+                BusinessCapability.is_deleted == False)  # noqa: E712
+        .order_by(BusinessCapability.name).all()
+    ]
+    processes = [
+        _item("process", p, p.name,
+              {"process_family": p.process_family,
+               "discovery_status": p.discovery_status})
+        for p in db.query(BusinessProcess)
+        .filter(BusinessProcess.org_id == org_id,
+                BusinessProcess.evidence_status.in_(("proposed", "inferred")),
+                BusinessProcess.is_deleted == False)  # noqa: E712
+        .order_by(BusinessProcess.name).all()
+    ]
+    activities = [
+        _item("activity", a, a.name,
+              {"process_id": a.process_id, "seq": a.seq,
+               "activity_type": a.activity_type, "performer": a.performer})
+        for a in db.query(ProcessActivity)
+        .filter(ProcessActivity.org_id == org_id,
+                ProcessActivity.evidence_status.in_(("proposed", "inferred")),
+                ProcessActivity.is_deleted == False)  # noqa: E712
+        .order_by(ProcessActivity.process_id, ProcessActivity.seq).all()
+    ]
+    evidence = [
+        _item("evidence", e, e.source_ref,
+              {"process_id": e.process_id, "evidence_kind": e.evidence_kind,
+               "source_ref": e.source_ref, "quote": e.quote,
+               "activity_seq": e.activity_seq})
+        for e in db.query(ProcessEvidence)
+        .filter(ProcessEvidence.org_id == org_id,
+                ProcessEvidence.evidence_status.in_(("proposed", "inferred")),
+                ProcessEvidence.is_deleted == False)  # noqa: E712
+        .order_by(ProcessEvidence.evidence_kind, ProcessEvidence.source_ref)
+        .limit(200).all()
+    ]
+    return {
+        "org_units": units, "capabilities": capabilities,
+        "processes": processes, "activities": activities,
+        "evidence": evidence,
+        "counts": {k: len(v) for k, v in (
+            ("org_units", units), ("capabilities", capabilities),
+            ("processes", processes), ("activities", activities),
+            ("evidence", evidence))},
+    }
 
 
 def enterprise_map(db: Session, org_id: str) -> dict:

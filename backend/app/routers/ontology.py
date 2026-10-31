@@ -1084,6 +1084,74 @@ def enterprise_resources(
     ]
 
 
+class _ReviewBody(BaseModel):
+    reason: str | None = None
+
+
+@router.get("/ontology/enterprise/review-queue")
+def enterprise_review_queue(
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Central Review Queue (org-admin): every AI proposal awaiting a human
+    decision — org units, capabilities, processes, activities and evidence
+    rows — with confidence, provenance and source references."""
+    from app.services.ontology.enterprise_discovery import list_review_queue
+
+    return list_review_queue(db, admin.org_id)
+
+
+@router.post("/ontology/enterprise/{kind}/{entity_id}/confirm")
+def enterprise_entity_confirm(
+    kind: str, entity_id: str,
+    body: _ReviewBody | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Human confirm (org-admin) for org_unit | capability | activity |
+    evidence | process. Audited; AI provenance preserved; verified rows
+    survive rediscovery."""
+    from app.services.ontology.enterprise_discovery import (
+        confirm_process, review_entity,
+    )
+
+    if kind in ("process", "processes"):  # 'processes' = legacy route alias
+        result = confirm_process(db, admin.org_id, entity_id, admin)
+    else:
+        result = review_entity(db, admin.org_id, kind, entity_id,
+                               "confirm", admin,
+                               reason=(body.reason if body else None))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return result
+
+
+@router.post("/ontology/enterprise/{kind}/{entity_id}/reject")
+def enterprise_entity_reject(
+    kind: str, entity_id: str,
+    body: _ReviewBody | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Human reject (org-admin) with optional reason. Audited; AI
+    provenance preserved; rejected rows survive rediscovery."""
+    from app.services.ontology.enterprise_discovery import (
+        reject_process, review_entity,
+    )
+
+    if kind in ("process", "processes"):  # 'processes' = legacy route alias
+        result = reject_process(db, admin.org_id, entity_id, admin,
+                                reason=(body.reason if body else None))
+    else:
+        result = review_entity(db, admin.org_id, kind, entity_id,
+                               "reject", admin,
+                               reason=(body.reason if body else None))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return result
+
+
 @router.get("/ontology/enterprise/map")
 def enterprise_map_endpoint(
     org_id: str | None = Query(default=None),

@@ -3,7 +3,7 @@ import {
   Building2, RefreshCw, Loader2, Download, MapPin, Radar, Plus,
   CircleDot, Layers, Database, ShieldCheck, History, Network, Boxes,
   Workflow, Search, AlertTriangle, CheckCircle2, Activity, Target, Gauge,
-  GitBranch, TrendingDown, FileSearch, ShieldAlert,
+  GitBranch, TrendingDown, FileSearch, ShieldAlert, ClipboardCheck,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { authFetch } from '@/api/authFetch';
@@ -12,6 +12,7 @@ import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
 import OntologyGraph from '@/components/ontology/OntologyGraph';
 import EnterpriseMap from '@/components/enterprise/EnterpriseMap';
 import ProcessFlowCanvas from '@/components/enterprise/ProcessFlowCanvas';
+import ReviewCenter from '@/components/enterprise/ReviewCenter';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts';
@@ -1352,6 +1353,16 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
                       <div className="flex items-center gap-2">
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">{e.evidence_kind}</span>
                         <span className="text-[10px] text-stone-400 truncate">{e.source_ref}</span>
+                        {e.evidence_status && (
+                          <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${
+                            e.evidence_status === 'verified'
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                              : e.evidence_status === 'rejected'
+                                ? 'border-red-200 bg-red-50 text-red-700'
+                                : 'border-stone-200 bg-stone-50 text-stone-500'}`}>
+                            {e.evidence_status}
+                          </span>
+                        )}
                       </div>
                       {e.quote && <p className="mt-1 text-[11px] text-stone-600 italic line-clamp-3">“{e.quote}”</p>}
                     </li>
@@ -1561,6 +1572,7 @@ const EXPERIENCES = [
   { key: 'E', label: 'Outcomes', icon: Activity },
   { key: 'F', label: 'Processes', icon: GitBranch },
   { key: 'G', label: 'Health', icon: ShieldCheck },
+  { key: 'R', label: 'Review', icon: ClipboardCheck, adminOnly: true },
 ];
 
 export default function EnterpriseProfile() {
@@ -1628,7 +1640,7 @@ export default function EnterpriseProfile() {
         </div>
 
         <div className="mt-5 flex items-center gap-1 border-b border-stone-200">
-          {EXPERIENCES.map((e) => {
+          {EXPERIENCES.filter((e) => e.key !== 'R' || isAdmin).map((e) => {
             const Icon = e.icon;
             const active = exp === e.key;
             return (
@@ -1653,6 +1665,7 @@ export default function EnterpriseProfile() {
             <OperationalHealth overview={overview} value={value}
               selectedDomain={selectedDomain} setSelectedDomain={setSelectedDomain} />
           )}
+          {exp === 'R' && isAdmin && <ReviewCenter onOpenProcess={openProcess} />}
         </div>
       </div>
 

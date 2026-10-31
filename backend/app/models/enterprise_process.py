@@ -162,3 +162,7 @@ class ProcessEvidence(TimestampedBase, Base):
     source_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     quote: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # evidence-level review status: proposed (AI-extracted, unreviewed) →
+    # verified / rejected by a human org-admin. Never auto-promoted.
+    evidence_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="proposed", server_default="proposed")

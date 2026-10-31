@@ -261,3 +261,87 @@ The frontend already renders verified/proposed/rejected everywhere via
 that vocabulary, and Increment 7's browser-validation pass should exercise
 the full discover → review → map flow on the live stacks (backend :5003,
 vite :5157, browser DB zhanlu_ebom_browser).
+
+---
+
+## Increment 5 — Enterprise Knowledge Verification & Review Center (2026-11-01)
+
+Status: COMPLETE. Verification extended to EVERY discovered kind + central
+admin Review Center. No duplication of the process-level lifecycle — the
+generic path routes `kind=process` to the existing Increment-3 endpoints.
+
+### Backend
+
+- `ProcessEvidence.evidence_status` (default/server_default 'proposed')
+  added to the model AND to unapplied migration 114 (no new migration;
+  114 is not applied in any shared environment). Nothing is auto-promoted.
+- `_record_review(...)` — generalized review bookkeeping (review_history
+  append + AuditEvent). Legacy process audit event types stay stable
+  (`process_confirmed`/`process_rejected` via `event_prefix`); new kinds
+  write `org_unit_*`, `business_capability_*`, `process_activity_*`,
+  `process_evidence_*`.
+- `review_entity(db, org_id, kind, id, decision, reviewer, reason)` —
+  generic confirm/reject for org_unit | capability | activity | evidence;
+  provenance preserved (evidence rows carry no provenance column — the
+  audit trail is their record).
+- `list_review_queue(db, org_id)` — central queue across ALL kinds with
+  confidence, discovery_method, evidence_ids, source refs/quotes.
+- Rediscovery preservation extended to ALL kinds: `_persist_proposals`
+  now skips updates for `verified` AND `rejected` org units, capabilities,
+  and activities (processes already handled in Increment 3).
+- Router: `GET /ontology/enterprise/review-queue` (org-admin),
+  `POST /ontology/enterprise/{kind}/{id}/confirm|reject` (org-admin,
+  optional reason body; `process`/`processes` aliased to the existing
+  lifecycle — route shadowing handled). `get_process` now returns
+  per-evidence `evidence_status`.
+
+### Tests (suite 9 → all pass; 20 across the three enterprise suites)
+
+`test_review_queue_and_entity_review`: viewer 403 on queue; counts across
+five kinds with provenance; generic confirm (org_unit, capability) + reject
+with reason (activity, evidence); viewer 403 on review; per-kind audit
+events; AI provenance preserved; rediscovery survival on every reviewed
+kind with queue shrink; unknown kind → 404.
+
+### Frontend
+
+- `components/enterprise/ReviewCenter.jsx` — admin-only tab 'R' "Review":
+  pending proposals grouped by kind (units/capabilities/processes/
+  activities/evidence) with confidence, discovery method, evidence-ref
+  count, source refs + verbatim quotes; text filter; confirm / reject with
+  reason textarea; 'open flow' navigation for processes/activities; honest
+  empty state.
+- Process detail drawer now renders per-evidence review status chips.
+- Map/flow/drawer read the same evidence_status fields — after review,
+  switching back to the Enterprise Map refetches and reflects the new
+  statuses immediately (tab remount refetch); historical decisions persist
+  in review_history + audit_events and survive rediscovery.
+
+### Verification
+
+One focused backend run (20 passed) + one frontend build (green).
+
+### Limitations (honest)
+
+- Evidence rows carry no provenance_json column — their review decision
+  lives in audit_events only (by design; quotes are immutable).
+- The queue is unpaginated (evidence capped at 200 rows per fetch).
+- Batch review actions not implemented (single-item decisions only).
+
+### Increment 6 handoff — Observed-Execution Mapping
+
+Increment 6 maps ACTUAL execution onto the discovered model, honestly:
+- Source event logs already identified: AutomationExecution,
+  AgentRun/AgentRunStep, WorkflowRun/WorkflowRunStep, Nl2sqlQueryLog,
+  AuditEvent (audit_events, NOT legacy audit_logs).
+- Scope: per discovered process/activity, query these logs for matching
+  execution records (org-scoped); produce an `observed` signal ONLY when
+  timestamped records exist — the discovery prompt stays forbidden from
+  claiming `observed` on its own (this remains enforced).
+- Suggested shape: `observed_execution` service + `GET /ontology/enterprise/
+  processes/{id}/observations` (honest-empty default), surfacing
+  last-executed timestamps + counts on process/flow nodes (Increment 4
+  canvas is ready to render an 'observed' badge from
+  `DISCOVERY_FILL.observed`, which already exists).
+- No new discovery engine; no fabricated execution events; org isolation
+  via the same `_org_or_404` pattern.

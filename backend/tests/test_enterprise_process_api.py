@@ -279,6 +279,100 @@ def test_review_history_appends_not_overwrites(env):
                                    "process_confirmed"])).count() == 2
 
 
+def test_review_queue_and_entity_review(env):
+    """Increment 5 — central review queue across kinds + generic
+    confirm/reject with audit, provenance preservation, and rediscovery
+    survival for every reviewable kind."""
+    from app.models.enterprise_process import OrgUnit
+
+    s = env
+
+    def full_llm(prompt, schema=None, endpoint=None):
+        out = _llm_from_prompt(prompt)
+        ids = sorted(set(re.findall(r"\[ev-\d+\]", prompt)))
+        use = [i[1:-1] for i in ids][:12]
+        out["org_units"] = [{"name": "Procurement Department",
+                             "unit_type": "department",
+                             "evidence_ids": use[:1]}]
+        out["capabilities"] = [{"name": "Procurement",
+                                "description": "Purchase goods",
+                                "evidence_ids": use[:2]}]
+        return out
+
+    ed.propose_operating_model(s, ORG, llm_fn=full_llm)
+    client = _client(s, _admin())
+
+    # viewer cannot see the review queue
+    assert _client(s, _viewer()).get(
+        "/api/ontology/enterprise/review-queue").status_code == 403
+
+    q = client.get("/api/ontology/enterprise/review-queue").json()
+    assert q["counts"] == {"org_units": 1, "capabilities": 1, "processes": 1,
+                           "activities": 2, "evidence": q["counts"]["evidence"]}
+    assert q["counts"]["evidence"] > 0
+    unit = q["org_units"][0]
+    assert unit["discovery_method"] == "ai_proposal"
+    assert unit["evidence_ids"]
+    act = q["activities"][0]
+    assert act["performer"] == "Procurement Department"
+    ev = q["evidence"][0]
+    assert ev["quote"] and ev["source_ref"]
+
+    # confirm the unit + capability (generic endpoint)
+    r = client.post(f"/api/ontology/enterprise/org_unit/{unit['id']}/confirm")
+    assert r.status_code == 200 and r.json()["evidence_status"] == "verified"
+    cap = q["capabilities"][0]
+    r4 = client.post(f"/api/ontology/enterprise/capability/{cap['id']}/confirm")
+    assert r4.status_code == 200 and r4.json()["evidence_status"] == "verified"
+
+    # reject an activity with a reason
+    r2 = client.post(f"/api/ontology/enterprise/activity/{act['id']}/reject",
+                     json={"reason": "performer not evidenced"})
+    assert r2.status_code == 200
+    assert r2.json()["evidence_status"] == "rejected"
+    assert r2.json()["review_history"][-1]["reason"] == "performer not evidenced"
+
+    # reject one evidence row
+    r3 = client.post(f"/api/ontology/enterprise/evidence/{ev['id']}/reject",
+                     json={"reason": "quote out of context"})
+    assert r3.status_code == 200 and r3.json()["evidence_status"] == "rejected"
+
+    # viewer cannot review
+    assert _client(s, _viewer()).post(
+        f"/api/ontology/enterprise/org_unit/{unit['id']}/reject").status_code == 403
+
+    # audits written per kind, AI provenance preserved
+    s.expire_all()
+    kinds = {a.event_type for a in s.query(AuditEvent).filter(
+        AuditEvent.event_type.in_(["org_unit_confirmed",
+                                   "business_capability_confirmed",
+                                   "process_activity_rejected",
+                                   "process_evidence_rejected"])).all()}
+    assert kinds == {"org_unit_confirmed", "business_capability_confirmed",
+                     "process_activity_rejected", "process_evidence_rejected"}
+    urow = s.query(OrgUnit).filter(OrgUnit.id == unit["id"]).one()
+    assert urow.provenance_json["discovery_method"] == "ai_proposal"
+    assert urow.provenance_json["evidence_ids"]
+
+    # rediscovery: human decisions survive on EVERY kind; queue shrinks
+    result = ed.propose_operating_model(s, ORG, llm_fn=full_llm)
+    assert result["proposals_created"] == 0
+    s.expire_all()
+    q2 = client.get("/api/ontology/enterprise/review-queue").json()
+    assert q2["counts"]["org_units"] == 0
+    assert q2["counts"]["capabilities"] == 0
+    assert q2["counts"]["activities"] == 1  # rejected one stays out
+    assert q2["counts"]["evidence"] == q["counts"]["evidence"] - 1
+    rejected_unit = s.query(OrgUnit).filter(OrgUnit.id == unit["id"]).one()
+    assert rejected_unit.evidence_status == "verified"
+    hist = rejected_unit.provenance_json["review_history"]
+    assert [h["decision"] for h in hist] == ["confirmed"]
+
+    # unknown kind → 404 (honest)
+    assert client.post(
+        "/api/ontology/enterprise/nonsense/x/confirm").status_code == 404
+
+
 def test_enterprise_map_aggregates_persisted_structure(env):
     """Increment 4 — map aggregation: units/capabilities/families/processes
     + performer relationships, org-scoped, only persisted links."""
