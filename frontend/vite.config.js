@@ -23,7 +23,8 @@ export default defineConfig({
       // Without this, requests to /api/apps/.../integration-endpoints/Core/InvokeLLMStream
       // would 404 on Vite and the agent would never reply.
       '/api': {
-        target: 'http://localhost:5002',
+        // Overridable for parallel dev stacks (e.g. VITE_API_PROXY_TARGET=http://localhost:5003).
+        target: process.env.VITE_API_PROXY_TARGET || 'http://localhost:5002',
         changeOrigin: true,
         ws: false,
       },

@@ -815,7 +815,7 @@ function GovernedActionCard({ a, onExecuted }) {
                 : result.blocked ? 'border border-amber-200 bg-amber-50/60 text-amber-800'
                 : 'border border-red-200 bg-red-50/60 text-red-700'}`}>
               {result.success
-                ? <span>Executed under approval {result.approval_id} (approved by {result.approved_by || 'admin'}) — result recorded.</span>
+                ? <span>Executed under approval {result.approval_id} (approved by {result.approved_by || 'admin'}){result.result?.external_ref ? ` — ERP ref ${result.result.external_ref}` : ''} — result recorded.</span>
                 : result.blocked === 'confirmation_required'
                   ? <span>Blocked: the approval is not granted yet — this decision stays pending until an org admin approves it.</span>
                   : <span>Refused: {result.reason}</span>}
@@ -838,7 +838,9 @@ function DecisionCenter() {
         authFetch('/api/ontology/po-drafts'),
         authFetch('/api/ontology/actions'),
       ]);
-      if (e.ok) setEscalations((await e.json()).escalations || []);
+      // /escalations returns a bare array — normalize both shapes.
+      const ej = e.ok ? await e.json() : [];
+      setEscalations(Array.isArray(ej) ? ej : ej.escalations || []);
       if (d.ok) setDrafts(await d.json());
       if (a.ok) setActions(await a.json());
     } catch { toast.error('Failed to load decision center'); }
@@ -861,7 +863,7 @@ function DecisionCenter() {
           <div key={e.id} className="rounded-xl border border-stone-200 bg-white px-4 py-3 mb-2">
             <div className="flex items-center gap-2">
               <ShieldAlert size={14} className="text-amber-600" />
-              <span className="text-[13px] font-medium text-stone-800">{e.title || e.entity_name || e.id}</span>
+              <span className="text-[13px] font-medium text-stone-800">{e.summary?.slice(0, 70) || e.id}</span>
               <span className="text-[10px] text-stone-400 ml-auto">{e.status}</span>
             </div>
             {e.summary && <p className="mt-1 text-[11px] text-stone-600">{e.summary}</p>}
@@ -1056,7 +1058,8 @@ function OutcomeTracking() {
         authFetch('/api/ontology/outcomes'),
       ]);
       if (d.ok) setDrafts(await d.json());
-      if (e.ok) setEscalations((await e.json()).escalations || []);
+      const ej = e.ok ? await e.json() : [];
+      setEscalations(Array.isArray(ej) ? ej : ej.escalations || []);
       if (o.ok) setOutcomes((await o.json()).outcomes || []);
     } catch { toast.error('Failed to load outcome tracking'); }
   }, []);

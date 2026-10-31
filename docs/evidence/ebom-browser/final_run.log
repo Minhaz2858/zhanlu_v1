@@ -1,0 +1,32 @@
+PASS — api login
+PASS — decision fixture seeded
+PASS — outcome recorded via API ({"success":true,"outcome":{"id":"7bd207c0-2c25-41ac-ae8c-07613b468912","org_id":"org-sandbox","approval_id":"apr-browser)
+PASS — second outcome recorded ({"success":true,"outcome":{"id":"9207248c-86d4-4b49-ada5-b2c021c897a3","org_id":"org-sandbox","approval_id":"apr-browser)
+PASS — ui login
+PASS — A: KPI section renders
+PASS — A: governed gross margin value
+PASS — A: provenance shown
+PASS — A: prior-period delta in definition
+PASS — A: governed SQL trace
+PASS — C: entity detail opens
+PASS — C: governed metrics panel
+PASS — C: evidence panel
+PASS — B: agent investigation returned
+PASS — B: verified findings panel
+PASS — B: hypotheses separated
+PASS — D: escalation visible
+PASS — D: approval-gated action listed
+PASS — D: unauthorized execution refused
+PASS — D: approved execution succeeds
+PASS — D: sandbox ERP ref recorded
+PASS — E: outcome card shows expected vs measured
+PASS — E: lifecycle timeline
+PASS — E: measured realized impact (-80)
+PASS — E: pending outcome measured via UI
+PASS — E: verified badge
+PASS — E: full lifecycle traced
+PASS — F: totals render
+PASS — F: coverage map
+
+==== SUMMARY ====
+29/29 checks passed

@@ -195,6 +195,7 @@ def build_sandbox(session, data_db_path: str) -> None:
         table_name="sales_transactions", table_type="TABLE",
         table_role="fact", grain="one row = one sale line")
     session.add(tmeta)
+    session.flush()  # FK order: Postgres enforces; the UOW does not sort raw FKs
     session.add(KBColumnMeta(
         table_meta_id="tm-sales", column_name="sale_amount",
         ordinal=2, data_type="REAL", is_primary_key=False))

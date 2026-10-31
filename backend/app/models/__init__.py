@@ -88,6 +88,8 @@ from app.models.ontology_sensor import (  # P3-2: scheduled sensing pipeline
     OntologySensorRun,
 )
 from app.models.escalation import Escalation  # P3-6: structured human handoff
+from app.models.outcome import OutcomeMeasurement  # EBOM B: governed outcomes
+from app.models.erp import ErpSubmission  # EBOM C: ERP submission ledger
 from app.models.nl2sql_query_log import Nl2sqlQueryLog  # Gap 4: literacy mining source
 from app.models.removed_curated_url import RemovedCuratedUrl
 from app.models.hook_rule import HookRule
