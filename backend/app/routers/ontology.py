@@ -971,6 +971,102 @@ class ResolveBody(BaseModel):
     note: str | None = None
 
 
+# --- EBOM Workstream B: outcome measurement (expected → measured → verified) --
+
+class OutcomeRecordBody(BaseModel):
+    metric_ref: str
+    direction: str = "increase"
+    baseline_period: str
+    observed_period: str
+    expected_impact: float | None = None
+    approval_id: str | None = None
+    action_id: str | None = None
+    escalation_id: str | None = None
+    draft_id: str | None = None
+
+
+class OutcomeVerifyBody(BaseModel):
+    decision: str | None = None
+    evidence_refs: dict | None = None
+
+
+@router.get("/ontology/outcomes")
+def list_outcomes_ep(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    from app.services.ontology.outcomes import list_outcomes
+
+    return list_outcomes(db, user.org_id)
+
+
+@router.post("/ontology/outcomes")
+def record_outcome_ep(
+    body: OutcomeRecordBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Declare expected impact + governed baseline snapshot (org-admin)."""
+    from app.services.ontology.outcomes import record_outcome
+
+    return record_outcome(
+        db, admin.org_id, metric_ref=body.metric_ref, direction=body.direction,
+        baseline_period=body.baseline_period,
+        observed_period=body.observed_period,
+        expected_impact=body.expected_impact, approval_id=body.approval_id,
+        action_id=body.action_id, escalation_id=body.escalation_id,
+        draft_id=body.draft_id)
+
+
+@router.post("/ontology/outcomes/{outcome_id}/measure")
+def measure_outcome_ep(
+    outcome_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Governed recomputation of the observed period — deterministic delta."""
+    from app.services.ontology.outcomes import measure_outcome
+
+    return measure_outcome(db, user.org_id, outcome_id,
+                           measured_by=getattr(user, "id", None))
+
+
+@router.post("/ontology/outcomes/{outcome_id}/verify")
+def verify_outcome_ep(
+    outcome_id: str,
+    body: OutcomeVerifyBody,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Authorized reviewer certifies the measured impact (org-admin ONLY)."""
+    from app.services.ontology.outcomes import verify_outcome
+
+    result = verify_outcome(
+        db, admin.org_id, outcome_id, verified_by=getattr(admin, "id", None),
+        decision=body.decision, evidence_refs=body.evidence_refs)
+    if not result.get("success") and "not found" in (result.get("reason") or ""):
+        raise HTTPException(404, result["reason"])
+    if not result.get("success") and "verify requires" in (result.get("reason") or ""):
+        raise HTTPException(400, result["reason"])
+    return result
+
+
+@router.get("/ontology/decisions/{decision_ref}/lifecycle")
+def decision_lifecycle_ep(
+    decision_ref: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """The complete decision lifecycle from EXISTING records (EBOM Workstream D):
+    problem → approval → execution → measurement → verification."""
+    from app.services.ontology.lifecycle import decision_lifecycle
+
+    result = decision_lifecycle(db, user.org_id, decision_ref)
+    if result.get("not_found"):
+        raise HTTPException(404, result["reason"])
+    return result
+
+
 @router.get("/ontology/escalations")
 def list_escalations_ep(
     status: str | None = Query(default=None),

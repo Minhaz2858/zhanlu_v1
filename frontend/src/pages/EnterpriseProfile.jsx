@@ -911,43 +911,178 @@ function DecisionCenter() {
 // ---------------------------------------------------------------------------
 // E. BUSINESS OUTCOME TRACKING
 // ---------------------------------------------------------------------------
+const IMPACT_FMT = (v, unit) => (v == null ? '—'
+  : `${v > 0 ? '+' : ''}${Number(v).toLocaleString()}${unit ? ` ${unit}` : ''}`);
+
+function OutcomeCard({ o, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const act = async (verb) => {
+    setBusy(true);
+    try {
+      const res = await authFetch(`/api/ontology/outcomes/${o.id}/${verb}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: verb === 'verify' ? JSON.stringify({ decision: 'verified in Outcome Tracking' }) : undefined,
+      });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        toast.error(data.detail || data.reason || `HTTP ${res.status}`);
+      } else {
+        toast.success(verb === 'measure' ? 'Measured via governed metrics' : 'Outcome verified');
+        onChanged?.();
+      }
+    } catch (e) { toast.error(`${verb} failed: ${e.message || e}`); }
+    finally { setBusy(false); }
+  };
+  const vBadge = { verified: 'border-emerald-200 bg-emerald-50 text-emerald-700', rejected: 'border-red-200 bg-red-50 text-red-600' }[o.verification_status]
+    || 'border-stone-200 bg-stone-50 text-stone-500';
+  const good = o.realized_impact != null && o.realized_impact > 0;
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 mb-2">
+      <div className="flex items-center gap-2">
+        <Target size={14} className="text-stone-500" />
+        <span className="text-[13px] font-medium text-stone-800">{o.metric_name}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">{o.direction}</span>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${vBadge}`}>{o.verification_status}</span>
+        <span className="ml-auto text-[10px] text-stone-400">{o.baseline_period} → {o.observed_period}</span>
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-stone-400">Expected</div>
+          <div className="text-stone-700">{IMPACT_FMT(o.expected_impact, o.unit)}</div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-stone-400">Measured (realized)</div>
+          <div className={o.realized_impact == null ? 'text-stone-400' : good ? 'text-emerald-700' : 'text-red-600'}>
+            {o.measurement_status === 'pending' ? 'not yet measured' : IMPACT_FMT(o.realized_impact, o.unit)}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-stone-400">Governed values</div>
+          <div className="text-stone-600">{Number(o.baseline_value).toLocaleString()} → {o.observed_value != null ? Number(o.observed_value).toLocaleString() : '—'}</div>
+        </div>
+      </div>
+      {o.verification_status === 'verified' && (
+        <p className="mt-1.5 text-[10px] text-emerald-700">
+          Verified by {o.verified_by}{o.verified_at ? ` · ${new Date(o.verified_at).toLocaleString()}` : ''}{o.verification_note ? ` — ${o.verification_note}` : ''}
+        </p>
+      )}
+      <div className="mt-2 flex items-center gap-2">
+        <span className="text-[10px] text-stone-400">baseline & observed computed by the governed MetricDefinition — the LLM never calculates impact</span>
+        <div className="ml-auto flex items-center gap-1.5">
+          {o.measurement_status !== 'measured' && o.verification_status !== 'verified' && (
+            <button onClick={() => act('measure')} disabled={busy}
+              className="text-[11px] px-2.5 py-1 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50 disabled:opacity-50">Measure</button>
+          )}
+          {o.measurement_status === 'measured' && o.verification_status !== 'verified' && (
+            <button onClick={() => act('verify')} disabled={busy}
+              className="text-[11px] px-2.5 py-1 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">Verify</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LifecycleChain() {
+  const [ref, setRef] = useState('');
+  const [chain, setChain] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    const id = (ref || '').trim();
+    if (!id) return;
+    setBusy(true); setErr(null); setChain(null);
+    try {
+      const res = await authFetch(`/api/ontology/decisions/${encodeURIComponent(id)}/lifecycle`);
+      const data = await res.json();
+      if (res.status === 404) setErr(data.detail || 'No decision record found for this reference in your organization.');
+      else if (!res.ok) setErr(data.detail || `HTTP ${res.status}`);
+      else setChain(data);
+    } catch (e) { setErr(e.message || String(e)); }
+    finally { setBusy(false); }
+  };
+  const STAGE_LABELS = {
+    problem: 'Problem detected', approval: 'Decision approved',
+    execution: 'Action executed', measurement: 'Impact measured',
+    verification: 'Outcome verified',
+  };
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+      <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Decision lifecycle — trace any decision end to end</div>
+      <div className="flex items-center gap-2">
+        <input value={ref} onChange={(e) => setRef(e.target.value)}
+          placeholder="escalation / approval / PO draft / outcome id"
+          className="flex-1 border border-stone-200 rounded-md px-2.5 py-1.5 text-[11px]" />
+        <button onClick={load} disabled={busy || !ref.trim()}
+          className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <GitBranch size={12} />} Trace
+        </button>
+      </div>
+      {err && <p className="mt-2 text-[11px] text-red-600">{err}</p>}
+      {chain && (
+        <div className="mt-2 space-y-1">
+          {chain.chain.map(([stage, present]) => (
+            <div key={stage} className="flex items-center gap-2 text-[11px] py-1">
+              {present
+                ? <CheckCircle2 size={12} className="text-emerald-600" />
+                : <span className="w-3 h-3 rounded-full border border-stone-300 inline-block" />}
+              <span className={present ? 'text-stone-700' : 'text-stone-400'}>{STAGE_LABELS[stage] || stage}</span>
+              {!present && <span className="text-[10px] text-stone-400">— no record yet (honest absence)</span>}
+            </div>
+          ))}
+          {chain.stages.execution?.erp_submissions?.map((x) => (
+            <p key={x.id} className="text-[10px] text-stone-500">
+              ERP: {x.connector_id} · {x.status}{x.external_ref ? ` · ref ${x.external_ref}` : ''}
+            </p>
+          ))}
+          {chain.stages.verification?.note && (
+            <p className="text-[10px] text-emerald-700">verified: {chain.stages.verification.note} (by {chain.stages.verification.verified_by})</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OutcomeTracking() {
   const [drafts, setDrafts] = useState(null);
   const [escalations, setEscalations] = useState(null);
-  const [revisions, setRevisions] = useState(null);
-  useEffect(() => {
-    (async () => {
-      try {
-        const [d, e, r] = await Promise.all([
-          authFetch('/api/ontology/po-drafts'),
-          authFetch('/api/ontology/escalations'),
-          authFetch('/api/ontology/revisions'),
-        ]);
-        if (d.ok) setDrafts(await d.json());
-        if (e.ok) setEscalations((await e.json()).escalations || []);
-        if (r.ok) setRevisions((await r.json()).revisions || []);
-      } catch { toast.error('Failed to load outcome tracking'); }
-    })();
+  const [outcomes, setOutcomes] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const [d, e, o] = await Promise.all([
+        authFetch('/api/ontology/po-drafts'),
+        authFetch('/api/ontology/escalations'),
+        authFetch('/api/ontology/outcomes'),
+      ]);
+      if (d.ok) setDrafts(await d.json());
+      if (e.ok) setEscalations((await e.json()).escalations || []);
+      if (o.ok) setOutcomes((await o.json()).outcomes || []);
+    } catch { toast.error('Failed to load outcome tracking'); }
   }, []);
+  useEffect(() => { load(); }, [load]);
   const openEsc = (escalations || []).filter((x) => x.status !== 'resolved');
   const resolvedEsc = (escalations || []).filter((x) => x.status === 'resolved');
   const approvedDrafts = (drafts || []).filter((x) => x.status === 'approved');
+  const measured = (outcomes || []).filter((x) => x.measurement_status === 'measured');
+  const verified = (outcomes || []).filter((x) => x.verification_status === 'verified');
   const steps = [
     ['Problem detected', openEsc.length ? `${openEsc.length} open` : escalations ? 'none open' : '…'],
     ['Evidence collected', 'governed metrics + document evidence'],
     ['Recommendation generated', escalations?.length ? `${escalations.length} escalated` : 'none yet'],
     ['Decision reviewed', resolvedEsc.length ? `${resolvedEsc.length} resolved` : 'pending'],
     ['Action approved', approvedDrafts.length ? `${approvedDrafts.length} approval-gated write(s)` : 'none yet'],
-    ['Action executed', approvedDrafts.length ? 'recorded — ERP entry by the buyer (no write connector yet)' : '—'],
-    ['Outcome measured', 'not yet wired'],
+    ['Action executed', approvedDrafts.length ? 'recorded — governed ERP submission available' : '—'],
+    ['Impact measured', measured.length ? `${measured.length} governed measurement(s)` : 'pending'],
+    ['Outcome verified', verified.length ? `${verified.length} verified` : 'pending'],
   ];
   return (
     <div className="space-y-4">
       <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><Activity size={15} className="text-stone-600" /> Business Outcome Tracking</h2>
-      <span className="text-[11px] text-stone-400">the complete decision lifecycle — only realized value is reported when supporting measurement exists</span>
+      <span className="text-[11px] text-stone-400">expected ≠ measured ≠ verified — realized impact is a governed delta, certified by an authorized reviewer</span>
       <div className="rounded-xl border border-stone-200 bg-white px-4 py-4">
         {steps.map(([label, state], i) => {
-          const done = !['…', 'pending', 'none yet', '—', 'not yet wired', 'none open'].includes(state);
+          const done = !['…', 'pending', 'none yet', '—', 'none open'].includes(state);
           return (
             <div key={i} className="flex items-center gap-3 py-2">
               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] ${done ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-100 text-stone-400'}`}>{i + 1}</div>
@@ -957,31 +1092,16 @@ function OutcomeTracking() {
           );
         })}
       </div>
-      {approvedDrafts.length > 0 && (
-        <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-          <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Per-decision lifecycle (approval-gated writes)</div>
-          {approvedDrafts.map((d) => (
-            <div key={d.id} className="py-1.5 border-b border-stone-100 last:border-0 text-[11px] text-stone-600">
-              <span className="text-stone-800 font-medium">{d.supplier_name}</span>
-              {' · '}{d.product} · {d.currency || ''} {d.est_amount != null ? Number(d.est_amount).toLocaleString() : '—'}
-              <span className="ml-2 text-[10px] text-stone-400">
-                approved write recorded{d.approval_id ? ` (approval ${String(d.approval_id).slice(0, 8)}…)` : ''} → ERP entry pending buyer → outcome measurement not yet wired
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-      {revisions && revisions.length > 0 && (
-        <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-600">
-          <span className="text-[10px] uppercase tracking-wide text-stone-400">Governance trail </span>
-          {revisions.length} append-only revision(s) recorded — every ontology change is traceable (audit preserved).
-        </div>
-      )}
-      <div className="rounded-xl border border-amber-200 bg-amber-50/40 px-4 py-3 text-[11px] text-stone-600">
-        Realized financial/operational outcome measurement is not yet wired to a measurement service.
-        When connected, actual-vs-expected deltas will appear here — no ROI is reported until it can be
-        supported by actual measurements.
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Outcome measurements ({outcomes ? outcomes.length : '…'})</div>
+        {outcomes && outcomes.length === 0 && (
+          <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">
+            No outcome measurements recorded yet — record one after a governed action executes.
+          </div>
+        )}
+        {(outcomes || []).map((o) => <OutcomeCard key={o.id} o={o} onChanged={load} />)}
       </div>
+      <LifecycleChain />
     </div>
   );
 }

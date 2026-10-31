@@ -67,6 +67,7 @@ from app.services.tool_handlers import cronjob_tool  # noqa: F401
 from app.services.tool_handlers import query_database_tool  # noqa: F401 — Phase 2: FSM boxed as a tool
 from app.services.tool_handlers import ontology_tool  # noqa: F401 — P0-2: enterprise ontology
 from app.services.tool_handlers import po_draft_tool  # noqa: F401 — P0-4: first write-back
+from app.services.tool_handlers import erp_submit_tool  # noqa: F401 — EBOM C: governed ERP write-back
 from app.services.tool_handlers import ontology_tools  # noqa: F401 — P1-3/P2-1: fan-out + directory
 from app.services.tool_handlers import quote_invoice_tools  # noqa: F401 — P3-9/P3-12: invoice matching + quotes
 from app.services.tool_handlers import clarify_tool  # noqa: F401
