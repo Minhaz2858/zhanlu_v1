@@ -267,7 +267,20 @@ def disconnect_mcp_server(
     server.is_deleted = True
     db.add(server)
     db.commit()
-    return {"success": True}
+
+    # Phase 0B: enterprise orphan cleanup (org-scoped, idempotent,
+    # audited). Failure is surfaced, never silently reported as clean.
+    cleanup_payload: dict | None = None
+    try:
+        from app.services.enterprise.cleanup import handle_resource_deleted
+        cleanup_payload = handle_resource_deleted(
+            db, resource_type="mcp_server", resource_id=server.id,
+            org_id=server.org_id, actor_id=getattr(user, "id", None),
+        )
+    except Exception as exc:  # noqa: BLE001 — surface, don't undo
+        logger.exception("post-delete cleanup failed for MCP server %s", server.id)
+        cleanup_payload = {"cleanup_error": str(exc)[:300]}
+    return {"success": True, "cleanup": cleanup_payload}
 
 
 @router.get("/mcp/servers/{server_id}/tools")

@@ -298,6 +298,15 @@ def _check_shareable_write(
         )
 
 
+# Phase 0B (2026-11-01): entity types whose deletion triggers enterprise
+# orphan cleanup (app/services/enterprise/cleanup.py).
+_ENTITY_RESOURCE_TYPES = {
+    "KnowledgeBase": "knowledge_base",
+    "McpServer": "mcp_server",
+    "AutomationTask": "automation_task",
+}
+
+
 def register_entity_router(
     entity_name: str,
     model_class: Type[Base],
@@ -556,7 +565,30 @@ def register_entity_router(
         )
         if not success:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
-        return {"deleted": True, "id": record_id}
+        # Phase 0B: orphan cleanup for enterprise resource types — runs
+        # AFTER authorization + soft-delete, org-scoped, idempotent. A
+        # cleanup failure is surfaced (never reported as clean success)
+        # but does not undo the caller-authorized deletion.
+        resource_type = _ENTITY_RESOURCE_TYPES.get(entity_name)
+        cleanup_payload: dict | None = None
+        if resource_type:
+            try:
+                from app.services.enterprise.cleanup import handle_resource_deleted
+                cleanup_payload = handle_resource_deleted(
+                    db, resource_type=resource_type, resource_id=record_id,
+                    org_id=org_id, actor_id=getattr(user, "id", None),
+                )
+            except LookupError:
+                pass  # nothing to clean (defensive; soft-delete already verified)
+            except Exception as exc:  # noqa: BLE001 — surface, don't undo
+                logger.exception(
+                    "post-delete cleanup failed for %s %s (org %s)",
+                    entity_name, record_id, org_id)
+                cleanup_payload = {"cleanup_error": str(exc)[:300]}
+        response: dict = {"deleted": True, "id": record_id}
+        if cleanup_payload is not None:
+            response["cleanup"] = cleanup_payload
+        return response
 
     return router
 

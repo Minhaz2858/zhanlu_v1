@@ -303,3 +303,20 @@ Wired at all three runtime entry points in `app/routers/agents.py`:
 Note: an in-flight conversation whose share is revoked now fails closed on the next message (documented behavior; the conversation creator retains access as creator).
 
 Tests: `tests/test_project_access_authorization.py` (9) — creator/admin/'use'-share authorized, unauthorized same-org 404, cross-org 404 even for a foreign admin, missing/deleted degrade, 'view' share insufficient, system projects in-org runnable, message resolver 404 on id AND name spoofing with stale-id fallback, and the creation endpoint enforcing the same wall. Focused regression: 49 passed incl. the pre-existing `test_global_chat_project_resolution.py` (legacy resolution behavior preserved; `llm_router.py` itself untouched).
+
+### Phase 0B — Resource Deletion & Orphan Cleanup (2026-11-01, DONE)
+
+New `app/services/enterprise/cleanup.py` — `handle_resource_deleted(db, resource_type, resource_id, org_id, actor_id)`:
+- Supported types: `knowledge_base`, `mcp_server`, `automation_task`, `datasource` (the last has NO deletion endpoint today — documented limitation; supported for programmatic callers).
+- **Catalog** (database KBs): soft-deletes `KBTableMeta`/`KBColumnMeta`/`KBTableRelation` — history preserved, resource never queryable as live.
+- **Agent bindings:** soft-deletes `AgentDataBinding` rows referencing the resource; surgically removes the id from `AgentApp.knowledge_bases` JSON arrays (unrelated ids survive; other-org apps untouched).
+- **Ontology:** objects with `backing_kind='table'` and `backing_ref='kb:<id>:…'` → `binding_status='orphaned'` + backing_ref CLEARED (cannot resolve to live data) with the prior ref preserved in `provenance_json.orphaned_backings` + audit. Objects, links, review decisions untouched; nothing deleted.
+- **EBPM:** matching `EnterpriseResource` inventory rows soft-deleted with `status_json.deleted` markers; `ProcessEvidence` never modified.
+- **Audit:** one `resource_deleted` AuditEvent with per-component counts (no resource contents).
+- Org isolation fail-closed: resource row must exist in `org_id` (`LookupError`), cross-org → `PermissionError`; both leave zero writes. Idempotent (second run = zero-effect counts). Caller-commit convention; failure → rollback + re-raise, callers surface `cleanup_error` instead of claiming clean success.
+
+Wired into BOTH real deletion paths (post-authorization): generic entity DELETE (`entities.py`, hook map `_ENTITY_RESOURCE_TYPES`) and the dedicated MCP disconnect (`mcp.py`); response contracts extended additively (`cleanup` key). Double-cleanup across the two MCP paths is safe by idempotency.
+
+Unsupported/limitations: `Datasource` has no deletion endpoint (cleanup supported programmatically only); `EnterpriseResource` for `agent`/`ontology`/`action_interface` kinds cleans only when their ref_id matches the deleted resource id; agent-side MCP grants (`granted_agents`) are handled by the pre-existing MCP unregister flow, not the cleanup service.
+
+Tests: `tests/test_enterprise_cleanup.py` (8) — catalog/binding/ontology/EBPM behavior, unrelated-binding survival, other-org immunity, object+link survival with verified status preserved, evidence survival, cross-org rejection with zero writes, idempotency, missing-records safety, type coverage. Regression: 55 passed across entity tenant-scoping/router/master-filter/backing suites.
