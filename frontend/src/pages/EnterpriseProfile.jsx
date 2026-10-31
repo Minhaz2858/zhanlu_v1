@@ -758,14 +758,89 @@ function SituationRoom() {
 // ---------------------------------------------------------------------------
 // D. DECISION & ACTION CENTER
 // ---------------------------------------------------------------------------
+function GovernedActionCard({ a, onExecuted }) {
+  const [open, setOpen] = useState(false);
+  const [approvalId, setApprovalId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const execute = async () => {
+    const id = (approvalId || '').trim();
+    if (!id) return;
+    setBusy(true); setResult(null);
+    try {
+      const res = await authFetch(`/api/ontology/actions/${encodeURIComponent(a.id)}/execute-approved`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approval_id: id }),
+      });
+      const data = await res.json();
+      setResult(data);
+      if (data.success) { toast.success('Governed action executed under approval'); onExecuted?.(); }
+    } catch (e) {
+      setResult({ success: false, reason: e.message || String(e) });
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 mb-2">
+      <div className="flex items-center gap-2">
+        <ShieldCheck size={14} className={a.risk_level === 'write' ? 'text-amber-600' : 'text-stone-400'} />
+        <span className="text-[13px] font-medium text-stone-800">{a.name}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">{a.risk_level}</span>
+        {a.tool_name && <span className="text-[10px] text-stone-400">tool: {a.tool_name}</span>}
+        <button onClick={() => setOpen(!open)}
+          className="ml-auto text-[11px] px-2.5 py-1 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50">
+          {open ? 'Close' : 'Execute…'}
+        </button>
+      </div>
+      {open && (
+        <div className="mt-2 space-y-2">
+          <p className="text-[10px] text-stone-400">
+            A write runs ONLY under an org-scoped approval bound to this exact
+            action + tool (governance gate: pending, wrong-org, expired or
+            param-drifted approvals are refused — fail closed).
+          </p>
+          <div className="flex items-center gap-2">
+            <input value={approvalId} onChange={(e) => setApprovalId(e.target.value)}
+              placeholder="approval id (from the governance review)"
+              className="flex-1 border border-stone-200 rounded-md px-2.5 py-1.5 text-[11px]" />
+            <button onClick={execute} disabled={busy || !approvalId.trim()}
+              className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">
+              {busy ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
+              Execute
+            </button>
+          </div>
+          {result && (
+            <div className={`rounded-lg px-3 py-2 text-[11px] ${
+              result.success ? 'border border-emerald-200 bg-emerald-50/60 text-emerald-800'
+                : result.blocked ? 'border border-amber-200 bg-amber-50/60 text-amber-800'
+                : 'border border-red-200 bg-red-50/60 text-red-700'}`}>
+              {result.success
+                ? <span>Executed under approval {result.approval_id} (approved by {result.approved_by || 'admin'}) — result recorded.</span>
+                : result.blocked === 'confirmation_required'
+                  ? <span>Blocked: the approval is not granted yet — this decision stays pending until an org admin approves it.</span>
+                  : <span>Refused: {result.reason}</span>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DecisionCenter() {
   const [escalations, setEscalations] = useState(null);
   const [drafts, setDrafts] = useState(null);
+  const [actions, setActions] = useState(null);
   const load = useCallback(async () => {
     try {
-      const [e, d] = await Promise.all([authFetch('/api/ontology/escalations'), authFetch('/api/ontology/po-drafts')]);
+      const [e, d, a] = await Promise.all([
+        authFetch('/api/ontology/escalations'),
+        authFetch('/api/ontology/po-drafts'),
+        authFetch('/api/ontology/actions'),
+      ]);
       if (e.ok) setEscalations((await e.json()).escalations || []);
       if (d.ok) setDrafts(await d.json());
+      if (a.ok) setActions(await a.json());
     } catch { toast.error('Failed to load decision center'); }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -773,6 +848,7 @@ function DecisionCenter() {
     try { const res = await authFetch(`/api/ontology/escalations/${id}/resolve`, { method: 'POST' }); if (!res.ok) throw new Error(`HTTP ${res.status}`); toast.success('Escalation resolved'); await load(); }
     catch (e) { toast.error(`Resolve failed: ${e.message || e}`); }
   };
+  const writeActions = (actions || []).filter((a) => a.risk_level === 'write' && a.is_active !== false);
   return (
     <div className="space-y-4">
       <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><Workflow size={15} className="text-stone-600" /> Decision & Action Center</h2>
@@ -808,6 +884,25 @@ function DecisionCenter() {
             <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full border ${d.status === 'approved' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>{d.status}</span>
           </div>
         ))}
+        {drafts && drafts.length > 0 && (
+          <p className="mt-1 text-[10px] text-stone-400">
+            drafts are born approved — the governing approval already happened before the
+            write was allowed; the buyer edits → exports → enters them in the ERP
+            (direct ERP writes stay out of scope until a write connector exists).
+          </p>
+        )}
+      </div>
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Governed write actions ({writeActions.length})</div>
+        {!actions && <div className="text-[11px] text-stone-400"><Loader2 size={14} className="animate-spin inline mr-2" />Loading…</div>}
+        {actions && writeActions.length === 0 && (
+          <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">
+            No active write-type actions bound in this organization.
+          </div>
+        )}
+        {writeActions.map((a) => (
+          <GovernedActionCard key={a.id} a={a} onExecuted={load} />
+        ))}
       </div>
     </div>
   );
@@ -819,22 +914,31 @@ function DecisionCenter() {
 function OutcomeTracking() {
   const [drafts, setDrafts] = useState(null);
   const [escalations, setEscalations] = useState(null);
+  const [revisions, setRevisions] = useState(null);
   useEffect(() => {
     (async () => {
       try {
-        const [d, e] = await Promise.all([authFetch('/api/ontology/po-drafts'), authFetch('/api/ontology/escalations')]);
+        const [d, e, r] = await Promise.all([
+          authFetch('/api/ontology/po-drafts'),
+          authFetch('/api/ontology/escalations'),
+          authFetch('/api/ontology/revisions'),
+        ]);
         if (d.ok) setDrafts(await d.json());
         if (e.ok) setEscalations((await e.json()).escalations || []);
+        if (r.ok) setRevisions((await r.json()).revisions || []);
       } catch { toast.error('Failed to load outcome tracking'); }
     })();
   }, []);
+  const openEsc = (escalations || []).filter((x) => x.status !== 'resolved');
+  const resolvedEsc = (escalations || []).filter((x) => x.status === 'resolved');
+  const approvedDrafts = (drafts || []).filter((x) => x.status === 'approved');
   const steps = [
-    ['Problem detected', escalations?.some((x) => x.status !== 'resolved') ? 'active' : 'idle'],
+    ['Problem detected', openEsc.length ? `${openEsc.length} open` : escalations ? 'none open' : '…'],
     ['Evidence collected', 'governed metrics + document evidence'],
-    ['Recommendation generated', escalations && escalations.length ? 'active' : 'idle'],
-    ['Decision reviewed', drafts ? 'active' : 'idle'],
-    ['Action approved', drafts?.some((x) => x.status === 'approved') ? 'active' : 'idle'],
-    ['Action executed', drafts?.some((x) => x.status === 'approved') ? 'active' : 'idle'],
+    ['Recommendation generated', escalations?.length ? `${escalations.length} escalated` : 'none yet'],
+    ['Decision reviewed', resolvedEsc.length ? `${resolvedEsc.length} resolved` : 'pending'],
+    ['Action approved', approvedDrafts.length ? `${approvedDrafts.length} approval-gated write(s)` : 'none yet'],
+    ['Action executed', approvedDrafts.length ? 'recorded — ERP entry by the buyer (no write connector yet)' : '—'],
     ['Outcome measured', 'not yet wired'],
   ];
   return (
@@ -842,15 +946,37 @@ function OutcomeTracking() {
       <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><Activity size={15} className="text-stone-600" /> Business Outcome Tracking</h2>
       <span className="text-[11px] text-stone-400">the complete decision lifecycle — only realized value is reported when supporting measurement exists</span>
       <div className="rounded-xl border border-stone-200 bg-white px-4 py-4">
-        {steps.map(([label, state], i) => (
-          <div key={i} className="flex items-center gap-3 py-2">
-            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] ${state === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-100 text-stone-400'}`}>{i + 1}</div>
-            <span className="text-[12px] text-stone-700">{label}</span>
-            <span className="ml-auto text-[10px] text-stone-400">{state}</span>
-            {i < steps.length - 1 && <div className="absolute" />}
-          </div>
-        ))}
+        {steps.map(([label, state], i) => {
+          const done = !['…', 'pending', 'none yet', '—', 'not yet wired', 'none open'].includes(state);
+          return (
+            <div key={i} className="flex items-center gap-3 py-2">
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] ${done ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-100 text-stone-400'}`}>{i + 1}</div>
+              <span className="text-[12px] text-stone-700">{label}</span>
+              <span className="ml-auto text-[10px] text-stone-400">{state}</span>
+            </div>
+          );
+        })}
       </div>
+      {approvedDrafts.length > 0 && (
+        <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+          <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Per-decision lifecycle (approval-gated writes)</div>
+          {approvedDrafts.map((d) => (
+            <div key={d.id} className="py-1.5 border-b border-stone-100 last:border-0 text-[11px] text-stone-600">
+              <span className="text-stone-800 font-medium">{d.supplier_name}</span>
+              {' · '}{d.product} · {d.currency || ''} {d.est_amount != null ? Number(d.est_amount).toLocaleString() : '—'}
+              <span className="ml-2 text-[10px] text-stone-400">
+                approved write recorded{d.approval_id ? ` (approval ${String(d.approval_id).slice(0, 8)}…)` : ''} → ERP entry pending buyer → outcome measurement not yet wired
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {revisions && revisions.length > 0 && (
+        <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-600">
+          <span className="text-[10px] uppercase tracking-wide text-stone-400">Governance trail </span>
+          {revisions.length} append-only revision(s) recorded — every ontology change is traceable (audit preserved).
+        </div>
+      )}
       <div className="rounded-xl border border-amber-200 bg-amber-50/40 px-4 py-3 text-[11px] text-stone-600">
         Realized financial/operational outcome measurement is not yet wired to a measurement service.
         When connected, actual-vs-expected deltas will appear here — no ROI is reported until it can be
