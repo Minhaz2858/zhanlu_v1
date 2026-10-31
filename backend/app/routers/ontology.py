@@ -1018,6 +1018,62 @@ def record_outcome_ep(
         draft_id=body.draft_id)
 
 
+# ---------------------------------------------------------------------------
+# Enterprise Business Process & Operating Model — discovery (EBPM)
+# ---------------------------------------------------------------------------
+
+@router.get("/ontology/enterprise/inventory")
+def enterprise_inventory(
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Deterministic inventory of the org's authorized enterprise resources —
+    datasources (+catalogued schemas), documents, ontology elements, actions,
+    automations. No LLM, no cross-org reads, honest empty sections."""
+    from app.services.ontology.enterprise_discovery import inventory_resources
+
+    return inventory_resources(db, _org_or_404(user, org_id))
+
+
+@router.post("/ontology/enterprise/discover")
+def enterprise_discover(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Run a discovery pass (org-admin): refresh the persistent resource
+    inventory. LLM-assisted process/capability proposal is a follow-up
+    increment and is always marked inferred/proposed with evidence."""
+    from app.services.ontology.enterprise_discovery import refresh_inventory
+
+    return refresh_inventory(db, admin.org_id)
+
+
+@router.get("/ontology/enterprise/resources")
+def enterprise_resources(
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """The persisted, refreshable inventory rows."""
+    from app.models.enterprise_process import EnterpriseResource
+
+    org = _org_or_404(user, org_id)
+    rows = (
+        db.query(EnterpriseResource)
+        .filter(EnterpriseResource.org_id == org,
+                EnterpriseResource.is_deleted == False)  # noqa: E712
+        .order_by(EnterpriseResource.resource_kind, EnterpriseResource.name)
+        .all()
+    )
+    return [
+        {"id": r.id, "resource_kind": r.resource_kind, "ref_id": r.ref_id,
+         "name": r.name, "status": r.status_json,
+         "evidence_status": r.evidence_status, "discovered_at": r.discovered_at}
+        for r in rows
+    ]
+
+
 @router.post("/ontology/outcomes/{outcome_id}/measure")
 def measure_outcome_ep(
     outcome_id: str,
