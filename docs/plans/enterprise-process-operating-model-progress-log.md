@@ -179,3 +179,85 @@ Ready for consumption:
 - Rules to keep: never fabricate edges — only `related_processes` and
   ontology connections from evidence; documented ≠ configured ≠ observed
   coloring on nodes; proposal (unverified) nodes visually distinct.
+
+---
+
+## Increment 4 — Enterprise Map & Process Visualization (2026-11-01)
+
+Status: COMPLETE. Backend map aggregation + two new xyflow components +
+landing-experience rewiring. No new dependencies; existing discovery
+infrastructure reused end-to-end.
+
+### Backend
+
+- `enterprise_map(db, org_id)` in `enterprise_discovery.py`: one org-scoped
+  aggregation — `org_units`, `capabilities`, `processes` (with family,
+  discovery_status, evidence_status, activity counts, performer-derived
+  responsible_units), `families` with counts, `systems` (authorized
+  EnterpriseResource rows, capped 60), `process_links` (persisted only —
+  links whose successor is missing/cross-org are DROPPED, never fabricated).
+- `GET /api/ontology/enterprise/map` — any authed user, `_org_or_404`
+  scoping (404 cross-org).
+- Test: `test_enterprise_map_aggregates_persisted_structure` — aggregation
+  contents, performer relationship, ghost-successor link dropped, and an
+  honestly empty map for another org. Suite: 8 passed.
+
+### Frontend
+
+- `components/enterprise/EnterpriseMap.jsx` — the PRIMARY LANDING experience
+  (Enterprise Profile now defaults to it, tab 'M'): Enterprise root →
+  authorized systems → org units + capabilities → family headers → process
+  nodes (border ring = verified/proposed/rejected; fill = documented/
+  configured/observed — the two dimensions are never conflated). Edges are
+  ONLY persisted process links (labeled handoff) and performer participation
+  (unit performs process). Zoom/pan/fitView/Controls/MiniMap. Legend for all
+  six states. Click process node → ProcessFlowCanvas overlay. Honest empty
+  state pointing at discovery.
+- `components/enterprise/ProcessFlowCanvas.jsx` — swimlane visualization of
+  one process: lanes generated from ACTUAL activity performers
+  ('Unassigned' lane for performers not yet discovered — no invented actors);
+  nodes typed per activity_type (start/end/human/system/decision/approval/
+  subprocess) with evidence-status border; edges = persisted seq order
+  (solid) + persisted related_processes (dashed, labeled direction, clickable
+  to navigate the canvas to the peer process); click activity → side panel
+  (seq, type, performer, evidence status, business rules, exception paths,
+  evidence-ref count); 'Process detail' opens the catalogue drawer; header
+  badges carry discovery_status + evidence_status.
+- `EnterpriseProfile.jsx` — map as default landing; Processes catalogue
+  preserved with a 'flow view' button in the detail drawer; overlays for
+  canvas + drawer; cross-navigation map→canvas→drawer→peer process.
+
+### Verification
+
+One focused backend run (8 passed, incl. incr-3 suites) + one frontend
+production build (green). No live LLM discovery, no browser automation.
+
+### Limitations (honest)
+
+- Process nodes only link to org-unit lanes via performer NAME match — a
+  performer that is not a discovered OrgUnit renders in the flow canvas
+  'Unassigned'-equivalent (no edge), which is honest (no invented mapping).
+- The map is a static manual layout (no force/dagre); large enterprises will
+  need virtualization or clustering later.
+- Capability→process edges are not drawn: no persisted capability-process
+  link exists yet (would be fabrication).
+- 'Systems' column lists authorized resources; resource→process edges do not
+  exist in the model and are not drawn.
+
+### Increment 5 handoff — Confirm/Reject Evidence Lifecycle + Audit
+
+NOTE: the process-level lifecycle ALREADY SHIPPED in Increment 3
+(confirm/reject endpoints, review_history, AuditEvent, rediscovery
+preservation) and the UI review actions live in the detail drawer. What
+remains for a "Increment 5" scope, if pursued:
+- Per-ACTIVITY and per-capability/org-unit confirm/reject (the lifecycle
+  helpers generalize: `_record_process_review` → `_record_review(target)`).
+- An aggregate "review queue" endpoint (needs_review counts by kind) +
+  batch review actions with org-admin gating and the same audit trail.
+- Evidence-level verification (ProcessEvidence rows carry no status column —
+  add migration if per-quote verification is required).
+The frontend already renders verified/proposed/rejected everywhere via
+`EVIDENCE_BADGE_STYLE` / `EVIDENCE_RING`; any new review surface should reuse
+that vocabulary, and Increment 7's browser-validation pass should exercise
+the full discover → review → map flow on the live stacks (backend :5003,
+vite :5157, browser DB zhanlu_ebom_browser).

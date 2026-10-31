@@ -1084,6 +1084,20 @@ def enterprise_resources(
     ]
 
 
+@router.get("/ontology/enterprise/map")
+def enterprise_map_endpoint(
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Enterprise Map aggregation — org units, capabilities, process
+    families + processes, and ONLY persisted relationships (process links,
+    performer participation). Org-scoped; every section honestly empty."""
+    from app.services.ontology.enterprise_discovery import enterprise_map
+
+    return enterprise_map(db, _org_or_404(user, org_id))
+
+
 @router.get("/ontology/enterprise/processes")
 def enterprise_process_list(
     org_id: str | None = Query(default=None),

@@ -952,3 +952,104 @@ def reject_process(db: Session, org_id: str, process_id: str,
             "evidence_status": row.evidence_status,
             "reason": reason,
             "review_history": (row.provenance_json or {}).get("review_history")}
+
+
+def enterprise_map(db: Session, org_id: str) -> dict:
+    """Enterprise Map aggregation — the persisted business structure in one
+    org-scoped payload: org units, capabilities, process families +
+    processes, authorized systems/resources, and ONLY persisted
+    relationships (process links + performer participation). Every section
+    can be honestly empty; nothing is inferred beyond what discovery stored.
+    """
+    from app.models.enterprise_process import (
+        BusinessCapability, BusinessProcess, EnterpriseResource, OrgUnit,
+        ProcessActivity, ProcessLink,
+    )
+    from sqlalchemy import func
+
+    units = [
+        {"id": u.id, "name": u.name, "unit_type": u.unit_type,
+         "evidence_status": u.evidence_status,
+         "responsibilities": u.responsibilities}
+        for u in db.query(OrgUnit)
+        .filter(OrgUnit.org_id == org_id, OrgUnit.is_deleted == False)  # noqa: E712
+        .order_by(OrgUnit.name).all()
+    ]
+    capabilities = [
+        {"id": c.id, "name": c.name, "description": c.description,
+         "evidence_status": c.evidence_status}
+        for c in db.query(BusinessCapability)
+        .filter(BusinessCapability.org_id == org_id,
+                BusinessCapability.is_deleted == False)  # noqa: E712
+        .order_by(BusinessCapability.name).all()
+    ]
+    procs = (
+        db.query(BusinessProcess)
+        .filter(BusinessProcess.org_id == org_id,
+                BusinessProcess.is_deleted == False)  # noqa: E712
+        .order_by(BusinessProcess.process_family.asc().nullslast(),
+                  BusinessProcess.name.asc())
+        .all()
+    )
+    ids = [p.id for p in procs]
+    act_counts: dict = {}
+    performers: dict = {}
+    if ids:
+        for a in db.query(ProcessActivity).filter(
+                ProcessActivity.org_id == org_id,
+                ProcessActivity.process_id.in_(ids),
+                ProcessActivity.is_deleted == False).all():  # noqa: E712
+            act_counts[a.process_id] = act_counts.get(a.process_id, 0) + 1
+            if a.performer:
+                performers.setdefault(a.process_id, set()).add(a.performer)
+    name_by_id = {p.id: p.name for p in procs}
+    links = []
+    if ids:
+        for l in db.query(ProcessLink).filter(
+                ProcessLink.org_id == org_id,
+                ProcessLink.predecessor_id.in_(ids),
+                ProcessLink.is_deleted == False).all():  # noqa: E712
+            if l.successor_id not in name_by_id:
+                continue  # cross-org or deleted peer — never fabricate
+            links.append({
+                "predecessor_id": l.predecessor_id,
+                "successor_id": l.successor_id,
+                "predecessor_name": name_by_id.get(l.predecessor_id),
+                "successor_name": name_by_id.get(l.successor_id),
+                "handoff_note": l.handoff_note,
+                "evidence_status": l.evidence_status,
+            })
+    processes = [
+        {"id": p.id, "name": p.name, "process_family": p.process_family,
+         "discovery_status": p.discovery_status,
+         "evidence_status": p.evidence_status,
+         "activities_count": act_counts.get(p.id, 0),
+         "responsible_units": sorted(performers.get(p.id, set()))}
+        for p in procs
+    ]
+    fam_counts = [
+        {"family": f or None, "count": c}
+        for f, c in db.query(BusinessProcess.process_family,
+                             func.count(BusinessProcess.id))
+        .filter(BusinessProcess.org_id == org_id,
+                BusinessProcess.is_deleted == False)  # noqa: E712
+        .group_by(BusinessProcess.process_family)
+        .order_by(func.count(BusinessProcess.id).desc()).all()
+    ]
+    systems = [
+        {"id": r.id, "name": r.name, "resource_kind": r.resource_kind,
+         "ref_id": r.ref_id, "evidence_status": r.evidence_status}
+        for r in db.query(EnterpriseResource)
+        .filter(EnterpriseResource.org_id == org_id,
+                EnterpriseResource.is_deleted == False)  # noqa: E712
+        .order_by(EnterpriseResource.resource_kind, EnterpriseResource.name)
+        .limit(60).all()
+    ]
+    return {
+        "org_units": units,
+        "capabilities": capabilities,
+        "processes": processes,
+        "families": fam_counts,
+        "systems": systems,
+        "process_links": links,
+    }

@@ -20,8 +20,8 @@ from app.models.agent_run import AgentRun
 from app.models.audit_event import AuditEvent
 from app.models.automation_task import AutomationTask
 from app.models.enterprise_process import (
-    BusinessProcess, EnterpriseResource, ProcessActivity, ProcessLink,
-    ProcessEvidence,
+    BusinessCapability, BusinessProcess, EnterpriseResource, OrgUnit,
+    ProcessActivity, ProcessEvidence, ProcessLink,
 )
 
 from app.models.knowledge_catalog import KBTableRelation
@@ -50,6 +50,7 @@ def env():
         AgentRun.__table__, KBTableRelation.__table__,
         BusinessProcess.__table__, ProcessActivity.__table__,
         ProcessEvidence.__table__, ProcessLink.__table__,
+        OrgUnit.__table__, BusinessCapability.__table__,
         AuditEvent.__table__,
     ])
     s = make_session(eng)
@@ -276,3 +277,34 @@ def test_review_history_appends_not_overwrites(env):
     assert s.query(AuditEvent).filter(
         AuditEvent.event_type.in_(["process_rejected",
                                    "process_confirmed"])).count() == 2
+
+
+def test_enterprise_map_aggregates_persisted_structure(env):
+    """Increment 4 — map aggregation: units/capabilities/families/processes
+    + performer relationships, org-scoped, only persisted links."""
+    from app.models.enterprise_process import ProcessLink
+
+    s = env
+    ed.propose_operating_model(s, ORG, llm_fn=_llm_from_prompt)
+    proc = s.query(BusinessProcess).filter(
+        BusinessProcess.org_id == ORG).one()
+    s.add(ProcessLink(org_id=ORG, predecessor_id=proc.id,
+                      successor_id="ghost-id", handoff_note=None))
+    s.commit()
+
+    client = _client(s, _admin())
+    r = client.get("/api/ontology/enterprise/map")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["processes"][0]["name"] == "Procure-to-Pay"
+    assert body["processes"][0]["responsible_units"] == ["Procurement Department"]
+    assert body["families"] == [{"family": "procure-to-pay", "count": 1}]
+    # ghost successor is NOT another org's process — link dropped, no fabrication
+    assert body["process_links"] == []
+
+    # org isolation: another org sees an honestly empty map
+    other = SimpleNamespace(id="u-x", org_id="org-other", role="admin")
+    r2 = _client(s, other).get("/api/ontology/enterprise/map")
+    b2 = r2.json()
+    assert b2["processes"] == [] and b2["org_units"] == [] \
+        and b2["capabilities"] == [] and b2["families"] in ([], [{"family": None, "count": 0}])

@@ -10,6 +10,8 @@ import { authFetch } from '@/api/authFetch';
 import { useAuth } from '@/lib/AuthContext';
 import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
 import OntologyGraph from '@/components/ontology/OntologyGraph';
+import EnterpriseMap from '@/components/enterprise/EnterpriseMap';
+import ProcessFlowCanvas from '@/components/enterprise/ProcessFlowCanvas';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts';
@@ -1159,7 +1161,7 @@ const ACTIVITY_TYPE_LABEL = {
   subprocess: 'Subprocess',
 };
 
-function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin }) {
+function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlow }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1223,6 +1225,12 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin }) {
                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${EVIDENCE_BADGE_STYLE[d.evidence_status] || EVIDENCE_BADGE_STYLE.proposed}`}>
                   {d.evidence_status}
                 </span>
+                {onOpenFlow && (
+                  <button onClick={() => onOpenFlow(processId)}
+                    className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-300 bg-white text-stone-600 hover:bg-stone-100">
+                    flow view
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -1410,7 +1418,7 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin }) {
   );
 }
 
-function BusinessProcesses() {
+function BusinessProcesses({ onOpenFlow }) {
   const { isAdmin } = useAuth();
   const [data, setData] = useState(null);
   const [q, setQ] = useState('');
@@ -1537,13 +1545,15 @@ function BusinessProcesses() {
 
       {selected && (
         <ProcessDetailDrawer processId={selected} isAdmin={isAdmin}
-          onClose={() => setSelected(null)} onChanged={load} />
+          onClose={() => setSelected(null)} onChanged={load}
+          onOpenFlow={onOpenFlow} />
       )}
     </div>
   );
 }
 
 const EXPERIENCES = [
+  { key: 'M', label: 'Enterprise Map', icon: Boxes },
   { key: 'A', label: 'Executive', icon: Gauge },
   { key: 'B', label: 'Situation Room', icon: FileSearch },
   { key: 'C', label: 'Object Explorer', icon: Network },
@@ -1554,12 +1564,20 @@ const EXPERIENCES = [
 ];
 
 export default function EnterpriseProfile() {
-  const [exp, setExp] = useState('A');
+  const { isAdmin } = useAuth();
+  const [exp, setExp] = useState('M');
   const [overview, setOverview] = useState(null);
   const [objects, setObjects] = useState([]);
   const [value, setValue] = useState([]);
   const [selectedDomain, setSelectedDomain] = useState(null);
   const [discovering, setDiscovering] = useState(false);
+  const [flowProcessId, setFlowProcessId] = useState(null);
+  const [detailProcessId, setDetailProcessId] = useState(null);
+
+  const openProcess = useCallback((processId, asFlow) => {
+    if (asFlow) setFlowProcessId(processId);
+    else setDetailProcessId(processId);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -1624,18 +1642,33 @@ export default function EnterpriseProfile() {
         </div>
 
         <div className="mt-6">
+          {exp === 'M' && <EnterpriseMap onOpenProcess={openProcess} />}
           {exp === 'A' && <ExecutiveOverview />}
           {exp === 'B' && <SituationRoom />}
           {exp === 'C' && <BusinessObjectExplorer />}
           {exp === 'D' && <DecisionCenter />}
           {exp === 'E' && <OutcomeTracking />}
-          {exp === 'F' && <BusinessProcesses />}
+          {exp === 'F' && <BusinessProcesses onOpenFlow={setFlowProcessId} />}
           {exp === 'G' && (
             <OperationalHealth overview={overview} value={value}
               selectedDomain={selectedDomain} setSelectedDomain={setSelectedDomain} />
           )}
         </div>
       </div>
+
+      {flowProcessId && (
+        <ProcessFlowCanvas processId={flowProcessId}
+          onClose={() => setFlowProcessId(null)}
+          onOpenDetail={(pid, asFlow) => {
+            if (asFlow) setFlowProcessId(pid);
+            else setDetailProcessId(pid);
+          }} />
+      )}
+      {detailProcessId && !flowProcessId && (
+        <ProcessDetailDrawer processId={detailProcessId} isAdmin={isAdmin}
+          onClose={() => setDetailProcessId(null)}
+          onOpenFlow={setFlowProcessId} />
+      )}
     </div>
   );
 }
