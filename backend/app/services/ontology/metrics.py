@@ -106,9 +106,16 @@ def resolve_metric(db: Session, org_id: str, metric_ref: str):
     return row, None
 
 
-def _build_sql(metric, extra_filters: dict | None) -> tuple[str, dict, list]:
+def _build_sql(metric, extra_filters: dict | None = None,
+               filter_overrides: dict | None = None) -> tuple[str, dict, list]:
     """Deterministic SQL from the declared binding. Raises ValueError on
-    anything non-deterministic (unknown aggregation, bad identifiers)."""
+    anything non-deterministic (unknown aggregation, bad identifiers).
+
+    `filter_overrides` is the governed period/segment selector: it REPLACES
+    (and may add) equality filters on the metric's declared binding. It can
+    never change base_table/base_column/aggregation, so the MetricDefinition
+    stays authoritative. `extra_filters` remain additional AND constraints (the
+    original behaviour — used by run_business_question for ad-hoc segments)."""
     agg = (metric.aggregation or "").strip().lower()
     if agg == "custom":
         raise ValueError(
@@ -128,13 +135,26 @@ def _build_sql(metric, extra_filters: dict | None) -> tuple[str, dict, list]:
     else:
         col_sql = column
 
+    # Merge stored filters with governed period/segment overrides.
+    stored = [f for f in (metric.filters_json or []) if isinstance(f, dict)]
+    replaced: set[str] = set()
+    merged: list[dict] = []
+    for f in stored:
+        col = str(f.get("column") or "").strip()
+        if filter_overrides and col in filter_overrides:
+            f = {**f, "value": filter_overrides[col]}
+            replaced.add(col)
+        merged.append(f)
+    for col, val in (filter_overrides or {}).items():
+        if col in replaced or not _IDENT_RE.match(str(col)):
+            continue
+        merged.append({"column": col, "op": "eq", "value": val})
+
     where: list[str] = []
     params: dict[str, Any] = {}
     applied_cols: list[str] = []
     i = 0
-    for f in (metric.filters_json or []):
-        if not isinstance(f, dict):
-            continue
+    for f in merged:
         col = str(f.get("column") or "").strip()
         op = str(f.get("op") or "").strip()
         if not _IDENT_RE.match(col) or op not in _FILTER_OPS:
@@ -176,6 +196,7 @@ def compute_metric(
     metric_ref: str,
     *,
     filters: dict | None = None,
+    filter_overrides: dict | None = None,
 ) -> dict:
     """Resolve + compute a governed metric. Never raises for business
     refusals — typed unavailable instead."""
@@ -198,7 +219,7 @@ def compute_metric(
             f"metric {metric.name!r} data source not found in this org")
 
     try:
-        sql, params, declared_filter_cols = _build_sql(metric, filters)
+        sql, params, declared_filter_cols = _build_sql(metric, filters, filter_overrides)
     except ValueError as exc:
         return _unavailable(str(exc))
 
@@ -249,8 +270,9 @@ def compute_metric(
             "base_table": metric.base_table,
             "base_column": metric.base_column,
             "time_column": metric.time_column,
-            "filters_applied": declared_filter_cols
-            + [k for k in (filters or {}) if _IDENT_RE.match(str(k))],
+            "filters_applied": declared_filter_cols,
+            "filter_overrides_applied": [
+                k for k in (filter_overrides or {}) if _IDENT_RE.match(str(k))],
         },
         "evidence_status": metric.evidence_status,
         "execution_trace": {
@@ -260,3 +282,155 @@ def compute_metric(
             "duration_ms": duration_ms,
         },
     }
+
+
+def compare_metric_periods(
+    db: Session, org_id: str, metric_ref: str, *,
+    current_period: str, prior_period: str,
+    segment_column: str | None = None, segments: list | None = None,
+    extra_filters: dict | None = None,
+) -> dict:
+    """Governed period comparison (current vs prior). Deterministic — reuses
+    compute_metric; never fabricates a delta. Honest unavailable states only."""
+    metric, reason = resolve_metric(db, org_id, metric_ref)
+    if metric is None:
+        return _unavailable(reason)
+    time_col = metric.time_column
+    if not time_col:
+        return _unavailable("metric has no time dimension for period comparison")
+
+    def _compute(period: str, segment=None):
+        fo: dict = {time_col: period}
+        if segment is not None and segment_column:
+            fo[segment_column] = segment
+        if extra_filters:
+            fo.update(extra_filters)
+        return compute_metric(db, org_id, metric_ref, filter_overrides=fo)
+
+    current = _compute(current_period)
+    prior = _compute(prior_period)
+    out: dict = {
+        "success": True,
+        "unavailable": False,
+        "metric": {
+            "id": metric.id, "name": metric.name, "version": metric.version or 1,
+            "aggregation": metric.aggregation, "unit": metric.unit,
+            "currency": metric.currency, "time_column": time_col,
+        },
+        "current_period": current_period,
+        "prior_period": prior_period,
+        "current": current,
+        "prior": prior,
+    }
+    if segment_column and segments:
+        rows = []
+        for seg in segments:
+            c = _compute(current_period, seg)
+            p = _compute(prior_period, seg)
+            cv = c.get("value") if c.get("success") else None
+            pv = p.get("value") if p.get("success") else None
+            delta = (cv - pv) if (cv is not None and pv is not None) else None
+            pct = (delta / pv * 100.0) if (delta is not None and pv) else None
+            rows.append({
+                "segment": seg, "current_value": cv, "prior_value": pv,
+                "delta": delta, "delta_pct": pct,
+                "declining": bool(delta is not None and delta < 0),
+                "available": bool(c.get("success") and p.get("success")),
+            })
+        out["segments"] = rows
+        out["declining_segments"] = [r["segment"] for r in rows if r["declining"]]
+    return out
+
+
+def trend_metric(
+    db: Session, org_id: str, metric_ref: str, *,
+    periods: list[str], extra_filters: dict | None = None,
+) -> dict:
+    """Governed multi-period series for charting. Reuses compute_metric per
+    period; unavailable periods are returned as null points (never fabricated)."""
+    metric, reason = resolve_metric(db, org_id, metric_ref)
+    if metric is None:
+        return _unavailable(reason)
+    time_col = metric.time_column
+    if not time_col:
+        return _unavailable("metric has no time dimension for trend")
+    points = []
+    for period in periods:
+        res = compute_metric(
+            db, org_id, metric_ref,
+            filter_overrides={time_col: period, **(extra_filters or {})})
+        points.append({
+            "period": period,
+            "value": res.get("value") if res.get("success") else None,
+            "unavailable": res.get("unavailable", False),
+            "reason": res.get("reason") if not res.get("success") else None,
+        })
+    return {
+        "success": True, "unavailable": False,
+        "metric": {"id": metric.id, "name": metric.name, "time_column": time_col},
+        "periods": points,
+    }
+
+
+def discover_distinct(db: Session, org_id: str, metric, column: str,
+                     periods: list[str] | None = None):
+    """Governed DISTINCT segment discovery through the execution gate — used so
+    the UI need not hardcode business keys. Returns a list of values."""
+    from app.models.knowledge_base import KnowledgeBase
+    from app.services.db.query_service import QueryService
+
+    if not _IDENT_RE.match(column) or not _IDENT_RE.match(metric.base_table):
+        return _unavailable("invalid segment column")
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == metric.datasource_id,
+                KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first())
+    if kb is None or (kb.org_id or "default-org") != org_id:
+        return _unavailable("data source not found")
+    where = []
+    params: dict[str, Any] = {}
+    if periods and metric.time_column and _IDENT_RE.match(metric.time_column):
+        phs = ", ".join(f":t_{j}" for j in range(len(periods)))
+        where.append(f"{metric.time_column} IN ({phs})")
+        params = {f"t_{j}": p for j, p in enumerate(periods)}
+    sql = (
+        f"SELECT DISTINCT {column} AS v FROM {metric.base_table}"
+        + (f" WHERE {' AND '.join(where)}" if where else ""))
+    try:
+        qs = QueryService(db)
+        res = qs.execute(kb.id, sql, params=params or None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("discover_distinct failed (%s): %s", column, exc)
+        return _unavailable("segment discovery failed")
+    return [r.get("v") for r in (res.get("rows") or []) if r.get("v") is not None]
+
+
+def discover_periods(db: Session, org_id: str, metric, n: int = 6):
+    """Governed discovery of a metric's latest time periods from its own
+    time_column/base_table (through the execution gate). Keeps the UI free of
+    hardcoded business calendars."""
+    from app.models.knowledge_base import KnowledgeBase
+    from app.services.db.query_service import QueryService
+
+    time_col = metric.time_column
+    if not time_col or not _IDENT_RE.match(time_col) or not _IDENT_RE.match(metric.base_table):
+        return _unavailable("metric has no time dimension")
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == metric.datasource_id,
+                KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first())
+    if kb is None or (kb.org_id or "default-org") != org_id:
+        return _unavailable("data source not found")
+    sql = (
+        f"SELECT DISTINCT {time_col} AS v FROM {metric.base_table} "
+        f"ORDER BY {time_col} DESC LIMIT {int(n)}")
+    try:
+        qs = QueryService(db)
+        res = qs.execute(kb.id, sql)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("discover_periods failed: %s", exc)
+        return _unavailable("period discovery failed")
+    vals = [r.get("v") for r in (res.get("rows") or []) if r.get("v") is not None]
+    return list(reversed(vals))  # ascending chronological order

@@ -9,6 +9,9 @@ import { toast } from 'sonner';
 import { authFetch } from '@/api/authFetch';
 import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
 import OntologyGraph from '@/components/ontology/OntologyGraph';
+import {
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
+} from 'recharts';
 
 /**
  * Enterprise Profile — Zhanlu Business Operating Model.
@@ -322,7 +325,10 @@ function SensorsCard() {
 // ---------------------------------------------------------------------------
 // A. EXECUTIVE BUSINESS OVERVIEW
 // ---------------------------------------------------------------------------
-function MetricCard({ m, value, loading, error }) {
+function MetricCard({ m, kpi }) {
+  const loading = kpi === undefined;
+  const compare = kpi?.compare;
+  const trend = kpi?.trend;
   if (loading) {
     return (
       <div className="rounded-xl border border-stone-200 bg-white px-4 py-3.5">
@@ -331,32 +337,65 @@ function MetricCard({ m, value, loading, error }) {
       </div>
     );
   }
-  if (error || (value && value.unavailable)) {
+  const unavail = !compare || compare.unavailable
+    || (compare.current && compare.current.unavailable);
+  if (unavail) {
     return (
       <div className="rounded-xl border border-amber-200 bg-amber-50/40 px-4 py-3.5">
         <div className="text-[13px] font-medium text-stone-700">{m.name}</div>
-        <p className="mt-1 text-[10px] text-amber-700">Unavailable: {error || value?.reason || 'no data'}</p>
+        <p className="mt-1 text-[10px] text-amber-700">Unavailable: {compare?.reason || compare?.current?.reason || 'no data for the current period'}</p>
       </div>
     );
   }
-  const v = value?.value;
-  const fmt = v == null ? '—' : `${m.currency || ''} ${Number(v).toLocaleString()}`.trim();
+  const cur = compare.current || {};
+  const prior = (compare.prior && !compare.prior.unavailable) ? compare.prior : null;
+  const v = cur.value;
+  const prevVal = prior?.value ?? null;
+  const delta = (v != null && prevVal != null) ? v - prevVal : null;
+  const pct = (delta != null && prevVal) ? (delta / prevVal) * 100 : null;
+  const fmt = (x) => `${m.currency || ''} ${Number(x).toLocaleString()}`.trim();
+  const points = (trend?.periods || [])
+    .filter((p) => p.value != null)
+    .map((p) => ({ period: p.period, value: p.value }));
+
   return (
     <div className="rounded-xl border border-stone-200 bg-white px-4 py-3.5">
       <div className="flex items-center gap-2">
         <span className="text-[13px] font-semibold text-stone-800">{m.name}</span>
-        <span className="ml-auto text-[10px] text-stone-400">{m.unit || ''}</span>
+        <span className="ml-auto text-[10px] text-stone-400">{compare.current_period || m.unit || ''}</span>
       </div>
-      <div className="mt-1 text-2xl font-semibold text-stone-900 tabular-nums">{fmt}</div>
+      <div className="mt-1 text-2xl font-semibold text-stone-900 tabular-nums">
+        {v == null ? '—' : fmt(v)}
+      </div>
+      {delta != null && (
+        <div className={`mt-0.5 text-[11px] ${delta < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+          {delta < 0 ? '▼' : '▲'} {fmt(Math.abs(delta))} ({pct?.toFixed(1)}%) vs prior
+        </div>
+      )}
+      {points.length > 1 && (
+        <div className="mt-2 h-12">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={points} margin={{ top: 2, right: 2, bottom: 2, left: 2 }}>
+              <Line type="monotone" dataKey="value" stroke={delta != null && delta < 0 ? '#dc2626' : '#059669'} strokeWidth={1.5} dot={false} />
+              <XAxis dataKey="period" tick={{ fontSize: 8 }} hide />
+              <YAxis hide domain={['dataMin', 'dataMax']} />
+              <Tooltip
+                contentStyle={{ fontSize: 10, padding: '2px 6px' }}
+                formatter={(val) => [fmt(val), m.name]} labelFormatter={(l) => `period ${l}`} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
       <div className="mt-1 text-[10px] text-stone-400">
-        source: {value?.provenance?.datasource_name || m.datasource_id}
-        {value?.provenance?.base_table ? ` · ${value.provenance.base_table}` : ''}
+        {cur.provenance?.datasource_name || m.datasource_id}
+        {cur.provenance?.base_table ? ` · ${cur.provenance.base_table}` : ''}
       </div>
       <details className="mt-1">
         <summary className="cursor-pointer text-[10px] text-stone-500 hover:text-stone-700">definition & provenance</summary>
         <div className="mt-1 text-[10px] text-stone-500 space-y-0.5">
           <div>aggregation: {m.aggregation} · v{m.version} · {m.evidence_status}</div>
-          <div className="font-mono break-all">{value?.execution_trace?.sql}</div>
+          <div>prior period: {compare.prior_period || '—'} = {prevVal != null ? fmt(prevVal) : 'n/a'}</div>
+          <div className="font-mono break-all">{cur.execution_trace?.sql}</div>
         </div>
       </details>
     </div>
@@ -365,8 +404,9 @@ function MetricCard({ m, value, loading, error }) {
 
 function ExecutiveOverview() {
   const [metrics, setMetrics] = useState(null);
-  const [values, setValues] = useState({});
+  const [kpis, setKpis] = useState({});
   const [sensors, setSensors] = useState(null);
+  const [priorities, setPriorities] = useState(undefined); // undefined=loading, null=empty, {} = data
 
   useEffect(() => {
     (async () => {
@@ -378,50 +418,87 @@ function ExecutiveOverview() {
         const m = (await mRes.json()).metrics || [];
         setMetrics(m);
         if (sRes.ok) setSensors(await sRes.json());
-        // Deterministically compute each governed metric (no LLM, no fabrication).
-        const kpis = m.filter((x) => x.lifecycle === 'published' && x.is_enabled);
-        const results = await Promise.all(kpis.map(async (x) => {
+
+        // Period-aware: each KPI carries current-vs-prior (governed compute) + trend.
+        const shown = m.filter((x) => x.lifecycle === 'published' && x.is_enabled);
+        const results = await Promise.all(shown.map(async (x) => {
           try {
-            const r = await authFetch(`/api/ontology/metrics/${encodeURIComponent(x.id)}/compute`);
-            return [x.id, await r.json()];
-          } catch { return [x.id, { unavailable: true, reason: 'compute failed' }]; }
+            const [c, t] = await Promise.all([
+              authFetch(`/api/ontology/metrics/${encodeURIComponent(x.id)}/compare`),
+              authFetch(`/api/ontology/metrics/${encodeURIComponent(x.id)}/trend`),
+            ]);
+            return [x.id, { compare: await c.json(), trend: await t.json() }];
+          } catch { return [x.id, null]; }
         }));
-        setValues(Object.fromEntries(results));
+        setKpis(Object.fromEntries(results));
+
+        // Deterministic declining-profitability detection (no LLM) for the
+        // gross-margin metric, by segment — auto-discovers periods + segments.
+        const gm = shown.find((x) => /gross\s*margin/i.test(x.name));
+        if (gm) {
+          try {
+            const r = await authFetch(
+              `/api/ontology/metrics/${encodeURIComponent(gm.id)}/segments-compare?segment_column=model_id`);
+            setPriorities(await r.json());
+          } catch { setPriorities(null); }
+        } else {
+          setPriorities(null);
+        }
       } catch { toast.error('Failed to load executive overview'); }
     })();
   }, []);
 
-  const kpis = (metrics || []).filter((x) => x.lifecycle === 'published' && x.is_enabled);
+  const kpiList = (metrics || []).filter((x) => x.lifecycle === 'published' && x.is_enabled);
   const breaches = (sensors?.sensors || []).filter((s) => {
     try { return JSON.parse(s.last_state_json || '{}').breached; } catch { return false; }
   });
+  const declining = (priorities && priorities.segments)
+    ? priorities.segments.filter((s) => s.declining)
+    : [];
 
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><Gauge size={15} className="text-stone-600" /> Governed Business KPIs</h2>
-        <span className="text-[11px] text-stone-400">every figure is computed by the governed MetricDefinition — never estimated, never invented</span>
+        <span className="text-[11px] text-stone-400">every figure is computed by the governed MetricDefinition (current vs prior period, deterministic) — never estimated, never invented</span>
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {!metrics && <div className="text-[11px] text-stone-400 py-4"><Loader2 size={14} className="animate-spin inline mr-2" />Loading KPIs…</div>}
-          {metrics && kpis.length === 0 && (
+          {metrics && kpiList.length === 0 && (
             <div className="col-span-full rounded-xl border border-dashed border-stone-300 bg-white py-8 text-center text-[12px] text-stone-400">
               No governed, published metrics are configured for this organization yet.
             </div>
           )}
-          {kpis.map((m) => (
-            <MetricCard key={m.id} m={m} value={values[m.id]} loading={values[m.id] === undefined} />
+          {kpiList.map((m) => (
+            <MetricCard key={m.id} m={m} kpi={kpis[m.id]} />
           ))}
         </div>
       </div>
 
       <div>
         <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><AlertTriangle size={15} className="text-red-600" /> Business Priorities</h2>
-        <span className="text-[11px] text-stone-400">detected situations requiring attention — from your configured sensing watches</span>
+        <span className="text-[11px] text-stone-400">deterministically detected situations requiring attention — declining profitability (governed gross-margin by segment) and sensing breaches</span>
         <div className="mt-3 space-y-2">
-          {!sensors && <div className="text-[11px] text-stone-400 py-2"><Loader2 size={14} className="animate-spin inline mr-2" />Loading…</div>}
-          {sensors && breaches.length === 0 && (
-            <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">No active breaches. All watched signals are within limits.</div>
+          {priorities === undefined && <div className="text-[11px] text-stone-400 py-2"><Loader2 size={14} className="animate-spin inline mr-2" />Analyzing…</div>}
+          {priorities && declining.length === 0 && breaches.length === 0 && (
+            <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">No declining profitability or active breaches detected.</div>
           )}
+          {declining.map((s) => {
+            const pct = s.delta_pct != null ? `${s.delta_pct.toFixed(1)}%` : 'n/a';
+            return (
+              <div key={s.segment} className="rounded-xl border border-red-200 bg-red-50/40 px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <TrendingDown size={14} className="text-red-600" />
+                  <span className="text-[13px] font-medium text-stone-800">Vehicle Model {s.segment} profitability declining</span>
+                  <span className="ml-auto text-[10px] text-red-600">{pct} vs prior</span>
+                </div>
+                <p className="mt-1 text-[11px] text-stone-600">
+                  Gross margin fell from <b>{priorities.currency || ''} {Number(s.prior_value).toLocaleString()}</b> to{' '}
+                  <b>{priorities.currency || ''} {Number(s.current_value).toLocaleString()}</b> ({priorities.current_period} vs {priorities.prior_period}).
+                  Investigate the affected model's sales, component costs, and linked suppliers.
+                </p>
+              </div>
+            );
+          })}
           {breaches.map((s) => (
             <div key={s.id} className="rounded-xl border border-red-200 bg-red-50/40 px-4 py-3">
               <div className="flex items-center gap-2">
@@ -562,9 +639,34 @@ function SituationRoom() {
   const [graph, setGraph] = useState(null);
   const [selected, setSelected] = useState(null);
   const [question, setQuestion] = useState('');
+  const [asking, setAsking] = useState(false);
+  const [answer, setAnswer] = useState(null);
+  const [answerError, setAnswerError] = useState(null);
   useEffect(() => {
     (async () => { try { const res = await authFetch('/api/ontology/graph'); if (res.ok) setGraph(await res.json()); } catch { toast.error('Failed to load'); } })();
   }, []);
+
+  const askAgent = async () => {
+    const q = (question || '').trim();
+    if (!q) return;
+    setAsking(true); setAnswerError(null); setAnswer(null);
+    try {
+      const res = await authFetch('/api/ontology/situation/investigate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.unavailable) {
+        setAnswerError(data?.reason || `investigation failed (HTTP ${res.status})`);
+      } else {
+        setAnswer(data);
+      }
+    } catch (e) {
+      setAnswerError(`agent investigation failed: ${e.message || e}`);
+    } finally { setAsking(false); }
+  };
+
   const objects = graph?.objects || [];
   const sel = selected ? objects.find((o) => o.id === selected) : null;
   const links = graph?.links || [];
@@ -586,9 +688,34 @@ function SituationRoom() {
         <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={2}
           placeholder="e.g. Why is Vehicle Model X's profitability declining?"
           className="mt-2 w-full border border-stone-200 rounded-md px-3 py-2 text-[12px]" />
+        <div className="mt-2 flex items-center gap-2">
+          <button onClick={askAgent} disabled={asking || !question.trim()}
+            className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">
+            {asking ? <Loader2 size={12} className="animate-spin" /> : <FileSearch size={12} />}
+            Ask the Zhanlu Agent
+          </button>
+          {sel && (
+            <button onClick={() => setQuestion(`Why is ${sel.display_name || sel.name}'s profitability declining?`)}
+              className="text-[11px] px-2.5 py-1.5 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50">
+              Investigate selected entity
+            </button>
+          )}
+          <span className="ml-auto text-[10px] text-stone-400">synthesis via the existing Agent Harness</span>
+        </div>
+        {answerError && <p className="mt-2 text-[11px] text-red-600">{answerError}</p>}
+        {answer && (
+          <div className="mt-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-[11px] space-y-1">
+            <div className="text-stone-700">{answer.answer}</div>
+            {answer.sql && <div className="font-mono text-[10px] text-stone-500 break-all">SQL: {answer.sql}</div>}
+            {Array.isArray(answer.rows) && answer.rows.length > 0 && (
+              <div className="text-[10px] text-stone-500">rows: {JSON.stringify(answer.rows)}</div>
+            )}
+          </div>
+        )}
         <p className="mt-1 text-[10px] text-stone-400">
-          Structured investigation uses the ontology graph, governed metrics and document evidence.
-          Live agent synthesis reuses the existing agent harness (wired in the next increment).
+          Structured investigation (below) uses the ontology graph, governed metrics and document evidence.
+          The agent synthesis above reuses the existing Agent Harness data-agent (scoped to this org's
+          bound sources, write-denied, budget-bounded) — no new orchestration framework.
         </p>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

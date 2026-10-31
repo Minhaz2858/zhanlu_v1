@@ -149,10 +149,14 @@ def create_data_db(path: str) -> None:
     conn.close()
 
 
-def _metric(mid, name, table, column, agg, filters, depends_on, base_sql=None):
+def _metric(mid, name, table, column, agg, filters, depends_on, base_sql=None,
+            time_column="sale_month"):
     # NOTE: the time window (sale_month) is intentionally NOT baked into
     # filters_json — it is supplied at compute time so the same governed metric
     # can answer "this month" vs "prior month" (declining-profitability check).
+    # time_column documents the metric's period dimension so the governed
+    # compare/trend endpoints can vary the period without bypassing the
+    # MetricDefinition.
     return MetricDefinition(
         id=mid, org_id=ORG, datasource_id=KB_SALES,
         name=name, display_name=name,
@@ -161,6 +165,7 @@ def _metric(mid, name, table, column, agg, filters, depends_on, base_sql=None):
         unit="CNY", synonyms=[], is_enabled=True,
         lifecycle="published", reviewed_by="admin-1",
         version=1, evidence_status="verified",
+        time_column=time_column,
         filters_json=[],
         depends_on_metrics=depends_on,
         base_sql=base_sql or f"SELECT {agg}({column}) FROM {table}",

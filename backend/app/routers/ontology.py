@@ -6,6 +6,7 @@ only. The overview endpoint lazily seeds the 14 domain packs.
 """
 
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -246,6 +247,212 @@ def compute_metric_endpoint(
             raise HTTPException(
                 status_code=400, detail=f"invalid filters JSON: {exc}")
     return compute_metric(db, org, metric_ref, filters=parsed)
+
+
+@router.get("/ontology/metrics/{metric_ref}/compare")
+def metric_compare_endpoint(
+    metric_ref: str,
+    current_period: str | None = Query(default=None),
+    prior_period: str | None = Query(default=None),
+    extra_filters: str | None = Query(default=None),
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P5 — governed current-vs-prior comparison (KPI delta). Reuses
+    compare_metric_periods → compute_metric. Never fabricates a delta. Periods
+    auto-discovered (latest two) when omitted."""
+    from app.services.ontology.metrics import compare_metric_periods, discover_periods, resolve_metric
+
+    org = _org_or_404(user, org_id)
+    parsed: dict = {}
+    if extra_filters:
+        try:
+            parsed = json.loads(extra_filters)
+            if not isinstance(parsed, dict):
+                raise ValueError("extra_filters must be a JSON object")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid extra_filters JSON: {exc}")
+
+    if not current_period or not prior_period:
+        metric, reason = resolve_metric(db, org, metric_ref)
+        if metric is None:
+            return {"success": False, "unavailable": True, "reason": reason}
+        periods = discover_periods(db, org, metric, n=2)
+        if isinstance(periods, dict) or len(periods) < 2:
+            return {"success": False, "unavailable": True,
+                    "reason": "could not discover two comparable periods"}
+        current_period, prior_period = periods[-1], periods[-2]
+
+    return compare_metric_periods(
+        db, org, metric_ref,
+        current_period=current_period, prior_period=prior_period,
+        extra_filters=parsed)
+
+
+@router.get("/ontology/metrics/{metric_ref}/segments-compare")
+def metric_segments_compare_endpoint(
+    metric_ref: str,
+    segment_column: str = Query(...),
+    current_period: str | None = Query(default=None),
+    prior_period: str | None = Query(default=None),
+    segments: str | None = Query(default=None),
+    extra_filters: str | None = Query(default=None),
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P5 — deterministic profitability / segment analysis (e.g. gross margin by
+    vehicle model, current vs prior month). Reuses compute_metric per segment;
+    if `segments` is omitted, distinct segment values are discovered via a
+    governed DISTINCT query — no hardcoded business keys. Periods auto-discovered
+    when omitted."""
+    from app.services.ontology.metrics import (
+        compare_metric_periods, discover_distinct, discover_periods, resolve_metric)
+
+    org = _org_or_404(user, org_id)
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", segment_column):
+        raise HTTPException(status_code=400, detail="invalid segment_column")
+
+    parsed_extra: dict = {}
+    if extra_filters:
+        try:
+            parsed_extra = json.loads(extra_filters)
+            if not isinstance(parsed_extra, dict):
+                raise ValueError("extra_filters must be a JSON object")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid extra_filters JSON: {exc}")
+
+    seg_list = None
+    if segments:
+        try:
+            seg_list = json.loads(segments)
+            if not isinstance(seg_list, list):
+                raise ValueError("segments must be a JSON array")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid segments JSON: {exc}")
+
+    metric, reason = resolve_metric(db, org, metric_ref)
+    if metric is None:
+        return {"success": False, "unavailable": True, "reason": reason}
+
+    if not current_period or not prior_period:
+        periods = discover_periods(db, org, metric, n=2)
+        if isinstance(periods, dict) or len(periods) < 2:
+            return {"success": False, "unavailable": True,
+                    "reason": "could not discover two comparable periods"}
+        current_period, prior_period = periods[-1], periods[-2]
+
+    if seg_list is None:
+        discovered = discover_distinct(
+            db, org, metric, segment_column,
+            periods=[current_period, prior_period])
+        if isinstance(discovered, dict):  # typed-unavailable
+            return discovered
+        seg_list = discovered
+
+    return compare_metric_periods(
+        db, org, metric_ref,
+        current_period=current_period, prior_period=prior_period,
+        segment_column=segment_column, segments=seg_list,
+        extra_filters=parsed_extra)
+
+
+@router.get("/ontology/metrics/{metric_ref}/trend")
+def metric_trend_endpoint(
+    metric_ref: str,
+    periods: str | None = Query(default=None),
+    extra_filters: str | None = Query(default=None),
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P5 — governed multi-period series for charting (e.g. revenue/margin over
+    months). Reuses compute_metric per period; unavailable points are null.
+    Periods auto-discovered (latest 6) when omitted."""
+    from app.services.ontology.metrics import discover_periods, resolve_metric, trend_metric
+
+    org = _org_or_404(user, org_id)
+    period_list = None
+    if periods:
+        try:
+            period_list = json.loads(periods)
+            if not isinstance(period_list, list):
+                raise ValueError("periods must be a JSON array")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid periods JSON: {exc}")
+    else:
+        metric, reason = resolve_metric(db, org, metric_ref)
+        if metric is None:
+            return {"success": False, "unavailable": True, "reason": reason}
+        discovered = discover_periods(db, org, metric, n=6)
+        if isinstance(discovered, dict) or not discovered:
+            return {"success": False, "unavailable": True,
+                    "reason": "could not discover time periods"}
+        period_list = discovered
+
+    parsed: dict = {}
+    if extra_filters:
+        try:
+            parsed = json.loads(extra_filters)
+            if not isinstance(parsed, dict):
+                raise ValueError("extra_filters must be a JSON object")
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid extra_filters JSON: {exc}")
+    return trend_metric(
+        db, org, metric_ref, periods=period_list, extra_filters=parsed)
+
+
+@router.post("/ontology/situation/investigate")
+async def situation_investigate(
+    body: dict,
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """B — connect the Situation Room to the EXISTING Zhanlu Agent Harness.
+
+    Reuses `ask_data_agent` (the governed Data-Agent sub-loop): it is scoped to
+    this org's bound data sources, denies all write tools, and is budget-bounded.
+    No new orchestration framework. The deterministic graph/metric/evidence view
+    in the UI remains the always-available core; this is the agent synthesis layer.
+    """
+    from app.models.knowledge_base import KnowledgeBase
+    from app.services.tool_handlers.delegation_tools import _ask_data_agent
+
+    question = (body or {}).get("question")
+    if not question or not str(question).strip():
+        raise HTTPException(status_code=400, detail="question is required")
+
+    org = _org_or_404(user, org_id)
+    kbs = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.org_id == org,
+                KnowledgeBase.is_deleted == False,  # noqa: E712
+                KnowledgeBase.source_kind == "database")
+        .all())
+    bound_kb_ids = [k.id for k in kbs]
+    if not bound_kb_ids:
+        return {"success": False, "unavailable": True,
+                "reason": "no data sources are bound to this organization"}
+    context = {
+        "bound_kb_ids": bound_kb_ids,
+        "endpoint": None,
+        "agent_name": "situation-room",
+    }
+    try:
+        result = await _ask_data_agent(
+            {"question": str(question).strip()}, db, user.id, context)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("situation_investigate failed: %s", exc)
+        return {"success": False, "unavailable": True,
+                "reason": f"agent investigation failed: {exc}"}
+    return result
 
 
 @router.get("/ontology/actions")
