@@ -374,3 +374,17 @@ Tests: `tests/test_semantic_integration.py` (10) — enabled SQL materialization
 
 Phase 1B.3 handoff: BCS consumes ONLY enabled rules via `(org, scope, scope_ref_id)` (+ optional `datasource_ids` pre-filter); the bridge can be reused as the write-path template for other compatibility layers (action pre-checks, process reasoning); org-wide targeting enumerates KBs at sync time — if live KB churn becomes a problem, move targeting into the store read path.
 
+### Phase 1B.3 — Project ↔ OrgUnit Integration (2026-11-01, DONE)
+
+Projects (My Space work contexts) can now reference the authoritative enterprise organizational model without changing any security semantics:
+
+- **Model:** nullable `projects.department_org_unit_id` (indexed, NO hard FK — same convention as the terminology link). Migration `121_project_org_unit.py` on `120_semantic_integration`: one column + one index, no backfill, existing projects untouched.
+- **Linking (generic entity API only — no duplicate project APIs):** `entity_service.create_record` / `update_record` / `bulk_create_records` / `bulk_update_records` / `update_many_records` validate an explicit `department_org_unit_id` payload field when the model carries the column: fail-closed load (missing AND cross-org → 404), only `unit_type ∈ {department, team}` accepted (`role` units are performers, not containers → 400). Raised as `OrgUnitLinkError(HTTPException)` so the generic router needs zero special-casing. Never auto-assigned; `None` unlinks.
+- **Legacy `department` label stays authoritative for discovery-routing** and is backward compatible: an explicit human link back-fills the label from the OrgUnit name ONLY when the payload doesn't carry its own `department` value; unlinking never erases the label.
+- **Reads:** `get_record` / `list_records` / filter annotate Project dicts having a link with `department_org_unit = {id, name, unit_type, hierarchy}` — hierarchy is the name-based `parent_name` chain walked org-locally with a cycle guard and 10-level bound (OrgUnit hierarchy is name-based by design).
+- **Invariants held:** Project remains a work context, NOT a security principal — the link is metadata only; ownership / ResourceShare / `project_use_authorized` untouched (verified by test: a department-linked project grants nothing to same-org non-owners or foreign admins; explicit 'use' share still grants). No datasource/KB/agent permission expands. No automatic department discovery.
+
+Tests: `tests/test_project_org_unit.py` (6) — create-time link + label back-fill (payload label wins), get/list hierarchy annotation, cross-org/missing 404 + role-unit 400 with zero writes, unlinked-project functionality + explicit unlink preserving the label, unrelated-field preservation, authorization unchanged (creator ok / colleague denied / foreign admin denied / 'use' share grants). Regression: `test_project_access_authorization.py` 9 + entity tenant-scoping / master-filter / list-fields / backing / router-sync suites 51.
+
+Phase 2 handoff (roadmap Phase 2 — Business Context Service): BCS can now join Project → OrgUnit → (department-scoped context); the link is display/metadata only until BCS defines explicit consumption rules; Terminology.ontology_object_id (1B.2) follows the same validated-link pattern.
+

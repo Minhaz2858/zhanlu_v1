@@ -41,6 +41,15 @@ class Project(TimestampedBase):
     )
     llm_model: Mapped[Optional["LlmModel"]] = relationship("LlmModel", foreign_keys=[llm_model_id])
 
+    # P1B.3 (2026-11-01): optional link to the AUTHORITATIVE department
+    # model (OrgUnit, unit_type department|team). Plain id, no hard FK —
+    # org consistency and unit_type are validated by the entity API when
+    # linking. Never auto-assigned; never used for authorization (any
+    # legacy free-text label stays separate and untouched).
+    department_org_unit_id: Mapped[Optional[str]] = mapped_column(
+        String(36), nullable=True, index=True,
+    )
+
     # Reverse relationship populated by ProjectMemory.project
     project_memories: Mapped[list["ProjectMemory"]] = relationship(
         "ProjectMemory",

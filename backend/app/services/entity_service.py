@@ -7,11 +7,111 @@ update, soft-delete, delete-many, bulk-create, bulk-update, update-many, restore
 
 from typing import Any, Optional
 from datetime import datetime, date, timezone
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.utils.query_parser import parse_query
 from app.utils.sort_parser import parse_sort
+
+
+# --- Project → OrgUnit authoritative department link (Phase 1B.3) --------
+
+#: OrgUnit unit_types that may be assigned to a project. 'role' units are
+#: performers, not containers — excluded.
+_ASSIGNABLE_UNIT_TYPES = ("department", "team")
+
+
+class OrgUnitLinkError(HTTPException):
+    """Invalid ``Project.department_org_unit_id`` (missing / cross-org /
+    wrong unit_type). HTTPException subclass so the generic entity router
+    maps it to the right status with zero router-specific handling."""
+
+    def __init__(self, detail: str, status_code: int = 400):
+        super().__init__(status_code=status_code, detail=detail)
+
+
+def _resolve_project_org_unit(db: Session, org_id: str | None,
+                              unit_id) -> object:
+    """Fail-closed load: the unit must exist, be non-deleted, belong to
+    the SAME org as the project, and be a department or team. Missing and
+    cross-org are indistinguishable (404)."""
+    from app.models.enterprise_process import OrgUnit
+
+    unit = db.query(OrgUnit).filter(
+        OrgUnit.id == unit_id,
+        OrgUnit.is_deleted == False,  # noqa: E712
+    ).first()
+    if unit is None or (org_id and unit.org_id != org_id):
+        raise OrgUnitLinkError(
+            "OrgUnit not found in this organization", status_code=404)
+    if unit.unit_type not in _ASSIGNABLE_UNIT_TYPES:
+        raise OrgUnitLinkError(
+            f"Only department/team units may be assigned (got "
+            f"{unit.unit_type!r})", status_code=400)
+    return unit
+
+
+def _validate_project_org_unit_payload(model, data: dict, db: Session,
+                                       org_id: str | None) -> None:
+    """Validate an explicit ``department_org_unit_id`` in a create/update
+    payload (no-op for every other entity). Never auto-assigns."""
+    if not hasattr(model, "department_org_unit_id"):
+        return
+    if "department_org_unit_id" not in data:
+        return
+    unit_id = data.get("department_org_unit_id")
+    if unit_id:
+        _resolve_project_org_unit(db, org_id, unit_id)
+
+
+def _unit_hierarchy(db: Session, unit) -> list[str]:
+    """OrgUnit hierarchy is name-based (``parent_name`` chain). Bounded
+    walk with a cycle guard; unknown parents stop the chain honestly."""
+    from app.models.enterprise_process import OrgUnit
+
+    chain = [unit.name]
+    seen = {unit.name}
+    parent_name = unit.parent_name
+    for _ in range(10):
+        if not parent_name or parent_name in seen:
+            break
+        parent = db.query(OrgUnit).filter(
+            OrgUnit.org_id == unit.org_id,
+            OrgUnit.name == parent_name,
+            OrgUnit.is_deleted == False,  # noqa: E712
+        ).first()
+        if parent is None:
+            break
+        chain.append(parent.name)
+        seen.add(parent.name)
+        parent_name = parent.parent_name
+    return chain
+
+
+def _annotate_project_org_unit(db: Session, model, records: list) -> list:
+    """Enrich Project dicts having ``department_org_unit_id`` with the
+    authoritative unit name, type and hierarchy chain (no-op for other
+    entities and for unlinked projects)."""
+    if not records or not hasattr(model, "department_org_unit_id"):
+        return records
+    ids = {r.get("department_org_unit_id") for r in records
+           if isinstance(r, dict) and r.get("department_org_unit_id")}
+    if not ids:
+        return records
+    from app.models.enterprise_process import OrgUnit
+
+    by_id = {u.id: u for u in db.query(OrgUnit).filter(
+        OrgUnit.id.in_(ids)).all()}
+    for r in records:
+        unit = by_id.get(r.get("department_org_unit_id"))
+        if unit is not None:
+            r["department_org_unit"] = {
+                "id": unit.id, "name": unit.name,
+                "unit_type": unit.unit_type,
+                "hierarchy": _unit_hierarchy(db, unit),
+            }
+    return records
 
 
 def _tenant_filters(model, org_id: str | None = None, app_id: str | None = None):
@@ -375,6 +475,7 @@ def list_records(
         query = query.limit(limit)
     records = [r.to_dict() for r in query.all()]
     records = _annotate_access(model, records, owner_id, db, is_admin=is_admin)
+    records = _annotate_project_org_unit(db, model, records)
     return _project_fields(records, fields)
 
 
@@ -411,6 +512,7 @@ def filter_records(
         query = query.limit(limit)
     records = [r.to_dict() for r in query.all()]
     records = _annotate_access(model, records, owner_id, db, is_admin=is_admin)
+    records = _annotate_project_org_unit(db, model, records)
     return _project_fields(records, fields)
 
 
@@ -449,7 +551,7 @@ def get_record(model, record_id: str, db: Session, owner_id: str | None = None,
         return None
     result = record.to_dict()
     _annotate_access(model, [result], owner_id, db, is_admin=is_admin)
-    return result
+    return _annotate_project_org_unit(db, model, [result])[0]
 
 
 def create_record(model, data: dict, db: Session, created_by_id: str | None = None,
@@ -475,12 +577,21 @@ def create_record(model, data: dict, db: Session, created_by_id: str | None = No
     if extra_fields:
         filtered.update(extra_fields)
     _stamp_tenant(model, filtered, org_id, app_id)
+    _validate_project_org_unit_payload(model, data, db, org_id)
+    if (hasattr(model, "department_org_unit_id")
+            and filtered.get("department_org_unit_id")
+            and "department" not in data and hasattr(model, "department")):
+        # Human explicitly linked a unit → back-fill the legacy discovery-
+        # routing label from the authoritative name (payload wins if set).
+        unit = _resolve_project_org_unit(db, org_id,
+                                         filtered["department_org_unit_id"])
+        filtered["department"] = unit.name
 
     record = model(**filtered)
     db.add(record)
     db.commit()
     db.refresh(record)
-    return record.to_dict()
+    return _annotate_project_org_unit(db, model, [record.to_dict()])[0]
 
 
 def update_record(model, record_id: str, data: dict, db: Session, owner_id: str | None = None,
@@ -515,12 +626,19 @@ def update_record(model, record_id: str, data: dict, db: Session, owner_id: str 
     # strict claim rules in ``_apply_claim_updates``.  See the helper
     # docstring for the rationale (2026-08-28 Skills-tab bug fix).
     _apply_claim_updates(record, model, data, claim_user_id)
+    _validate_project_org_unit_payload(model, data, db, org_id)
+    if (hasattr(model, "department_org_unit_id")
+            and filtered.get("department_org_unit_id")
+            and "department" not in data and hasattr(model, "department")):
+        unit = _resolve_project_org_unit(db, org_id,
+                                         filtered["department_org_unit_id"])
+        filtered["department"] = unit.name
     _apply_updates(record, model, filtered)
 
     record.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(record)
-    return record.to_dict()
+    return _annotate_project_org_unit(db, model, [record.to_dict()])[0]
 
 
 def soft_delete_record(model, record_id: str, db: Session, owner_id: str | None = None,
@@ -602,6 +720,7 @@ def bulk_create_records(model, data_list: list, db: Session, created_by_id: str 
         if created_by_id and "created_by_id" in _get_valid_fields(model):
             filtered["created_by_id"] = created_by_id
         _stamp_tenant(model, filtered, org_id, app_id)
+        _validate_project_org_unit_payload(model, data, db, org_id)
         record = model(**filtered)
         db.add(record)
         results.append(record)
@@ -634,6 +753,7 @@ def bulk_update_records(model, data_list: list, db: Session, owner_id: str | Non
 
         filtered = _filter_data(model, data)
         filtered.pop("id", None)
+        _validate_project_org_unit_payload(model, data, db, org_id)
         _apply_updates(record, model, filtered)
 
         record.updated_date = datetime.now(timezone.utc)
@@ -668,6 +788,9 @@ def update_many_records(
 
     records = query.all()
     count = 0
+    _validate_project_org_unit_payload(
+        model, update_data.get("$set", {}) if isinstance(update_data, dict)
+        else {}, db, org_id)
     for record in records:
         # Apply MongoDB-style update operators — route through _filter_data
         # to prevent privilege escalation (e.g. $set: {"role": "admin"}).
