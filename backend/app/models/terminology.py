@@ -38,3 +38,9 @@ class Terminology(TimestampedBase):
     embedding_text: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True
     )  # Combined text for the retriever embedder
+    # Optional link to the unified ontology (Phase 1B.2) — plain id, no
+    # hard FK: org consistency is validated when linking (link API), and
+    # unlinked rows remain fully functional for retrieval.
+    ontology_object_id: Mapped[Optional[str]] = mapped_column(
+        String(36), nullable=True, index=True
+    )

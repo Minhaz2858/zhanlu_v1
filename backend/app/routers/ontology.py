@@ -7,6 +7,7 @@ only. The overview endpoint lazily seeds the 14 domain packs.
 
 import json
 import re
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -1226,6 +1227,39 @@ def business_rule_resubmit(
     """Explicit resubmission: rejected → proposed (the only path back)."""
     return _business_rule_action(rule_id, "resubmit", db, admin,
                                  (body.reason if body else None))
+
+
+@router.post("/ontology/enterprise/business-rules/sync-guidelines")
+def business_rules_sync_guidelines(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_org_admin),
+):
+    """Full idempotent sync of enabled SQL BusinessRules into the
+    SemanticGuidelines compatibility layer (marked [business-rule:*] rows;
+    manual guidelines untouched). Also called automatically by the review
+    lifecycle — this endpoint covers backfills, KB targeting changes and
+    drift repair. Audited."""
+    from app.models.audit_event import AuditEvent
+    from app.services.ontology.business_rule_bridge import (
+        sync_business_rules_to_guidelines)
+
+    out = sync_business_rules_to_guidelines(db, admin.org_id)
+    db.add(AuditEvent(
+        org_id=admin.org_id,
+        event_type="business_rule_guidelines_synced",
+        event_source="ontology",
+        actor_type="user",
+        actor_id=admin.id,
+        actor_name=(getattr(admin, "full_name", None)
+                    or getattr(admin, "email", None)),
+        resource_type="business_rule",
+        resource_id="*",
+        outcome="success",
+        detail_json=out,
+        occurred_at=datetime.now(timezone.utc),
+    ))
+    db.commit()
+    return out
 
 
 @router.post("/ontology/enterprise/{kind}/{entity_id}/confirm")

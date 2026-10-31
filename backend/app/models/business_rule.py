@@ -78,6 +78,10 @@ class BusinessRule(TimestampedBase, Base):
     # append-only [{decision, reviewer_id, reviewer_name, reason, at}]
     review_history: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
+    # Optional KB targeting for applies_to='sql' rules (bridge consumes it;
+    # NULL = org-wide → every KB of the org at sync time)
+    datasource_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     def record_review(self, decision: str, reviewer_id: str | None = None,
                       reviewer_name: str | None = None,
                       reason: str | None = None) -> None:

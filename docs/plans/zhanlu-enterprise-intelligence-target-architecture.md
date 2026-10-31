@@ -355,3 +355,22 @@ Tests: `tests/test_business_rule_lifecycle.py` (13, HTTP-level with ephemeral SQ
 
 Phase 1B.2 handoff: (1) discovery-side rule proposal must create rows ONLY as `proposed` and must skip rows already carrying a `review_history` decision (no overwrite); (2) `review-queue` aggregation can union proposed BusinessRules alongside EBPM proposals; (3) BCS (1B.3) consumes ONLY `status='enabled'` rules by `(org, scope, scope_ref_id)`; (4) SemanticGuidelines bridge reads enabled `applies_to='sql'` rules.
 
+### Phase 1B.2 — Semantic Integration (2026-11-01, DONE)
+
+**BusinessRule → SemanticGuidelines bridge** (`app/services/ontology/business_rule_bridge.py`) — BusinessRule stays AUTHORITATIVE; SemanticGuidelines remains the compatibility layer consumed by `SemanticStore.guidelines()` (no second SQL rule engine; the existing BUSINESS RULES prompt block is untouched):
+
+- Eligibility: ONLY `status='enabled'` AND `applies_to='sql'`. Proposed / rejected / merely verified rules are never materialized, and any state change retracts previously derived rows (lifecycle hook `maybe_sync_on_review` runs inside the review transaction, fail-open).
+- Derived rows are marked `[business-rule:{rule_id}]` in the title; sync manages ONLY marker rows — manual SemanticGuidelines are untouched, and the full sync sweeps stale markers whose rule no longer exists.
+- Idempotent: re-sync produces zero created/updated/removed when state already matches (rows updated in place, never duplicated).
+- Provenance preserved: derived content = statement + footer `[source: business_rule:{id} | scope: {scope}:{ref} | applies_to | evidence: {ids}]`; org/scope carried on the row.
+- Targeting: new nullable `business_rules.datasource_ids` (JSON) — listed KBs, or org-wide (every non-deleted KB enumerated at sync time; new KBs picked up by the next sync — documented limitation).
+- `POST /api/ontology/enterprise/business-rules/sync-guidelines` (org-admin, audited `business_rule_guidelines_synced`) for backfills/drift repair; lifecycle hooks keep everyday flow in sync automatically.
+
+**Terminology → Ontology link** — new nullable `terminologies.ontology_object_id` (indexed; NO hard FK — org consistency validated at link time, unlinked rows fully functional, existing rows preserved). Router endpoints on the existing terminologies API: `POST/GET/DELETE /api/datasources/{ds}/terminologies/{id}/ontology-link` — link validates org consistency fail-closed (missing AND cross-org → 404), never auto-invents links; GET inspects the linked object (id/name/domain/backing_kind); DELETE unlinks; serialization exposes `ontology_object_id`.
+
+Migration `120_semantic_integration.py` (on `119_business_rule`): two nullable columns + one index — purely additive, no backfill, no behavior change for existing rows.
+
+Tests: `tests/test_semantic_integration.py` (10) — enabled SQL materialization (incl. per-datasource targeting + provenance footer), proposed/rejected/verified/non-SQL exclusion, idempotency (zero-churn second sync), disable retracting retrieval influence (and re-enable re-materializing), reject-hook stale-row cleanup, manual-guideline preservation, terminology link/unlink/inspect, cross-org link 404, existing terminology upsert/list/search behavior preserved. Regression: 41 across the three BusinessRule suites + 53 across semantic-store/prompt-injection/terminology/OCI suites (2 `test_nl2sql_oci_p2.py` failures verified pre-existing on stashed HEAD — unrelated).
+
+Phase 1B.3 handoff: BCS consumes ONLY enabled rules via `(org, scope, scope_ref_id)` (+ optional `datasource_ids` pre-filter); the bridge can be reused as the write-path template for other compatibility layers (action pre-checks, process reasoning); org-wide targeting enumerates KBs at sync time — if live KB churn becomes a problem, move targeting into the store read path.
+

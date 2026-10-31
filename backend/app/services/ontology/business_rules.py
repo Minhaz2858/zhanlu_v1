@@ -138,6 +138,11 @@ def review_business_rule(db: Session, org_id: str, rule_id: str, action: str,
     rule.status = to_status
     # Evidence ids are append-only input — nothing here ever touches them.
     _audit(db, org_id, rule, action, from_status, to_status, reviewer, reason)
+    # Phase 1B.2: keep the SemanticGuidelines compatibility layer in step
+    # (fail-open — a bridge failure never blocks a governance decision).
+    from app.services.ontology.business_rule_bridge import maybe_sync_on_review
+
+    maybe_sync_on_review(db, rule)
     db.commit()
     db.refresh(rule)
     return serialize_rule(rule)

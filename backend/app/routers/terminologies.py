@@ -60,6 +60,7 @@ def register_terminologies_router() -> APIRouter:
             "datasource_ids": row.datasource_ids,
             "agent_id": row.agent_id,
             "enabled": row.enabled,
+            "ontology_object_id": getattr(row, "ontology_object_id", None),
             "created_date": str(row.created_date) if row.created_date else None,
         }
 
@@ -151,6 +152,99 @@ def register_terminologies_router() -> APIRouter:
             {"word": w, "description": d, "score": round(s, 4)}
             for w, d, s in hits
         ]
+
+    # --- ontology link (Phase 1B.2) ----------------------------------------
+    #
+    # Optional glossary → ontology-object link. The id is validated for
+    # ORG CONSISTENCY at link time (fail-closed 404 on missing or
+    # cross-org); nothing is ever auto-linked. Unlinked rows keep their
+    # full retrieval behavior.
+
+    def _object_or_404(db, term, object_id: str):
+        from app.models.ontology import OntologyObject
+
+        obj = (
+            db.query(OntologyObject)
+            .filter(
+                OntologyObject.id == object_id,
+                OntologyObject.org_id == term.org_id,
+                OntologyObject.is_deleted == False,  # noqa: E712
+            )
+            .first()
+        )
+        if obj is None:
+            # missing AND cross-org are indistinguishable (fail closed)
+            raise HTTPException(
+                status_code=404,
+                detail="Ontology object not found in this organization",
+            )
+        return obj
+
+    @router.get(
+        "/datasources/{datasource_id}/terminologies/{entry_id}/ontology-link"
+    )
+    def get_terminology_ontology_link(
+        datasource_id: str,
+        entry_id: str,
+        svc=Depends(_svc),
+        user=Depends(get_current_user_required),
+    ):
+        """Inspect the linked ontology object (org-safe): null when the
+        entry is unlinked."""
+        row = _entry_or_404(svc, entry_id)
+        if not row.ontology_object_id:
+            return {"ontology_object": None}
+        obj = _object_or_404(svc._db, row, row.ontology_object_id)
+        return {"ontology_object": {
+            "id": obj.id, "name": obj.name,
+            "domain_id": obj.domain_id,
+            "backing_kind": obj.backing_kind,
+        }}
+
+    @router.post(
+        "/datasources/{datasource_id}/terminologies/{entry_id}/ontology-link"
+    )
+    def link_terminology_ontology(
+        datasource_id: str,
+        entry_id: str,
+        body: dict,
+        svc=Depends(_svc),
+        user=Depends(get_current_user_required),
+    ):
+        """Link the glossary entry to an ontology object (explicit,
+        org-consistent; never invented). Re-linking to another object is
+        allowed; the object must live in the terminology's org."""
+        row = _entry_or_404(svc, entry_id)
+        object_id = str((body or {}).get("ontology_object_id") or "").strip()
+        if not object_id:
+            raise HTTPException(
+                status_code=400, detail="ontology_object_id is required")
+        obj = _object_or_404(svc._db, row, object_id)
+        row.ontology_object_id = obj.id
+        svc._db.commit()
+        return {
+            **_serialize(row),
+            "ontology_object": {
+                "id": obj.id, "name": obj.name,
+                "domain_id": obj.domain_id,
+                "backing_kind": obj.backing_kind,
+            },
+        }
+
+    @router.delete(
+        "/datasources/{datasource_id}/terminologies/{entry_id}/ontology-link"
+    )
+    def unlink_terminology_ontology(
+        datasource_id: str,
+        entry_id: str,
+        svc=Depends(_svc),
+        user=Depends(get_current_user_required),
+    ):
+        """Remove the link (the glossary entry itself is untouched)."""
+        row = _entry_or_404(svc, entry_id)
+        row.ontology_object_id = None
+        svc._db.commit()
+        return _serialize(row)
 
     return router
 
