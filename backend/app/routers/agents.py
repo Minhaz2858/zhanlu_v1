@@ -47,7 +47,10 @@ from app.services.llm_service import (
     llm_headers, llm_url, get_model, model_has_fixed_temperature,
     maybe_enable_parallel_tool_calls,
 )
-from app.services.llm_router import resolve_effective_llm, resolve_message_project_id, EffectiveLLM
+from app.services.llm_router import resolve_effective_llm, EffectiveLLM
+from app.services.project_access import (
+    authorize_project_reference, resolve_authorized_message_project,
+)
 from app.services.agent_prompts import (
     get_system_prompt,
     get_tools,
@@ -6458,19 +6461,20 @@ async def create_conversation(
     # conversation is created against the agent's default data-source
     # scope (graceful degradation rather than a hard failure).
     if project_id:
-        from app.models.project import Project as _Project  # local import: avoids module-load cycles
-        _project_row = (
-            db.query(_Project.id)
-            .filter(_Project.id == project_id, _Project.is_deleted == False)  # noqa: E712
-            .first()
-        )
-        if _project_row is None:
+        # Phase 0A: the reference must be AUTHORIZED, not merely live —
+        # an existing project the user may not use is a 404 (no
+        # existence leak); a stale/deleted id degrades gracefully to
+        # None exactly as before.
+        _authorized = authorize_project_reference(db, user, project_id)
+        if _authorized is None:
             # Stale or non-existent project id — drop it. Also strip
             # ``project_id``/``project_name`` from the stored metadata
             # so the conversation isn't tagged with a phantom project.
             project_id = None
             if isinstance(metadata, dict):
                 metadata = {k: v for k, v in metadata.items() if k not in ("project_id", "project_name", "project")}
+        else:
+            project_id = _authorized.id
     conv = AgentConversation(
         agent_name=body.get("agent_name"),
         title=title,
@@ -6654,9 +6658,10 @@ async def add_message(
     # project (legacy rows, main-chat entry) must still follow the
     # selected project's configured LLM — otherwise the agent reads
     # the project's data sources but thinks with the default model.
-    _llm_pid_v2 = resolve_message_project_id(
+    _llm_pid_v2 = resolve_authorized_message_project(
         db,
-        conv_project_id=getattr(conv, "project_id", None),
+        user=user,
+        conv=conv,
         body_project_id=body.get("project_id"),
         body_project_name=body.get("project_name"),
     )
@@ -11671,9 +11676,10 @@ async def add_message_stream(
     # project (legacy rows, main-chat entry) must still follow the
     # selected project's configured LLM — otherwise the agent reads
     # the project's data sources but thinks with the default model.
-    _llm_eff_pid = resolve_message_project_id(
+    _llm_eff_pid = resolve_authorized_message_project(
         db,
-        conv_project_id=getattr(conv, "project_id", None),
+        user=user,
+        conv=conv,
         body_project_id=body.get("project_id"),
         body_project_name=body.get("project_name"),
     )
