@@ -388,29 +388,34 @@ def retrieve_for_question(
     # actual join conditions still come from the authorized schema catalog.
     if ontology_context:
         try:
-            _W_OBJ, _W_HYP, _W_LINK, _W_TERM = 1.25, 0.25, 0.75, 1.0
+            _W_OBJ, _W_HYP, _W_LINK, _W_TERM, _W_METRIC = (
+                1.25, 0.25, 0.75, 1.0, 1.5)
             _q = set(lexical_tokens(question))
             prov: dict = {"objects": [], "links": [], "terms": [],
-                          "hypotheses": [], "enabled_sql_rules": []}
+                          "hypotheses": [], "enabled_sql_rules": [],
+                          "metrics": []}
 
             for obj in ontology_context.get("objects_verified") or []:
+                kept = False
+                if _q & set(lexical_tokens(
+                        f"{obj.get('name')} {obj.get('display_name') or ''}")
+                ) and obj.get("backing_table"):
+                    kept = _add(obj["backing_table"], _W_OBJ,
+                                f"ontology object '{obj['name']}' (verified) "
+                                f"maps to this table", "ontology")
                 prov["objects"].append({"name": obj.get("name"),
-                                        "table": obj.get("backing_table")})
-                if not (_q & set(lexical_tokens(
-                        f"{obj.get('name')} {obj.get('display_name') or ''}"))):
-                    continue
-                if obj.get("backing_table"):
-                    _add(obj["backing_table"], _W_OBJ,
-                         f"ontology object '{obj['name']}' (verified) "
-                         f"maps to this table", "ontology")
+                                        "table": obj.get("backing_table"),
+                                        "influenced": bool(kept)})
             for obj in ontology_context.get("objects_hypotheses") or []:
-                prov["hypotheses"].append({"name": obj.get("name"),
-                                           "table": obj.get("backing_table")})
+                kept = False
                 if _q & set(lexical_tokens(obj.get("name") or "")) \
                         and obj.get("backing_table"):
-                    _add(obj["backing_table"], _W_HYP,
-                         f"ontology object '{obj['name']}' (PROPOSED — "
-                         f"hypothesis only)", "ontology-hypothesis")
+                    kept = _add(obj["backing_table"], _W_HYP,
+                                f"ontology object '{obj['name']}' (PROPOSED — "
+                                f"hypothesis only)", "ontology-hypothesis")
+                prov["hypotheses"].append({"name": obj.get("name"),
+                                           "table": obj.get("backing_table"),
+                                           "influenced": bool(kept)})
 
             scored_now = {n.lower() for n, s in scores.items()
                           if s >= _W_LINK}
@@ -423,15 +428,17 @@ def retrieve_for_question(
                 pair_hint = a if (b in scored_now and a not in scored_now) \
                     else (b if (a in scored_now and b not in scored_now) else None)
                 if link.get("evidence_status") == "verified":
+                    kept = False
+                    if pair_hint:
+                        kept = _add(pair_hint, _W_LINK,
+                                    f"verified ontology relationship "
+                                    f"{link.get('from')} --{link.get('type')}--> "
+                                    f"{link.get('to')} (candidate hint, not a join)",
+                                    "ontology-link")
                     prov["links"].append({"from": link.get("from"),
                                           "to": link.get("to"),
-                                          "tables": [a, b]})
-                    if pair_hint:
-                        _add(pair_hint, _W_LINK,
-                             f"verified ontology relationship "
-                             f"{link.get('from')} --{link.get('type')}--> "
-                             f"{link.get('to')} (candidate hint, not a join)",
-                             "ontology-link")
+                                          "tables": [a, b],
+                                          "influenced": bool(kept)})
                 elif pair_hint is None and (a in scored_any or b in scored_any):
                     # hypothesis links: provenance only, NEVER scored
                     prov["hypotheses"].append({
@@ -443,7 +450,6 @@ def retrieve_for_question(
                     f"{term.get('word')} {term.get('description') or ''}"))
                 if not (_q & set(lexical_tokens(term.get("word") or ""))):
                     continue
-                prov["terms"].append({"word": term.get("word")})
                 matched = 0
                 for name, toc_entry in by_name.items():
                     desc_toks = set(lexical_tokens(" ".join(filter(None, [
@@ -455,12 +461,50 @@ def retrieve_for_question(
                         _add(name, _W_TERM,
                              f"terminology '{term.get('word')}' matches this "
                              f"table's business description", "terminology")
+                prov["terms"].append({"word": term.get("word"),
+                                      "influenced": matched > 0})
+
+            # Phase 3B: metric definitions as ranking evidence. A metric
+            # contributes ONLY its name/description/synonym relevance and
+            # its authorized base_table mapping — never its SQL definition,
+            # never an invented calculation. Unmapped or unverified metrics
+            # are recorded as provenance WITHOUT influencing ranking.
+            for metric in ontology_context.get("metrics") or []:
+                entry = {"name": metric.get("name"),
+                         "table": metric.get("base_table"),
+                         "evidence_status": metric.get("evidence_status")}
+                m_tokens = set(lexical_tokens(" ".join(filter(None, [
+                    metric.get("name"), metric.get("display_name"),
+                    " ".join(metric.get("synonyms") or [])]))))
+                kept = False
+                if _q & m_tokens:
+                    if metric.get("base_table"):
+                        if metric.get("evidence_status") == "verified":
+                            kept = _add(
+                                metric["base_table"], _W_METRIC,
+                                f"business metric '{metric.get('name')}' "
+                                f"is defined on this table",
+                                "ontology-metric")
+                            if not kept:
+                                # mapped table outside the authorized
+                                # catalog — honest "unmapped to anything
+                                # queryable"
+                                entry["unmapped"] = True
+                        # unverified metric: provenance only —
+                        # evidence_status in the entry explains why
+                    else:
+                        # no table mapping — honest degradation
+                        entry["unmapped"] = True
+                entry["influenced"] = bool(kept)
+                prov["metrics"].append(entry)
 
             for rule in ontology_context.get("enabled_sql_rules") or []:
                 prov["enabled_sql_rules"].append({
                     "id": rule.get("id"), "statement": rule.get("statement"),
                     "scope": rule.get("scope"),
-                    "datasource_ids": rule.get("datasource_ids") or []})
+                    "datasource_ids": rule.get("datasource_ids") or [],
+                    # rules are planning guidance, never a scoring component
+                    "influenced": False})
             result.ontology_provenance = prov
         except Exception as e:  # never let retrieval break answering
             logger.warning("table_retrieval: ontology evidence unavailable: %s", e)

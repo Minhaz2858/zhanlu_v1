@@ -474,6 +474,9 @@ class NLAnswerService:
         # the answer can carry provenance about which tables it drew on.
         _toc_snapshot: list | None = None
         _retrieval = None
+        # Phase 3B: ontology planning provenance for the query log (None
+        # whenever the TOC/retrieval path did not run or the flag is off).
+        _ont_provenance = None
 
         # ── C1b: static route → pin the table before ANY LLM selection ──
         # If the intent resolver hit, load DDL for the pinned table directly
@@ -604,6 +607,8 @@ class NLAnswerService:
                             ontology_context=_ontology_ctx,
                         )
                     )
+                    _ont_provenance = getattr(
+                        _retrieval, "ontology_provenance", None)
                     logger.info(
                         "NLAnswer: candidate retrieval → %d candidates "
                         "(method=%s, window=%s, uncovered=%s) top=%s",
@@ -1320,6 +1325,7 @@ class NLAnswerService:
                 duration_ms=(
                     _elapsed_ms(exec_result)
                 ),
+                ontology_provenance=_ont_provenance,
             )
             failure = {
                 "success": False,
@@ -1370,6 +1376,7 @@ class NLAnswerService:
             kb_id, question, sql, live_success=True,
             row_count=exec_result.get("row_count"),
             duration_ms=_elapsed_ms(exec_result),
+            ontology_provenance=_ont_provenance,
         )
 
         # 3b. Zero-row / degenerate auto-correction: if the SQL returned 0
@@ -3052,6 +3059,7 @@ def _shadow_validate_and_log(
     live_error: str = "",
     row_count: int | None = None,
     duration_ms: float | None = None,
+    ontology_provenance: dict | None = None,
 ) -> None:
     """NL2SQL observability: log every served query to ``nl2sql_query_logs``.
 
@@ -3093,6 +3101,13 @@ def _shadow_validate_and_log(
             _lineage = extract_lineage(sql)
         except Exception as e:
             logger.debug("lineage extraction failed (non-fatal): %s", e)
+    # Phase 3B: ontology planning provenance rides ADDITIVELY on the same
+    # lineage record — historical consumers read the legacy keys unchanged.
+    # With no provenance the row is byte-identical to pre-3B behavior, and
+    # a NULL lineage stays NULL (never an empty dict faking "no lineage").
+    if ontology_provenance:
+        _lineage = dict(_lineage) if isinstance(_lineage, dict) else {}
+        _lineage["ontology"] = ontology_provenance
 
     try:
         import uuid as _uuid

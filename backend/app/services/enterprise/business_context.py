@@ -482,7 +482,7 @@ def build_business_context(
 
 def build_ontology_planning_context(
     db: Session, org_id: str, *, query: str | None = None,
-    max_objects: int = 12,
+    max_objects: int = 12, datasource_id: str | None = None,
 ) -> dict:
     """Phase 3A — ontology-aware NL2SQL PLANNING context (internal data,
     NOT a prompt block). Org-scoped, read-only:
@@ -497,7 +497,12 @@ def build_ontology_planning_context(
       candidate retrieval).
     - enabled_sql_rules: ONLY ``status='enabled'`` AND
       ``applies_to='sql'`` rules (proposed/verified-not-enabled/rejected
-      are excluded — they cannot guide SQL).
+      are excluded — they cannot guide SQL). Phase 3B: further scoped to
+      ``datasource_id`` when supplied — rules listing other datasources
+      do not apply; org-wide rules always do.
+    - metrics: published MetricDefinitions (names/display/description/
+      synonyms + base_table ONLY — never base_sql), ranked by query
+      relevance. Missing table mappings degrade honestly (no boost).
 
     Ranking uses the same token-overlap approach as build_business_context.
     The caller (table retrieval) decides how to use this; nothing here
@@ -577,17 +582,57 @@ def build_ontology_planning_context(
             ).all(),
             lambda t: f"{t.word} {t.description or ''}")[:8]
     ]
-    rules = [
-        {"id": r.id, "statement": r.statement, "scope": r.scope,
-         "scope_ref_id": r.scope_ref_id,
-         "datasource_ids": list(r.datasource_ids or [])}
-        for r in db.query(BusinessRule).filter(
+    # Phase 3B: rules are additionally scoped to the datasource being
+    # queried. ``datasource_ids`` NULL/empty = org-wide (existing scope);
+    # a scoped rule applies ONLY to its listed datasources. Scoping can
+    # only NARROW — it never widens access beyond the org filter above,
+    # and the caller passes the id of the datasource it already owns.
+    rules = []
+    for r in db.query(BusinessRule).filter(
             BusinessRule.org_id == org_id,
             BusinessRule.is_deleted == False,  # noqa: E712
             BusinessRule.status == "enabled",
             BusinessRule.applies_to == "sql",
-        ).all()
-    ]
+    ).all():
+        ds_ids = list(r.datasource_ids or [])
+        if ds_ids and datasource_id and \
+                str(datasource_id) not in {str(d) for d in ds_ids}:
+            continue
+        rules.append({"id": r.id, "statement": r.statement, "scope": r.scope,
+                      "scope_ref_id": r.scope_ref_id,
+                      "datasource_ids": ds_ids})
+    # Phase 3B: metric definitions as ranking evidence. NAMES/SEMANTICS
+    # only — ``base_sql``/``filters_json`` stay out of the planning
+    # context so deterministic metric computation is never bypassed and
+    # the LLM can never execute a metric itself.
+    metrics = []
+    try:
+        from app.models.metric_definition import MetricDefinition
+
+        def _m_text(m):
+            return " ".join(filter(None, [
+                m.name, m.display_name, m.description,
+                " ".join(m.synonyms or [])]))
+
+        for m in _ranked(
+                db.query(MetricDefinition).filter(
+                    MetricDefinition.org_id == org_id,
+                    MetricDefinition.is_deleted == False,  # noqa: E712
+                    MetricDefinition.is_enabled.is_(True),
+                    MetricDefinition.lifecycle == "published",
+                ).all(),
+                _m_text)[:6]:
+            metrics.append({
+                "id": m.id, "name": m.name,
+                "display_name": m.display_name,
+                "description": m.description,
+                "synonyms": list(m.synonyms or []),
+                "base_table": m.base_table,
+                "evidence_status": getattr(m, "evidence_status",
+                                           None) or "verified"})
+    except Exception as e:  # per-section fail-open
+        logger.warning("ontology planning: metric section unavailable: %s", e)
+        metrics = []
     return {
         "org_id": org_id,
         "objects_verified": objects[0],
@@ -595,9 +640,11 @@ def build_ontology_planning_context(
         "links": links,
         "terms": terms,
         "enabled_sql_rules": rules,
+        "metrics": metrics,
         "provenance": {
             "sources": ["ontology_objects", "ontology_links",
-                        "terminologies", "business_rules"],
+                        "terminologies", "business_rules",
+                        "metric_definitions"],
             "hypotheses_labeled": True,
         },
     }
