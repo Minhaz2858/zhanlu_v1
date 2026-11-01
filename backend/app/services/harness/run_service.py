@@ -16,12 +16,58 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from app.config import settings
 from app.database import SessionLocal
+from app.services.enterprise.observations import record_observation
 
 logger = logging.getLogger(__name__)
 
 # Queue type used for agent_run tasks (matches enqueue/dequeue key)
 AGENT_RUN_TASK_TYPE = "agent_run"
+
+
+def _record_agent_run_observation(run_id: str) -> None:
+    """Phase 5B: observed-execution linkage for a COMPLETED agent run.
+
+    Called only AFTER the run's terminal commit (the row exists with its
+    real ``run_id`` and persisted ``tool_calls`` — the deterministic
+    matcher's signal source). Gated by ``ONTOLOGY_OBSERVATIONS_ENABLED``
+    (the SAME flag as the NL2SQL writer — one rollback switch). Org
+    attribution comes from the persisted ``caller_context`` — never from a
+    caller-supplied value; unattributable runs fail closed (no
+    observation). Idempotent: an existing linkage is never overwritten
+    (see observations.record_observation). FAIL-OPEN: any failure here is
+    logged and never invalidates the finished run.
+    """
+    if not getattr(settings, "ONTOLOGY_OBSERVATIONS_ENABLED", False):
+        return
+    from app.models.agent_run import AgentRun
+    from app.services.enterprise.observations import _agent_run_org
+
+    db = SessionLocal()
+    try:
+        record = db.query(AgentRun).filter(
+            AgentRun.run_id == run_id,
+            AgentRun.is_deleted == False,  # noqa: E712
+        ).first()
+        if record is None:
+            return
+        org_id = _agent_run_org(record)
+        if not org_id:
+            logger.debug(
+                "agent-run observation skipped: unattributable run %s",
+                run_id)
+            return
+        decision = record_observation(db, org_id, "agent_run", run_id)
+        logger.debug(
+            "agent-run observation for %s: matched=%s method=%s",
+            run_id, decision.get("matched"), decision.get("method"))
+    except Exception as e:  # noqa: BLE001 — fail-open, never breaks the run
+        logger.warning(
+            "agent-run observation failed for %s (non-fatal): %s",
+            run_id, e)
+    finally:
+        db.close()
 
 
 class AgentRunService:
@@ -530,6 +576,7 @@ class AgentRunService:
                 record.error = payload.get("error")
                 record.finished_at = datetime.now(timezone.utc)
                 db.commit()
+                _record_agent_run_observation(run_id)
         except Exception as e:
             db.rollback()
             logger.warning("AgentRunService: update_finished(%s) failed: %s", run_id, e)
