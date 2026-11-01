@@ -466,3 +466,17 @@ Limitations: document/process converters are adopted only as contract functions 
 
 Phase 3D recommendation: mechanical adoption of `from_document_proposal` / `from_process_evidence` at their emitting systems (document review queue serialization, EBPM process detail API) so every evidence surface emits `prov-v1`; then governed-action pre-checks (enabled `applies_to='action'` rules as pre-checks) and observed-execution linkage (AgentRun/Nl2sqlQueryLog → process_id).
 
+### Phase 3D.1 — prov-v1 Adoption at Document + Process Emitters (2026-11-01, DONE)
+
+- **Document evidence**: `document_review._to_dict` (serving the review queue AND approve/reject/revise responses) now emits `canonical_provenance` (a validated prov-v1 entry) additively beside ALL 19 legacy fields — ids/chunk_key/quote preserved verbatim, `status` lifecycle stays authoritative in the legacy field, retrieved=True/influenced=False (review queue ≠ planning influence), no `supports_answer`.
+- **Process evidence**: `enterprise_discovery.get_process` adds `canonical_provenance` per evidence item (built from the ORM rows, org-stamped from the already-org-scoped query); the detail-level `provenance` (AI-discovery provenance_json) and `review_history` are untouched — no key collision, review lifecycle never changed through serialization.
+- **Contract fix found by adoption (test-first)**: `from_document_proposal` previously defaulted every proposal to "proposed" because `DocumentProposal` stores its lifecycle in `status` (not `evidence_status`) — the converter now honors both fields verbatim (approved stays approved, rejected stays rejected, superseded stays superseded). No schema change, no new format.
+
+Edited files (all clean — plain staging): `provenance.py` (+9/−2), `document_review.py` (+7), `enterprise_discovery.py` (+29/−14 restructure of the evidence loop), new `tests/test_prov_v1_adoption.py`.
+
+Tests: `test_prov_v1_adoption.py` (7) — document conversion/serialization; status passthrough across all four lifecycle states; process detail emission (refs/quote/confidence preserved, missing confidence omitted, retrieval never implies support); legacy key sets unchanged (19 doc fields + all detail keys); pre-seeded review_history intact + evidence_status untouched; cross-org fail-closed (`get_process` returns None); converter org stamping. Regression: 53 across `test_canonical_provenance` / `test_document_grounding` / `test_enterprise_process_api` / `test_enterprise_discovery` / `test_enterprise_acceptance` / `test_enterprise_cleanup` — green. No frontend changes → no build.
+
+Limitations: process detail emits per-item canonical entries (not one envelope) because the detail-level `provenance` key is already occupied by AI-discovery provenance — `serialize_provenance` remains available for list surfaces; the NL2SQL log path (3C) remains the only envelope-level writer; OntologyObject/OntologyLink evidence (ontology connections in process detail) are not yet converted (they are references, not evidence rows).
+
+Phase 3D.2 handoff (NOT implemented): governed-action pre-checks — enabled `applies_to='action'` BusinessRules as pre-checks on governed ontology actions (the same builder/scoping seam as Phase 3B Task B); then observed-execution linkage (AgentRun / Nl2sqlQueryLog → nullable process_id columns + heuristic matcher, never auto-promote).
+

@@ -800,18 +800,23 @@ def get_process(db: Session, org_id: str, process_id: str) -> dict | None:
         .order_by(ProcessActivity.seq.asc())
         .all()
     ]
-    evidence = [
-        {"id": e.id, "evidence_kind": e.evidence_kind,
-         "source_ref": e.source_ref, "quote": e.quote,
-         "confidence": e.confidence,
-         "evidence_status": e.evidence_status}
-        for e in db.query(ProcessEvidence)
-        .filter(ProcessEvidence.org_id == org_id,
-                ProcessEvidence.process_id == process_id,
-                ProcessEvidence.is_deleted == False)  # noqa: E712
-        .order_by(ProcessEvidence.evidence_kind, ProcessEvidence.source_ref)
-        .all()
-    ]
+    evidence = []
+    from app.services.enterprise.provenance import from_process_evidence
+    _ev_rows = db.query(ProcessEvidence).filter(
+        ProcessEvidence.org_id == org_id,
+        ProcessEvidence.process_id == process_id,
+        ProcessEvidence.is_deleted == False,  # noqa: E712
+    ).order_by(ProcessEvidence.evidence_kind,
+               ProcessEvidence.source_ref).all()
+    for e in _ev_rows:
+        item = {"id": e.id, "evidence_kind": e.evidence_kind,
+                "source_ref": e.source_ref, "quote": e.quote,
+                "confidence": e.confidence,
+                "evidence_status": e.evidence_status}
+        # Phase 3D.1: canonical provenance (prov-v1) per evidence item —
+        # ADDITIVE; legacy fields and review lifecycle stay authoritative.
+        item["canonical_provenance"] = from_process_evidence(e, org_id=org_id)
+        evidence.append(item)
 
     peer_ids = set()
     links = db.query(ProcessLink).filter(

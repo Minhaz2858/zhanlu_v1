@@ -68,6 +68,12 @@ def append_decision_event(db: Session, org_id: str, proposal: DocumentProposal,
 
 
 def _to_dict(p: DocumentProposal) -> dict:
+    # Phase 3D.1: canonical provenance (prov-v1) rides ADDITIVELY beside
+    # every legacy field — statuses pass through verbatim, nothing is
+    # fabricated, and the canonical copy can never shadow the row's own
+    # review lifecycle (which stays authoritative in `status`).
+    from app.services.enterprise.provenance import from_document_proposal
+
     return {
         "id": p.id,
         "org_id": p.org_id,
@@ -88,6 +94,7 @@ def _to_dict(p: DocumentProposal) -> dict:
         "reviewed_by": p.reviewed_by,
         "reviewed_at": p.reviewed_at.isoformat() if p.reviewed_at else None,
         "created_date": p.created_date.isoformat() if p.created_date else None,
+        "canonical_provenance": from_document_proposal(p),
     }
 
 

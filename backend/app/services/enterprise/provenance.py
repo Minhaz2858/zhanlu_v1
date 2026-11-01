@@ -250,7 +250,10 @@ def from_document_proposal(
 
     Status passes through verbatim (proposed/approved/rejected/superseded)
     — machine steps can never create approved/verified rows and this
-    contract never upgrades them either.
+    contract never upgrades them either. DocumentProposal stores its
+    lifecycle in ``status``; ProcessEvidence-style rows use
+    ``evidence_status`` — both are honored, neither is ever renamed or
+    promoted.
     """
     return canonical_entry(
         source_type="document",
@@ -262,7 +265,9 @@ def from_document_proposal(
         source_ref=_row_get(proposal, "chunk_key"),
         kind=_row_get(proposal, "proposal_kind"),
         retrieval_method=_row_get(proposal, "method"),
-        evidence_status=_row_get(proposal, "evidence_status", "proposed"),
+        evidence_status=(_row_get(proposal, "evidence_status")
+                         or _row_get(proposal, "status")
+                         or "proposed"),
         retrieved=True, influenced=False, execution_ref=execution_ref)
 
 
