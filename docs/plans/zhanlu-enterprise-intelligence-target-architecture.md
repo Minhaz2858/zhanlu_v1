@@ -553,3 +553,17 @@ Files: `provenance.py` (+102), `nl_answer_service.py` (writer hoist + stamping �
 Limitations (honest): drift is catalog-table-granular only (no column hashing); mcp/automation provide no evidence/semantic discovery (integrations do not exist — registry says so explicitly); AgentRun-side canonical provenance is built by consumers but not persisted into AgentRun rows; FSM/workflow paths have no provenance writer; watchdog org scan is bounded per cycle (large fleets process incrementally by design).
 
 Phase 6 handoff (NOT implemented): frontend observed-badges (ProcessFlowCanvas), execution_ref persistence at write time on AgentRun, column-level drift, connector adapters for genuinely new integrations, provenance writers on FSM/workflow paths.
+### Phase 6A — Observed Execution Visualization (2026-11-01, DONE)
+
+Frontend integration of observed-execution intelligence into the EXISTING ProcessFlowCanvas — no new API, no matching engine, no backend change (the process detail already embeds the payload-free `observed_executions` summary from Phase 3E).
+
+- **Performance**: observations load ONLY when the detail summary reports executions (`execution_count > 0`); ONE request per canvas (`GET /observations`), never per activity; zero-observation processes pay nothing; failures degrade fail-open to the detail summary.
+- **Node indicator**: compact `⚡ n×` badge on activities with matched executions + confidence-band tooltip. Absent badge = no execution evidence — documentation never implies execution.
+- **Activity detail panel** (separate OBSERVED section below the documented rows): execution count, max match confidence + band (missing confidence = "unknown", never fabricated), latest observed time, linkage methods, record-type references labeled "payload-free" (no SQL, results, prompts, credentials — backend contract).
+- **Trust separation preserved**: documented/configured/observed remain independent dimensions; evidence ring (verified/proposed/rejected) and discovery labels render as-is; observations never promote proposed activities.
+
+Files: `ProcessFlowCanvas.jsx` (integration), `observedExecution.js` (pure aggregation), `ProcessFlowCanvas.observed.test.jsx` (9 tests). Regression: enterprise slice green; production build green.
+
+Limitations: per-activity aggregates come from the bounded references list (limit=50 on the observation endpoint — counts beyond that show the summary's count, references show the latest 50); `activity_seq` linkage exists in the data model but recorded executions rarely carry it yet (matching is process-level), so per-activity observed counts are currently sparse by nature.
+
+**Phase 6B recommendations (NOT implemented):** observed-execution trend sparkline per process (time_range already available); process-level confidence distribution widget in EnterpriseMap; "inspect one execution" affordance using the observation API's `inspect_record` decision; activity-level matching enrichment (stamp activity_seq via ontology-action → activity mapping); observed-badge in EBPM ProcessFlowCanvas `DISCOVERY_FILL.observed` fill already defined but unused.

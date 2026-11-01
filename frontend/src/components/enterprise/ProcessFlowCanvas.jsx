@@ -3,9 +3,10 @@ import {
   ReactFlow, Background, Controls, MiniMap, Handle, Position,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Loader2, X, FileSearch, GitBranch, User, Cpu, GitFork, Flag } from 'lucide-react';
+import { Loader2, X, FileSearch, GitBranch, User, Cpu, GitFork, Flag, Zap } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 import { toast } from 'sonner';
+import { activityObservation, confidenceLabel } from './observedExecution';
 
 /**
  * ProcessFlowCanvas (EBPM Increment 4) — interactive swimlane visualization
@@ -55,6 +56,16 @@ function ActivityNode({ data }) {
       {data.type_label && (
         <div className="mt-0.5 text-[9px] font-medium" style={{ color: meta.color }}>
           {data.type_label}
+        </div>
+      )}
+      {/* Phase 6A: OBSERVED dimension — independent of documented/configured.
+          Compact indicator only: executions matched this activity. Absent
+          badge = no execution evidence (never implied from documentation). */}
+      {data.observed?.observed && (
+        <div className="mt-0.5 flex items-center gap-1 text-[9px] font-medium text-emerald-700"
+          title={`${data.observed.count} observed execution(s), ${confidenceLabel(data.observed.band)}`}>
+          <Zap size={9} />
+          <span>{data.observed.count}×</span>
         </div>
       )}
       <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
@@ -114,6 +125,8 @@ function layoutFlow(detail) {
   });
 
   const sorted = [...activities].sort((a, b) => a.seq - b.seq);
+  const summary = detail.observed_executions || null;
+  const refs = detail.observation_references || null;
   sorted.forEach((a, i) => {
     const lane = a.performer || 'Unassigned';
     const id = `act:${a.seq}:${a.name}`;
@@ -127,6 +140,7 @@ function layoutFlow(detail) {
         type_label: (TYPE_META[a.activity_type] || TYPE_META.human_task).label,
         evidence_status: a.evidence_status || 'inferred',
         activity: a,
+        observed: activityObservation(summary, refs, a.seq),
       },
     });
   });
@@ -189,12 +203,36 @@ export default function ProcessFlowCanvas({ processId, onClose, onOpenDetail }) 
   }, [processId]);
   useEffect(() => { load(); }, [load]);
 
+  // Phase 6A: ONE observation request per canvas — and ONLY when the
+  // detail summary says executions exist (zero-observation processes
+  // never pay the cost). Failure degrades to the detail summary (fail-open).
+  useEffect(() => {
+    if (!detail || !detail.observed_executions?.execution_count) return;
+    let alive = true;
+    (async () => {
+      try {
+        const res = await authFetch(
+          `/api/ontology/enterprise/processes/${processId}/observations`);
+        if (!res.ok) return; // references unavailable — summary still shown
+        const data = await res.json();
+        if (alive && data?.references) {
+          setDetail((d) => (d ? { ...d, observation_references: data.references } : d));
+        }
+      } catch { /* fail-open: references unavailable */ }
+    })();
+    return () => { alive = false; };
+  }, [detail?.observed_executions?.execution_count, processId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const { nodes, edges, lanes } = useMemo(
     () => (detail ? layoutFlow(detail) : { nodes: [], edges: [], lanes: [] }),
     [detail]);
 
   const ds = detail ? (DISCOVERY_LABEL[detail.discovery_status] || DISCOVERY_LABEL.documented) : null;
   const peers = detail?.related_processes || [];
+  const actObs = selectedAct && detail
+    ? activityObservation(detail.observed_executions,
+        detail.observation_references, selectedAct.seq)
+    : null;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6"
@@ -304,6 +342,35 @@ export default function ProcessFlowCanvas({ processId, onClose, onOpenDetail }) 
                   {!selectedAct.business_rules && !selectedAct.exception_paths && (
                     <p className="text-stone-400">No rules or exception paths discovered for this activity.</p>
                   )}
+                  {/* Phase 6A: OBSERVED dimension — shown SEPARATELY from
+                      the documented/configured statuses above. Honest empty
+                      state: no observations ≠ never executed, just no
+                      matched execution evidence. References are payload-free
+                      (no SQL, results, prompts, or credentials). */}
+                  <div className="border-t border-stone-100 pt-2 mt-2">
+                    <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-emerald-700 font-semibold">
+                      <Zap size={10} /> Observed executions
+                    </div>
+                    {actObs.observed ? (
+                      <div className="mt-1 space-y-1">
+                        <Row k="Executions" v={String(actObs.count)} />
+                        <Row k="Confidence" v={`${actObs.max_confidence ?? '—'} (${confidenceLabel(actObs.band)})`} />
+                        {actObs.latest_observed_at && (
+                          <Row k="Latest" v={new Date(actObs.latest_observed_at).toLocaleString()} />
+                        )}
+                        {actObs.methods.length > 0 && (
+                          <Row k="Linkage" v={actObs.methods.join(', ')} />
+                        )}
+                        {actObs.record_types.length > 0 && (
+                          <Row k="References" v={`${actObs.record_types.join(', ')} — payload-free`} />
+                        )}
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-stone-400">
+                        No matched executions for this activity yet — documented only, not (yet) observed.
+                      </p>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
