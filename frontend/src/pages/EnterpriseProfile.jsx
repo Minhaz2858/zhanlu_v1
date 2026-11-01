@@ -1654,7 +1654,8 @@ export default function EnterpriseProfile() {
         </div>
 
         <div className="mt-6">
-          {exp === 'M' && <EnterpriseMap onOpenProcess={openProcess} />}
+          {exp === 'M' && <EnterpriseMap onOpenProcess={openProcess}
+            onNavigate={setExp} canReview={isAdmin} />}
           {exp === 'A' && <ExecutiveOverview />}
           {exp === 'B' && <SituationRoom />}
           {exp === 'C' && <BusinessObjectExplorer />}

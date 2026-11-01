@@ -3,7 +3,7 @@ import {
   ReactFlow, Background, Controls, MiniMap, Handle, Position,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Loader2, RefreshCw, Boxes, Building2, Layers, Workflow, Database, Users } from 'lucide-react';
+import { Loader2, RefreshCw, Boxes, Building2, Layers, Workflow, Database, Users, Zap } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 import { toast } from 'sonner';
 
@@ -204,7 +204,7 @@ const LEGEND = [
   { label: 'observed', fill: '#ecfdf5' },
 ];
 
-export default function EnterpriseMap({ onOpenProcess, onRefreshed }) {
+export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, canReview = false }) {
   const [map, setMap] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -235,6 +235,7 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed }) {
   }
 
   const empty = !map || !(map.processes || []).length;
+  const ov = map?.overview || null;
 
   return (
     <div>
@@ -249,6 +250,9 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed }) {
           <RefreshCw size={11} className={loading ? 'animate-spin' : ''} /> Refresh
         </button>
       </div>
+
+      {ov && <OverviewPanels ov={ov} onNavigate={onNavigate} canReview={canReview}
+        onOpenProcess={onOpenProcess} />}
 
       <div className="mt-2 flex items-center gap-3 flex-wrap text-[10px] text-stone-500">
         {LEGEND.map((l) => (
@@ -291,6 +295,146 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed }) {
           </ReactFlow>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ── Phase 6B: executive overview ─────────────────────────────────────
+   Business-language, real-data-only KPI strip + execution/knowledge/
+   attention panels. Missing sections render "unavailable", never zero.
+   documented ≠ configured ≠ observed — never merged. */
+
+function Kpi({ label, value, onClick, tone }) {
+  const cls = 'rounded-lg border bg-white px-3 py-2 text-left ' +
+    (onClick ? 'cursor-pointer hover:border-stone-400 ' : '') +
+    (tone === 'warn' ? 'border-amber-200 ' : tone === 'ok' ? 'border-emerald-200 ' : 'border-stone-200');
+  const body = (
+    <>
+      <div className="text-[16px] font-semibold text-stone-800">{value}</div>
+      <div className="text-[10px] text-stone-500">{label}</div>
+    </>
+  );
+  return onClick
+    ? <button className={cls} onClick={onClick} title={`Open ${label}`}>{body}</button>
+    : <div className={cls}>{body}</div>;
+}
+
+function OverviewPanels({ ov, onNavigate, canReview, onOpenProcess }) {
+  const nav = (key) => (onNavigate ? () => onNavigate(key) : undefined);
+  const p = ov.processes || {};
+  const ob = ov.observed || { available: false };
+  const k = ov.knowledge || { available: false };
+  const at = ov.attention || { available: false };
+  const withoutEvidence = ob.available && p.total != null
+    ? Math.max(p.total - (ob.processes_with_observations || 0), 0) : null;
+
+  return (
+    <div className="mt-3 space-y-3">
+      {/* KPI strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+        <Kpi label="Business processes" value={p.total ?? '—'}
+          onClick={nav('F')} />
+        <Kpi label="Verified" value={p.verified ?? '—'} tone="ok" onClick={nav('F')} />
+        {canReview ? (
+          <Kpi label="Awaiting review" value={p.awaiting_review ?? '—'}
+            tone={(p.awaiting_review || 0) > 0 ? 'warn' : undefined}
+            onClick={nav('R')} />
+        ) : (
+          <Kpi label="Awaiting review" value={p.awaiting_review ?? '—'}
+            tone={(p.awaiting_review || 0) > 0 ? 'warn' : undefined} />
+        )}
+        <Kpi label="With execution evidence"
+          value={ob.available ? (ob.processes_with_observations ?? '—') : '—'} />
+        <Kpi label="Systems & resources"
+          value={ov.resources_onboarded ?? '—'} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        {/* Execution overview */}
+        <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+          <h3 className="text-[12px] font-semibold text-stone-800 flex items-center gap-1.5">
+            <Zap size={12} className="text-emerald-600" /> Execution evidence
+          </h3>
+          {!ob.available ? (
+            <p className="mt-1.5 text-[11px] text-stone-400">Execution data unavailable.</p>
+          ) : (
+            <div className="mt-2 space-y-1.5 text-[11px]">
+              <div className="flex gap-6">
+                <span className="text-stone-500">Observed executions: <b className="text-stone-800">{ob.total_executions}</b></span>
+                {ob.latest_observed_at && (
+                  <span className="text-stone-500">Latest: <b className="text-stone-800">{new Date(ob.latest_observed_at).toLocaleDateString()}</b></span>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                {['high', 'medium', 'low'].map((band) => (
+                  <span key={band} className="inline-flex items-center gap-1 text-[10px] text-stone-500">
+                    <span className={`w-2 h-2 rounded-full ${band === 'high' ? 'bg-emerald-500' : band === 'medium' ? 'bg-amber-400' : 'bg-stone-300'}`} />
+                    {band}: {ob.confidence_distribution?.[band] ?? 0}
+                  </span>
+                ))}
+              </div>
+              {withoutEvidence != null && (
+                <p className="text-[10px] text-stone-400">
+                  {withoutEvidence} processes without execution evidence — documented only, not (yet) observed.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Knowledge coverage — business language, no ontology jargon */}
+        <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+          <h3 className="text-[12px] font-semibold text-stone-800 flex items-center gap-1.5">
+            <Layers size={12} className="text-sky-600" /> Business knowledge
+          </h3>
+          {!k.available ? (
+            <p className="mt-1.5 text-[11px] text-stone-400">Knowledge data unavailable.</p>
+          ) : (
+            <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+              <KnowledgeRow label="Business objects" data={k.objects}
+                render={(o) => `${o.total} · ${o.verified} verified${o.proposed ? ` · ${o.proposed} awaiting review` : ''}`} />
+              <KnowledgeRow label="Connections" data={k.links} render={(n) => String(n)} />
+              <KnowledgeRow label="Business terms" data={k.terminology} render={(n) => String(n)} />
+              <KnowledgeRow label="Key metrics" data={k.metrics} render={(n) => String(n)} />
+              <KnowledgeRow label="Business rules" data={k.rules}
+                render={(r) => `${r.total} · ${r.enabled} active${r.proposed ? ` · ${r.proposed} awaiting review` : ''}`} />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Attention signals — only categories backed by real rows */}
+      {at.available && (at.processes_awaiting_review > 0 || at.knowledge_awaiting_review > 0 || at.partial_onboardings > 0) && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5">
+          <h3 className="text-[12px] font-semibold text-amber-800">Needs attention</h3>
+          <div className="mt-1.5 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-amber-800">
+            {at.processes_awaiting_review > 0 && (
+              canReview
+                ? <button className="underline hover:text-amber-900" onClick={nav('R')}>
+                    {at.processes_awaiting_review} process proposal(s) awaiting review
+                  </button>
+                : <span>{at.processes_awaiting_review} process proposal(s) awaiting review</span>
+            )}
+            {at.knowledge_awaiting_review > 0 && (
+              <span>{at.knowledge_awaiting_review} knowledge item(s) awaiting review</span>
+            )}
+            {at.partial_onboardings > 0 && (
+              <span>{at.partial_onboardings} system(s) with failed or partial onboarding</span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KnowledgeRow({ label, data, render }) {
+  return (
+    <div>
+      <span className="text-stone-500">{label}: </span>
+      <span className="text-stone-800 font-medium">
+        {data == null ? 'unavailable' : render(data)}
+      </span>
     </div>
   );
 }

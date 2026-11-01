@@ -1226,4 +1226,151 @@ def enterprise_map(db: Session, org_id: str) -> dict:
         "families": fam_counts,
         "systems": systems,
         "process_links": links,
+        "overview": _map_overview(db, org_id, processes),
+    }
+
+
+def _map_overview(db: Session, org_id: str, processes: list) -> dict:
+    """Phase 6B: executive overview — ONE org-scoped section computed from
+    ALREADY-AUTHORITATIVE rows (no second store, no inference beyond what
+    discovery persisted). observed NEVER counts as verification; missing
+    sections surface ``available: false`` — UNAVAILABLE, never zero."""
+    from app.models.agent_run import AgentRun
+    from app.models.business_rule import BusinessRule
+    from app.models.enterprise_process import EnterpriseResource
+    from app.models.enterprise_onboarding import EnterpriseOnboardingRun
+    from app.models.metric_definition import MetricDefinition
+    from app.models.nl2sql_query_log import Nl2sqlQueryLog
+    from app.models.ontology import OntologyDomain, OntologyLink, OntologyObject
+    from app.models.terminology import Terminology
+
+    status_counts = {"verified": 0, "proposed": 0, "rejected": 0}
+    for p in processes:
+        st = p.get("evidence_status")
+        if st in status_counts:
+            status_counts[st] += 1
+
+    # observed execution evidence — org-verified, matched records only
+    observed = {"total_executions": 0, "processes_with_observations": 0,
+                "confidence_distribution": {"high": 0, "medium": 0, "low": 0},
+                "latest_observed_at": None, "available": True}
+    try:
+        org_pids = [p["id"] for p in processes]
+        bands = observed["confidence_distribution"]
+        if org_pids:
+            times = []
+            nl = db.query(Nl2sqlQueryLog.process_id,
+                          Nl2sqlQueryLog.match_confidence,
+                          Nl2sqlQueryLog.created_date).filter(
+                Nl2sqlQueryLog.org_id == org_id,
+                Nl2sqlQueryLog.process_id.in_(org_pids),
+                Nl2sqlQueryLog.is_deleted == False).all()  # noqa: E712
+            for pid, conf, ts in nl:
+                observed["total_executions"] += 1
+                bands["high" if (conf or 0) >= 0.8 else
+                      ("medium" if (conf or 0) >= 0.5 else "low")] += 1
+                if ts:
+                    times.append(ts)
+            # AgentRun has no org_id — bind the scan and verify caller_context
+            from app.services.enterprise.observations import _agent_run_org
+            ar = db.query(AgentRun).filter(
+                AgentRun.process_id.in_(org_pids),
+                AgentRun.is_deleted == False).order_by(  # noqa: E712
+                AgentRun.created_date.desc()).limit(500).all()
+            for r in ar:
+                if _agent_run_org(r) != org_id:
+                    continue
+                observed["total_executions"] += 1
+                conf = r.match_confidence
+                bands["high" if (conf or 0) >= 0.8 else
+                      ("medium" if (conf or 0) >= 0.5 else "low")] += 1
+                if r.created_date:
+                    times.append(r.created_date)
+            observed["processes_with_observations"] = db.query(
+                Nl2sqlQueryLog.process_id).filter(
+                Nl2sqlQueryLog.org_id == org_id,
+                Nl2sqlQueryLog.process_id.in_(org_pids),
+                Nl2sqlQueryLog.is_deleted == False).distinct().count()  # noqa: E712
+            observed["processes_with_observations"] += len({
+                r.process_id for r in ar if _agent_run_org(r) == org_id})
+            if times:
+                observed["latest_observed_at"] = max(times).isoformat()
+    except Exception as e:  # noqa: BLE001 — overview never breaks the map
+        logger.warning("enterprise map: observed section unavailable: %s", e)
+        observed["available"] = False
+
+    # knowledge coverage — plain org-scoped counts with status splits
+    knowledge: dict = {"available": True}
+    try:
+        obj_rows = db.query(OntologyObject).filter(
+            OntologyObject.org_id == org_id,
+            OntologyObject.is_deleted == False).all()  # noqa: E712
+        knowledge["objects"] = {
+            "total": len(obj_rows),
+            "verified": sum(1 for o in obj_rows
+                            if o.evidence_status == "verified"),
+            "proposed": sum(1 for o in obj_rows
+                            if o.evidence_status == "proposed"),
+        }
+        knowledge["links"] = db.query(OntologyLink).filter(
+            OntologyLink.org_id == org_id,
+            OntologyLink.is_deleted == False).count()  # noqa: E712
+        knowledge["terminology"] = db.query(Terminology).filter(
+            Terminology.org_id == org_id,
+            Terminology.is_deleted == False).count()  # noqa: E712
+        knowledge["metrics"] = db.query(MetricDefinition).filter(
+            MetricDefinition.org_id == org_id,
+            MetricDefinition.is_deleted == False).count()  # noqa: E712
+        rule_rows = db.query(BusinessRule).filter(
+            BusinessRule.org_id == org_id,
+            BusinessRule.is_deleted == False).all()  # noqa: E712
+        knowledge["rules"] = {
+            "total": len(rule_rows),
+            "enabled": sum(1 for r in rule_rows if r.status == "enabled"),
+            "verified": sum(1 for r in rule_rows if r.status == "verified"),
+            "proposed": sum(1 for r in rule_rows if r.status == "proposed"),
+        }
+        knowledge["awaiting_review"] = (
+            knowledge["objects"]["proposed"] + knowledge["rules"]["proposed"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("enterprise map: knowledge section unavailable: %s", e)
+        knowledge["available"] = False
+
+    # attention — only categories backed by real rows
+    attention: dict = {"available": True}
+    try:
+        attention["processes_awaiting_review"] = status_counts["proposed"]
+        attention["knowledge_awaiting_review"] = knowledge.get(
+            "awaiting_review", 0)
+        # resource onboarding health: latest run per resource
+        runs = db.query(EnterpriseOnboardingRun).filter(
+            EnterpriseOnboardingRun.org_id == org_id,
+            EnterpriseOnboardingRun.is_deleted == False).order_by(  # noqa: E712
+            EnterpriseOnboardingRun.created_date.desc()).limit(200).all()
+        latest: dict = {}
+        for r in runs:
+            key = (r.resource_type, r.resource_id)
+            if key not in latest:
+                latest[key] = r.status
+        attention["partial_onboardings"] = sum(
+            1 for s in latest.values()
+            if s in ("partial_failed", "failed"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("enterprise map: attention section unavailable: %s", e)
+        attention["available"] = False
+
+    return {
+        "processes": {
+            "total": len(processes),
+            "verified": status_counts["verified"],
+            "proposed": status_counts["proposed"],
+            "rejected": status_counts["rejected"],
+            "awaiting_review": status_counts["proposed"],
+        },
+        "observed": observed,
+        "knowledge": knowledge,
+        "resources_onboarded": db.query(EnterpriseResource).filter(
+            EnterpriseResource.org_id == org_id,
+            EnterpriseResource.is_deleted == False).count(),  # noqa: E712
+        "attention": attention,
     }
