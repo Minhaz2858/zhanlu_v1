@@ -7,6 +7,7 @@ import { Loader2, X, FileSearch, GitBranch, User, Cpu, GitFork, Flag, Zap } from
 import { authFetch } from '@/api/authFetch';
 import { toast } from 'sonner';
 import { activityObservation, confidenceLabel } from './observedExecution';
+import { ExecutionTrend } from './Drilldown';
 
 /**
  * ProcessFlowCanvas (EBPM Increment 4) — interactive swimlane visualization
@@ -188,7 +189,7 @@ function layoutFlow(detail) {
   return { nodes, edges, lanes };
 }
 
-export default function ProcessFlowCanvas({ processId, onClose, onOpenDetail }) {
+export default function ProcessFlowCanvas({ processId, onClose, onOpenDetail, onOpenObject }) {
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
   const [selectedAct, setSelectedAct] = useState(null);
@@ -285,6 +286,15 @@ export default function ProcessFlowCanvas({ processId, onClose, onOpenDetail }) 
           </div>
         )}
 
+        {/* Phase 6C: execution trend — aggregates REAL dated observations
+            (fetched once in 6A); thin history stays honestly unavailable */}
+        {detail?.observation_references?.length > 0 && (
+          <div className="flex items-center gap-3 px-5 py-2 border-b border-stone-100">
+            <span className="text-[10px] uppercase tracking-wide text-stone-400">Execution trend</span>
+            <ExecutionTrend references={detail.observation_references} />
+          </div>
+        )}
+
         {error && (
           <div className="m-5 text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
             Failed to load process flow: {error}
@@ -341,6 +351,23 @@ export default function ProcessFlowCanvas({ processId, onClose, onOpenDetail }) 
                   )}
                   {!selectedAct.business_rules && !selectedAct.exception_paths && (
                     <p className="text-stone-400">No rules or exception paths discovered for this activity.</p>
+                  )}
+                  {/* Phase 6C: related business objects — from the
+                      process's evidence-backed ontology connections. Honest
+                      scope note: linkage is PROCESS-level evidence; activity
+                      execution linkage exists only when activity_seq was
+                      genuinely stamped. */}
+                  {(detail?.ontology_connections || []).some((c) => c.kind === 'object') && (
+                    <div className="border-t border-stone-100 pt-2 mt-2">
+                      <h4 className="text-[10px] uppercase tracking-wide text-stone-400 font-semibold">Business objects</h4>
+                      <p className="text-[9px] text-stone-400">referenced by this process's evidence</p>
+                      <div className="mt-1 space-y-1">
+                        {detail.ontology_connections.filter((c) => c.kind === 'object').map((c) => (
+                          <button key={c.id} className="underline text-stone-700 hover:text-stone-900 block"
+                            onClick={() => onOpenObject?.(c.id)}>{c.name}</button>
+                        ))}
+                      </div>
+                    </div>
                   )}
                   {/* Phase 6A: OBSERVED dimension — shown SEPARATELY from
                       the documented/configured statuses above. Honest empty

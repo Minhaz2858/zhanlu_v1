@@ -1390,6 +1390,158 @@ def enterprise_process_observations(
     return obs
 
 
+@router.get("/ontology/enterprise/business-objects/{object_id}")
+def enterprise_business_object(
+    object_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Phase 6C — business-object drilldown: authoritative OntologyObject
+    summary with domain, relationships (peer names), associated processes
+    (via ProcessEvidence) and the backing resource parsed from
+    ``backing_ref`` (``kb:<kb_id>:<table>``). Org-scoped, fail-closed 404.
+    NEVER exposes credentials or execution payloads."""
+    org = _org_or_404(user, None)
+    from app.models.enterprise_process import (
+        BusinessProcess, ProcessEvidence)
+    from app.models.ontology import OntologyDomain, OntologyLink, OntologyObject
+    from sqlalchemy import or_
+
+    obj = get_object(db, org, object_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Object not found")
+    domain = db.query(OntologyDomain).filter(
+        OntologyDomain.id == obj.domain_id,
+        OntologyDomain.org_id == org).first() if obj.domain_id else None
+
+    links = []
+    for l in db.query(OntologyLink).filter(
+            OntologyLink.org_id == org,
+            OntologyLink.is_deleted == False,  # noqa: E712
+            or_(OntologyLink.from_object_id == object_id,
+                OntologyLink.to_object_id == object_id)).all():
+        peer_id = (l.to_object_id if l.from_object_id == object_id
+                   else l.from_object_id)
+        peer = db.query(OntologyObject).filter(
+            OntologyObject.id == peer_id,
+            OntologyObject.org_id == org).first()
+        if peer is None:
+            continue  # deleted/cross-org peer — never fabricate
+        links.append({
+            "id": l.id, "link_type": l.link_type, "peer_id": peer.id,
+            "peer_name": peer.name,
+            "direction": ("outgoing" if l.from_object_id == object_id
+                          else "incoming"),
+            "evidence_status": l.evidence_status})
+
+    ev_rows = db.query(ProcessEvidence).filter(
+        ProcessEvidence.org_id == org,
+        ProcessEvidence.is_deleted == False,  # noqa: E712
+        ProcessEvidence.source_ref == f"ontology:{object_id}",
+        ProcessEvidence.process_id.isnot(None)).all()
+    pid_status: dict = {}
+    for e in ev_rows:
+        prev = pid_status.get(e.process_id)
+        rank = {"verified": 2, "proposed": 1}
+        if prev is None or rank.get(e.evidence_status, 0) > rank.get(prev, 0):
+            pid_status[e.process_id] = e.evidence_status
+    procs = []
+    if pid_status:
+        for p in db.query(BusinessProcess).filter(
+                BusinessProcess.org_id == org,
+                BusinessProcess.is_deleted == False,  # noqa: E712
+                BusinessProcess.id.in_(list(pid_status))).all():
+            procs.append({"id": p.id, "name": p.name,
+                          "evidence_status": p.evidence_status,
+                          "link_status": pid_status[p.id]})
+
+    # backing resource resolution — kb:<kb_id>:<table> → the org's KB row
+    resource = None
+    ref = obj.backing_ref or None
+    if ref and ref.startswith("kb:"):
+        kb_id = ref.split(":")[1]
+        from app.models.knowledge_base import KnowledgeBase
+        kb = db.query(KnowledgeBase).filter(
+            KnowledgeBase.id == kb_id,
+            KnowledgeBase.org_id == org,
+            KnowledgeBase.is_deleted == False).first()  # noqa: E712
+        if kb is not None:
+            resource = {"id": kb.id, "name": kb.name,
+                        "kind": "knowledge_base",
+                        "source_kind": getattr(kb, "source_kind", None)}
+    return {
+        "id": obj.id, "name": obj.name,
+        "description": obj.description,
+        "evidence_status": obj.evidence_status,
+        "domain": ({"id": domain.id, "name": domain.name}
+                   if domain else None),
+        "backing": {"kind": obj.backing_kind, "ref": ref,
+                    "resource": resource},
+        "links": links, "processes": procs,
+    }
+
+
+@router.get("/ontology/enterprise/resources/{ref_id}")
+def enterprise_resource_summary(
+    ref_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Phase 6C — resource drilldown: identity, LATEST onboarding run
+    status, and related business concepts (objects backed by this
+    resource). Falls back to the org's KnowledgeBase row when no EBPM
+    inventory entry exists; 404 when neither exists in this org. NEVER
+    exposes credentials, SQL, or execution payloads."""
+    org = _org_or_404(user, None)
+    from app.models.enterprise_onboarding import EnterpriseOnboardingRun
+    from app.models.knowledge_base import KnowledgeBase
+    from app.models.ontology import OntologyObject
+
+    from app.models.enterprise_process import EnterpriseResource
+
+    inv = db.query(EnterpriseResource).filter(
+        EnterpriseResource.org_id == org,
+        EnterpriseResource.ref_id == ref_id,
+        EnterpriseResource.is_deleted == False).first()  # noqa: E712
+    kb = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == ref_id,
+        KnowledgeBase.org_id == org,
+        KnowledgeBase.is_deleted == False).first()  # noqa: E712
+    if inv is None and kb is None:
+        raise HTTPException(status_code=404, detail="Resource not found")
+
+    identity = {
+        "id": ref_id,
+        "name": (inv.name if inv else None) or (kb.name if kb else ref_id),
+        "kind": (inv.resource_kind if inv else None)
+        or (getattr(kb, "source_kind", None) or "knowledge_base"),
+    }
+
+    latest = db.query(EnterpriseOnboardingRun).filter(
+        EnterpriseOnboardingRun.org_id == org,
+        EnterpriseOnboardingRun.is_deleted == False,  # noqa: E712
+        EnterpriseOnboardingRun.resource_id == ref_id).order_by(
+        EnterpriseOnboardingRun.created_date.desc()).first()
+    onboarding = {
+        "status": latest.status if latest else None,
+        "attempt": latest.attempt if latest else None,
+        "error": latest.error if latest else None,
+        "finished_at": (latest.created_date.isoformat()
+                        if latest and latest.created_date else None),
+    }
+
+    related = [
+        {"id": o.id, "name": o.name,
+         "evidence_status": o.evidence_status}
+        for o in db.query(OntologyObject).filter(
+            OntologyObject.org_id == org,
+            OntologyObject.is_deleted == False,  # noqa: E712
+            OntologyObject.backing_ref.like(f"kb:{ref_id}:%")).all()
+    ]
+    return {"identity": identity, "onboarding": onboarding,
+            "related_objects": related}
+
+
 @router.post("/ontology/enterprise/processes/{process_id}/confirm")
 def enterprise_process_confirm(
     process_id: str,

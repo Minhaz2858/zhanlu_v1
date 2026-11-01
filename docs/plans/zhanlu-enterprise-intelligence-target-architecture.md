@@ -577,3 +577,18 @@ The Enterprise Map landing experience gains a truthful executive overview — in
 Files: `enterprise_discovery.py` (+147), `EnterpriseMap.jsx` (+148), new `test_enterprise_map_overview.py` (8) + `EnterpriseMap.overview.test.jsx` (9), one surgical hunk in foreign-dirty `EnterpriseProfile.jsx`. Tests: 8+9 new, 62 backend + 18 frontend enterprise regression green; production build green.
 
 Limitations: AgentRun observation scan bounded at 500 most-recent runs (very high-volume orgs may undercount totals; per-resource views remain exact); attention signals are count-only (no per-item drilldown yet); KPI navigation targets existing tabs, not filtered views.
+### Phase 6C — Enterprise Business Drilldown & Execution Intelligence (2026-11-01, DONE)
+
+The complete navigation chain Enterprise → Department → Capability → Process → Activity → Business Object → Resource → Evidence, reusing existing APIs, models and panels — no new store, no second matcher.
+
+- **Backend (ontology.py, clean file — no main.py changes)**: two org-scoped read-only endpoints — `GET /ontology/enterprise/business-objects/{id}` (authoritative object summary: domain, relationships w/ peer names, associated processes via ProcessEvidence, backing resource parsed from `kb:<id>:<table>`), `GET /ontology/enterprise/resources/{ref_id}` (identity, LATEST onboarding run, related concepts via backing_ref prefix; KB-row fallback; 404 cross-org/missing). Credentials/SQL/execution payloads never returned (test-verified).
+- **Department drilldown**: unit nodes in the Enterprise Map open a panel computed ONLY from the persisted map payload (performer processes → clickable, capabilities, connected systems, org-wide execution evidence). Department association stays contextual metadata — no authorization change.
+- **Activity → Business Object**: activity panel lists evidence-backed objects (honestly labeled "referenced by this process's evidence" — activity execution linkage exists ONLY when activity_seq was genuinely stamped, never inferred from process-level evidence).
+- **Business Object / Resource panels** (`Drilldown.jsx`): breadcrumbs, back/close, relationship peer objects clickable, resource card → onboarding status (latest run, attempt, honest "never onboarded"), related concepts. Missing/cross-org entities → honest "not available" (never fabricated).
+- **Execution trend** (`ExecutionTrend` + pure `dailyTrend`): daily bars aggregated from REAL dated observation references (already fetched once per canvas in 6A — zero extra requests); fewer than 2 dated points → "unavailable", never invented counts.
+
+Files: `ontology.py` (+152), `Drilldown.jsx` (new), `EnterpriseMap.jsx`/`ProcessFlowCanvas.jsx` (integration), `EnterpriseProfile.jsx` (3 surgical hunks in foreign-dirty file), tests. Results: 8 backend + 9 frontend new tests; 48 backend + 27 frontend enterprise regression green; production build green.
+
+Limitations: department panel is map-payload-scoped (no separate org-unit API; unit hierarchy not shown — OrgUnit parent names are not in the map payload); capability navigation remains the map's family grouping (no separate capability→process API); resource→evidence navigation surfaces evidence via the object's process links, not a standalone evidence browser; AgentRun-scan bounds apply to map-level observed totals.
+
+Phase 6D recommendation (NOT implemented): unit hierarchy + capability→process API enrichment, standalone evidence browser with review actions, execution-trend on the catalogue cards, saved drilldown deep-links.

@@ -11,6 +11,7 @@ import { useAuth } from '@/lib/AuthContext';
 import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
 import OntologyGraph from '@/components/ontology/OntologyGraph';
 import EnterpriseMap from '@/components/enterprise/EnterpriseMap';
+import { BusinessObjectPanel, ResourcePanel } from '@/components/enterprise/Drilldown';
 import ProcessFlowCanvas from '@/components/enterprise/ProcessFlowCanvas';
 import ReviewCenter from '@/components/enterprise/ReviewCenter';
 import {
@@ -1585,6 +1586,9 @@ export default function EnterpriseProfile() {
   const [discovering, setDiscovering] = useState(false);
   const [flowProcessId, setFlowProcessId] = useState(null);
   const [detailProcessId, setDetailProcessId] = useState(null);
+  // Phase 6C: business-object / resource drilldown drawers
+  const [objectId, setObjectId] = useState(null);
+  const [resourceId, setResourceId] = useState(null);
 
   const openProcess = useCallback((processId, asFlow) => {
     if (asFlow) setFlowProcessId(processId);
@@ -1673,6 +1677,7 @@ export default function EnterpriseProfile() {
       {flowProcessId && (
         <ProcessFlowCanvas processId={flowProcessId}
           onClose={() => setFlowProcessId(null)}
+          onOpenObject={setObjectId}
           onOpenDetail={(pid, asFlow) => {
             if (asFlow) setFlowProcessId(pid);
             else setDetailProcessId(pid);
@@ -1682,6 +1687,20 @@ export default function EnterpriseProfile() {
         <ProcessDetailDrawer processId={detailProcessId} isAdmin={isAdmin}
           onClose={() => setDetailProcessId(null)}
           onOpenFlow={setFlowProcessId} />
+      )}
+      {objectId && (
+        <BusinessObjectPanel objectId={objectId}
+          crumbs={[{ label: 'Enterprise' }, { label: 'Business object' }]}
+          onClose={() => setObjectId(null)}
+          onOpenResource={setResourceId}
+          onOpenProcess={(pid) => { setObjectId(null); openProcess(pid, true); }}
+          onOpenObject={setObjectId} />
+      )}
+      {resourceId && (
+        <ResourcePanel refId={resourceId}
+          crumbs={[{ label: 'Enterprise' }, { label: 'Resource' }]}
+          onClose={() => setResourceId(null)}
+          onOpenObject={setObjectId} />
       )}
     </div>
   );

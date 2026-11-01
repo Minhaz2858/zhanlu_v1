@@ -225,6 +225,7 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, 
   useEffect(() => { load(); }, [load]);
 
   const { nodes, edges } = useMemo(() => (map ? layoutMap(map) : { nodes: [], edges: [] }), [map]);
+  const [selectedUnit, setSelectedUnit] = useState(null);
 
   if (loading && !map) {
     return (
@@ -265,6 +266,89 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, 
         <span className="text-stone-400">· edges = persisted links + performer participation only</span>
       </div>
 
+      {/* Phase 6C: department drilldown — computed ONLY from the map
+          payload (persisted performers/capabilities/systems); department
+          association is contextual metadata, never an authorization grant. */}
+      {selectedUnit && map && (() => {
+        const unit = (map.org_units || []).find((u) => u.id === selectedUnit);
+        if (!unit) { return null; } // deleted between load and click — honest no-op
+        const deptProcesses = (map.processes || [])
+          .filter((p) => (p.responsible_units || []).includes(unit.name));
+        return (
+          <div className="fixed inset-0 z-50 bg-black/30 flex justify-end"
+            onClick={() => setSelectedUnit(null)}>
+            <div className="w-full max-w-sm bg-white h-full shadow-2xl overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="px-4 py-3 border-b border-stone-100">
+                <div className="flex items-center gap-1 text-[10px] text-stone-400">
+                  <span>Enterprise</span><span>/</span>
+                  <span className="text-stone-600 font-medium">{unit.name}</span>
+                  <button onClick={() => setSelectedUnit(null)}
+                    className="ml-auto text-stone-400 hover:text-stone-600"><X size={14} /></button>
+                </div>
+                <h3 className="text-[13px] font-semibold text-stone-900 flex items-center gap-1.5">
+                  <Users size={13} className="text-stone-500" /> {unit.name}
+                </h3>
+                <span className="text-[10px] text-stone-400 capitalize">{unit.unit_type}</span>
+              </div>
+              <div className="px-4 py-3 space-y-3 text-[11px]">
+                <div>
+                  <h4 className="text-[10px] uppercase tracking-wide text-stone-400 font-semibold">Responsible for processes</h4>
+                  {deptProcesses.length === 0 ? (
+                    <p className="text-stone-400 mt-1">No processes with this unit as an activity performer yet.</p>
+                  ) : (
+                    <div className="mt-1 space-y-1">
+                      {deptProcesses.map((p) => (
+                        <button key={p.id} className="underline text-stone-700 hover:text-stone-900 block"
+                          onClick={() => { setSelectedUnit(null); onOpenProcess?.(p.id, true); }}>
+                          {p.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <h4 className="text-[10px] uppercase tracking-wide text-stone-400 font-semibold">Business capabilities</h4>
+                  {(map.capabilities || []).length === 0 ? (
+                    <p className="text-stone-400 mt-1">No capabilities discovered yet.</p>
+                  ) : (
+                    <div className="mt-1 space-y-0.5">
+                      {(map.capabilities || []).map((c) => (
+                        <div key={c.id} className="text-stone-700">{c.name}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <h4 className="text-[10px] uppercase tracking-wide text-stone-400 font-semibold">Connected systems & resources</h4>
+                  {(map.systems || []).length === 0 ? (
+                    <p className="text-stone-400 mt-1">No resources onboarded yet.</p>
+                  ) : (
+                    <div className="mt-1 space-y-0.5">
+                      {(map.systems || []).slice(0, 8).map((s) => (
+                        <div key={s.id} className="text-stone-700 flex items-center gap-1.5">
+                          <Database size={10} className="text-stone-400" />{s.name}
+                          <span className="text-[9px] text-stone-400 capitalize">{s.resource_kind}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {map.overview?.observed?.available && (
+                  <div>
+                    <h4 className="text-[10px] uppercase tracking-wide text-stone-400 font-semibold">Execution evidence</h4>
+                    <p className="mt-1 text-stone-600">
+                      {map.overview.observed.total_executions} observed execution(s) across{' '}
+                      {map.overview.observed.processes_with_observations} process(es) org-wide
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {empty ? (
         <div className="mt-4 rounded-xl border border-dashed border-stone-300 bg-white px-6 py-12 text-center">
           <Workflow size={20} className="mx-auto text-stone-300" />
@@ -285,6 +369,8 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, 
             minZoom={0.15}
             onNodeClick={(_, node) => {
               if (node.id.startsWith('proc:')) onOpenProcess?.(node.data.processId, true);
+              else if (node.id.startsWith('unit:')) setSelectedUnit(node.id.slice(5));
+              else if (node.id.startsWith('cap:')) setSelectedUnit(null); // capability header — close panels
             }}
             onPaneClick={() => {}}
             proOptions={{ hideAttribution: true }}
