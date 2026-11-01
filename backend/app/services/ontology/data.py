@@ -410,6 +410,31 @@ def execute_action(
             ),
         }
     merged = {**(action.params_json or {}), **(params or {})}
+    # Phase 3D.2: deterministic business-rule pre-check BEFORE any side
+    # effect (approval creation or tool execution). The LLM never decides;
+    # existing permission checks remain authoritative for writes (they run
+    # first inside the write branch below).
+    from app.services.ontology.business_rules import (
+        audit_action_rule_decision,
+        evaluate_action_rules,
+    )
+
+    datasource_id = ((context or {}).get("datasource_id")
+                     or (params or {}).get("datasource_id")
+                     or (params or {}).get("data_source_id"))
+    decision = evaluate_action_rules(
+        db, org_id, action, params=merged, datasource_id=datasource_id)
+    if decision["applicable_rule_ids"]:
+        audit_action_rule_decision(db, org_id, action, decision,
+                                   user_id=user_id, context=context)
+    if decision["decision"] == "block":
+        return {
+            "success": False,
+            "denied": True,
+            "blocked": "business_rule",
+            "reason": decision["explanation"],
+            "rule_decision": decision,
+        }
     from app.services.ontology.permissions import is_write_action
 
     if is_write_action(action):
@@ -457,6 +482,38 @@ def execute_action(
                 "it (POST /api/approvals/{id}/approve), then call "
                 "execute-approved"
             ),
+            "rule_decision": decision,
+        }
+
+    if decision["decision"] == "require_approval":
+        # A business rule demands human approval for this READ action too —
+        # reuse the SAME governance approval workflow (never auto-fire).
+        from app.services.governance.approval_service import ApprovalService
+
+        approval = ApprovalService(db).create_request(
+            action_type="ontology_action",
+            action_description=(
+                f"Ontology action {action.name!r} (tool={action.tool_name}) "
+                "— gated by business rule(s) "
+                f"{', '.join(r for r in decision['applicable_rule_ids'])}"
+            ),
+            risk_tier="medium",
+            context_json={
+                "action_id": action.id,
+                "action_name": action.name,
+                "tool_name": action.tool_name,
+                "object_id": action.object_id,
+                "params": merged,
+                "rule_decision": decision,
+            },
+            org_id=org_id,
+        )
+        return {
+            "success": False,
+            "blocked": "confirmation_required",
+            "approval_id": approval.id,
+            "reason": decision["explanation"],
+            "rule_decision": decision,
         }
 
     import asyncio
@@ -504,6 +561,7 @@ def execute_action(
         "tool": action.tool_name,
         "risk_level": action.risk_level,
         "result": result,
+        "rule_decision": decision,
     }
 
 
@@ -551,6 +609,31 @@ def execute_approved_action(
     if denial:
         audit_permission_denial(db, org_id, action, context, denial["reason"])
         return {"success": False, "denied": True, "reason": denial["reason"]}
+
+    # Phase 3D.2: rule pre-check on the approved path. approval_granted=True
+    # satisfies REQUIRE_APPROVAL rules (the valid approval below is the
+    # proof), but a PROHIBIT rule still VETOES — an approval flow the rule
+    # governs cannot override the rule itself.
+    from app.services.ontology.business_rules import (
+        audit_action_rule_decision,
+        evaluate_action_rules,
+    )
+
+    rule_decision = evaluate_action_rules(
+        db, org_id, action,
+        datasource_id=(context or {}).get("datasource_id"),
+        approval_granted=True)
+    if rule_decision["applicable_rule_ids"]:
+        audit_action_rule_decision(db, org_id, action, rule_decision,
+                                   user_id=user_id, context=context)
+    if rule_decision["decision"] == "block":
+        return {
+            "success": False,
+            "denied": True,
+            "blocked": "business_rule",
+            "reason": rule_decision["explanation"],
+            "rule_decision": rule_decision,
+        }
 
     approval = (
         db.query(ApprovalRequest)
