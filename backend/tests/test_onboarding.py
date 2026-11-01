@@ -23,6 +23,8 @@ from app.models.agent_data_binding import AgentDataBinding
 from app.models.agent_run import AgentRun
 from app.models.business_rule import BusinessRule
 from app.models.knowledge_base import KnowledgeBase
+from app.models.mcp_server import McpServer
+from app.models.automation_task import AutomationTask
 from app.models.nl2sql_query_log import Nl2sqlQueryLog
 from app.models.terminology import Terminology
 from app.models.ontology import OntologyAction, OntologyLink, OntologyObject
@@ -53,7 +55,8 @@ def db():
         AuditEvent.__table__, Nl2sqlQueryLog.__table__,
         Terminology.__table__, AgentRun.__table__, BusinessRule.__table__,
         KnowledgeBase.__table__, KBTableRelation.__table__,
-        AgentDataBinding.__table__, AgentApp.__table__])
+        AgentDataBinding.__table__, AgentApp.__table__,
+        McpServer.__table__, AutomationTask.__table__])
     s = sessionmaker(bind=eng)()
     yield s
     s.close()
@@ -129,6 +132,11 @@ def test_document_onboarding(db, discovery):
 # 3. MCP onboarding — capabilities limited to actual integration ----------------------
 
 def test_mcp_onboarding_honest_unsupported(db, discovery):
+    # Phase 5D: mcp_server existence is now org-verified (row required)
+    from app.models.mcp_server import McpServer
+    db.add(McpServer(id="mcp-1", org_id=ORG, name="ERP MCP",
+                     server_url="http://mcp.internal"))
+    db.commit()
     res = onboard_resource(db, ORG, "mcp_server", "mcp-1")
     assert res["status"] == "completed"
     steps = {s["step"]: s["status"] for s in res["steps"]}

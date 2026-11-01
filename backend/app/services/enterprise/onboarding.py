@@ -23,12 +23,20 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.models.enterprise_onboarding import EnterpriseOnboardingRun
+from app.services.enterprise.connectors import (
+    ConnectorRegistry,
+    capabilities_for,
+    existence_model,
+)
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_TYPES = ("datasource", "knowledge_base", "mcp_server",
-                   "automation")
-_EVIDENCE_TYPES = ("datasource", "knowledge_base")
+# Phase 5D: the capability registry is the ONE authority for what each
+# resource type supports — the pipeline consults it instead of hardcoding
+# type lists, so connector limits are declared once and reported honestly.
+SUPPORTED_TYPES = tuple(ConnectorRegistry)
+_EVIDENCE_TYPES = tuple(
+    t for t in ConnectorRegistry if "evidence" in capabilities_for(t))
 _MAX_CATALOG_NAMES = 200
 
 
@@ -41,10 +49,11 @@ def _digest(names) -> str:
 def _resource_digest(db: Session, org_id: str, resource_type: str,
                      resource_id: str) -> str | None:
     """Digest of the resource's catalog inventory (drift signal).
-    NULL = not computable for this type (honest: no drift detection)."""
+    NULL = not computable for this type (honest: no drift detection) —
+    gated by the connector registry's 'drift' capability."""
     from app.models.knowledge_catalog import KBTableMeta
 
-    if resource_type not in _EVIDENCE_TYPES:
+    if "drift" not in capabilities_for(resource_type):
         return None
     rows = db.query(KBTableMeta.table_name).filter(
         KBTableMeta.kb_id == resource_id,
@@ -76,15 +85,30 @@ def _prev_catalog_tables(run: EnterpriseOnboardingRun | None) -> set:
 def _resource_exists(db: Session, org_id: str, resource_type: str,
                      resource_id: str) -> bool:
     """Cheap existence/authorization check BEFORE the digest short-circuit
-    (a deleted resource must never be 'skipped_unchanged')."""
-    if resource_type not in _EVIDENCE_TYPES:
-        return True  # automation/mcp: inventory-only, verified at step 1
-    from app.models.knowledge_base import KnowledgeBase
+    (a deleted resource must never be 'skipped_unchanged').
 
-    return db.query(KnowledgeBase.id).filter(
-        KnowledgeBase.id == resource_id,
-        KnowledgeBase.org_id == org_id,
-        KnowledgeBase.is_deleted == False,  # noqa: E712
+    Phase 5D: verified against the connector's org-scoped row for EVERY
+    type with an existence model — mcp_server/automation are no longer
+    accepted on faith; their rows carry org_id via TimestampedBase, so
+    cross-org ids fail closed here."""
+    model_name = existence_model(resource_type)
+    if not model_name:
+        return True  # no verifiable row — checked at the inventory step
+    if model_name == "knowledge_base":
+        from app.models.knowledge_base import KnowledgeBase
+        model = KnowledgeBase
+    elif model_name == "mcp_server":
+        from app.models.mcp_server import McpServer
+        model = McpServer
+    elif model_name == "automation_task":
+        from app.models.automation_task import AutomationTask
+        model = AutomationTask
+    else:  # pragma: no cover — registry drift guard
+        return False
+    return db.query(model.id).filter(
+        model.id == resource_id,
+        model.org_id == org_id,
+        model.is_deleted == False,  # noqa: E712
     ).first() is not None
 
 
