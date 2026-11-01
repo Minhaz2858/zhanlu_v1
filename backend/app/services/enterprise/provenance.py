@@ -45,7 +45,115 @@ SOURCE_TYPES = (
     "metric",
     "terminology",
     "rule",
+    "execution",
 )
+
+#: Record types a canonical ``execution_ref`` may point at. Kept in lockstep
+#: with ``app.services.enterprise.observations._RECORD_TYPES`` (Phase 5A).
+EXECUTION_RECORD_TYPES = ("nl2sql_query", "agent_run")
+
+_RECORD_PREFIX = {"nl2sql_query": "nl2sql_query", "agent_run": "agent_run"}
+
+
+def execution_ref(record_type: str | None, record_id: str | None) -> str | None:
+    """Canonical execution-reference string: ``"<record_type>:<record_id>"``.
+
+    Missing inputs stay missing (``None``); unknown record types are
+    REJECTED (the closed set keeps references auditable). The reference
+    identifies a REAL persisted record — verification against the
+    authorized organization is :func:`resolve_execution_ref`.
+    """
+    if not record_id:
+        return None
+    if record_type not in EXECUTION_RECORD_TYPES:
+        raise ValueError(f"unknown execution record type: {record_type!r}")
+    return f"{record_type}:{record_id}"
+
+
+def parse_execution_ref(ref: str | None) -> tuple[str, str] | None:
+    """Inverse of :func:`execution_ref`. Malformed/foreign/missing refs
+    parse to ``None`` — never guessed into a record type."""
+    if not ref or not isinstance(ref, str) or ":" not in ref:
+        return None
+    rtype, _, rid = ref.partition(":")
+    if rtype not in EXECUTION_RECORD_TYPES or not rid:
+        return None
+    return (rtype, rid)
+
+
+def resolve_execution_ref(db, org_id: str, ref: str | None):
+    """Verify an execution reference against the authorized organization.
+
+    Returns ``(record_type, record_id)`` when the referenced record exists
+    AND belongs to ``org_id``; ``None`` when the record is missing or
+    foreign (fail closed); ``ValueError`` on a malformed reference.
+    Reuses the observation loader so org semantics stay identical to
+    ``record_observation`` (AgentRun org lives in ``caller_context``).
+    """
+    parsed = parse_execution_ref(ref)
+    if parsed is None:
+        raise ValueError(f"malformed execution_ref: {ref!r}")
+    from app.services.enterprise.observations import _load_record
+
+    record = _load_record(db, org_id, parsed[0], parsed[1])
+    return parsed if record is not None else None
+
+
+def entries_with_verified_execution_refs(db, org_id: str, entries: list):
+    """Filter canonical entries: entries whose ``execution_ref`` does NOT
+    verify against ``org_id`` are OMITTED (contract: invalid or cross-org
+    references are dropped, never laundered). Entries without an
+    ``execution_ref`` pass through untouched."""
+    out = []
+    for e in entries or []:
+        ref = e.get("execution_ref") if isinstance(e, dict) else None
+        if ref is None:
+            out.append(e)
+            continue
+        # org ownership: an entry stamped for a DIFFERENT org is omitted
+        # even when its ref would technically resolve (never launder a
+        # foreign-org claim through the filter).
+        e_org = e.get("org_id")
+        if e_org is not None and e_org != org_id:
+            continue
+        try:
+            if resolve_execution_ref(db, org_id, ref) is not None:
+                out.append(e)
+        except ValueError:
+            continue  # malformed → omitted
+    return out
+
+
+def from_observed_execution(
+    record_type: str, record_id: str, *, org_id: str | None = None,
+    process_id: str | None = None, activity_seq: int | None = None,
+    match_confidence: float | None = None, match_method: str | None = None,
+) -> dict:
+    """Observed execution → canonical entry (``source_type="execution"``).
+
+    STATE HONESTY: an observed execution is NOT retrieved context and
+    NEVER supports the answer — ``retrieved=False, influenced=False``,
+    ``supports_answer`` omitted (tri-state undetermined). The observed
+    process linkage passes through verbatim (proposed evidence stays
+    proposed — this contract never promotes it). ``match_confidence``
+    passes through only when the matcher actually produced one.
+    """
+    if match_confidence is not None and not (
+            isinstance(match_confidence, (int, float))
+            and 0.0 <= float(match_confidence) <= 1.0):
+        raise ValueError(
+            f"match_confidence must be within [0, 1], got {match_confidence!r}")
+    return canonical_entry(
+        source_type="execution",
+        source_id=record_id,
+        org_id=org_id,
+        process_id=process_id,
+        activity_seq=activity_seq,
+        kind="observed_execution",
+        retrieval_method=match_method,
+        confidence=match_confidence,
+        retrieved=False, influenced=False, supports_answer=None,
+        execution_ref=execution_ref(record_type, record_id))
 
 _ENTRY_KEYS = (
     "source_type", "source_id", "org_id", "resource_type", "resource_id",

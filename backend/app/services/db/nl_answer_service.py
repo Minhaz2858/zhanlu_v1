@@ -3101,6 +3101,32 @@ def _shadow_validate_and_log(
             _lineage = extract_lineage(sql)
         except Exception as e:
             logger.debug("lineage extraction failed (non-fatal): %s", e)
+
+    # Phase 5A: the log row's identity is fixed BEFORE the canonical
+    # provenance entries are built, so the envelope's execution_ref points
+    # at the REAL persisted record (nl2sql_query:<id>) — never a
+    # placeholder — and every entry carries the datasource's verified org
+    # stamp (multi-tenant ownership, same resolution as the row writer).
+    import uuid as _uuid
+
+    from app.database import SessionLocal
+    from app.models.knowledge_base import KnowledgeBase
+    from app.models.nl2sql_query_log import Nl2sqlQueryLog
+
+    _log_id = str(_uuid.uuid4())
+    _org = None
+    try:
+        _s0 = SessionLocal()
+        try:
+            _kb = _s0.query(KnowledgeBase).filter(
+                KnowledgeBase.id == kb_id
+            ).first()
+            _org = getattr(_kb, "org_id", None)
+        finally:
+            _s0.close()
+    except Exception:
+        _org = None
+
     # Phase 3B: ontology planning provenance rides ADDITIVELY on the same
     # lineage record — historical consumers read the legacy keys unchanged.
     # With no provenance the row is byte-identical to pre-3B behavior, and
@@ -3111,42 +3137,33 @@ def _shadow_validate_and_log(
         # Phase 3C: canonical provenance envelope (prov-v1) rides beside
         # the raw section — unifying ontology planning evidence and the
         # executed statement's SQL lineage in ONE auditable contract.
-        # Fail-open: a converter bug can never break the telemetry row.
+        # Phase 5A: entries are org-stamped and carry the execution_ref of
+        # the log row they persist on. Fail-open: a converter bug can
+        # never break the telemetry row.
         try:
             from app.services.enterprise.provenance import (
+                execution_ref as _execution_ref,
                 from_ontology_provenance,
                 from_sql_lineage,
                 serialize_provenance,
             )
 
-            _entries = (from_ontology_provenance(ontology_provenance)
-                        + from_sql_lineage(_lineage))
+            _xref = _execution_ref("nl2sql_query", _log_id)
+            _entries = (from_ontology_provenance(
+                            ontology_provenance, org_id=_org,
+                            resource_id=kb_id, execution_ref=_xref)
+                        + from_sql_lineage(_lineage, org_id=_org,
+                                           resource_id=kb_id,
+                                           execution_ref=_xref))
             if _entries:  # no evidence → no section, never an empty envelope
                 _lineage["provenance"] = serialize_provenance(_entries)
         except Exception as e:
             logger.debug("canonical provenance serialization failed: %s", e)
 
     try:
-        import uuid as _uuid
-
-        from app.database import SessionLocal
-        from app.models.knowledge_base import KnowledgeBase
-        from app.models.nl2sql_query_log import Nl2sqlQueryLog
-
         # Multi-tenant stamping (audit fix): the log inherits the org of the
-        # datasource it ran against. Best-effort — never blocks the log row.
-        _org = None
-        try:
-            _s0 = SessionLocal()
-            try:
-                _kb = _s0.query(KnowledgeBase).filter(
-                    KnowledgeBase.id == kb_id
-                ).first()
-                _org = getattr(_kb, "org_id", None)
-            finally:
-                _s0.close()
-        except Exception:
-            _org = None
+        # datasource it ran against — resolved above (Phase 5A hoist) so the
+        # provenance envelope and the row share ONE verified org stamp.
 
         shadow_ok = bool(res.get("is_valid")) and bool(res.get("policy_allowed", True))
         if shadow_ok and live_success:
@@ -3161,7 +3178,7 @@ def _shadow_validate_and_log(
         session = SessionLocal()
         try:
             _log_row = Nl2sqlQueryLog(
-                id=str(_uuid.uuid4()),
+                id=_log_id,  # Phase 5A: fixed before the provenance build
                 datasource_id=kb_id,
                 question=question,
                 generated_sql=sql or None,
