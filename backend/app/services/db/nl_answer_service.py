@@ -3108,6 +3108,23 @@ def _shadow_validate_and_log(
     if ontology_provenance:
         _lineage = dict(_lineage) if isinstance(_lineage, dict) else {}
         _lineage["ontology"] = ontology_provenance
+        # Phase 3C: canonical provenance envelope (prov-v1) rides beside
+        # the raw section — unifying ontology planning evidence and the
+        # executed statement's SQL lineage in ONE auditable contract.
+        # Fail-open: a converter bug can never break the telemetry row.
+        try:
+            from app.services.enterprise.provenance import (
+                from_ontology_provenance,
+                from_sql_lineage,
+                serialize_provenance,
+            )
+
+            _entries = (from_ontology_provenance(ontology_provenance)
+                        + from_sql_lineage(_lineage))
+            if _entries:  # no evidence → no section, never an empty envelope
+                _lineage["provenance"] = serialize_provenance(_entries)
+        except Exception as e:
+            logger.debug("canonical provenance serialization failed: %s", e)
 
     try:
         import uuid as _uuid
