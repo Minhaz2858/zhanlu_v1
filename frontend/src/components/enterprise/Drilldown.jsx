@@ -134,7 +134,7 @@ function Row({ k, v }) {
 
 /** Business Object drilldown — authoritative OntologyObject summary. */
 export function BusinessObjectPanel({ objectId, onClose, onOpenResource,
-  onOpenProcess, onOpenObject, crumbs }) {
+  onOpenProcess, onOpenObject, onOpenRule, crumbs }) {
   const [data, setData] = useState(null);
   const [failed, setFailed] = useState(false);
 
@@ -220,6 +220,28 @@ export function BusinessObjectPanel({ objectId, onClose, onOpenResource,
               <p className="text-stone-400 mt-1">Not wired to a live resource yet — manual object.</p>
             )}
           </div>
+
+          {/* Phase 6F: rules whose PERSISTED scope references this object or
+              its domain (server-resolved) — clicking opens the rule detail.
+              Status shown as reference metadata, never an enforcement claim. */}
+          <div>
+            <h4 className="text-[10px] uppercase tracking-wide text-stone-400 font-semibold">Business rules</h4>
+            {(data.related_rules || []).length === 0 ? (
+              <p className="text-stone-400 mt-1">No business rules reference this object or its domain yet.</p>
+            ) : (
+              <div className="mt-1 space-y-1">
+                {data.related_rules.map((r) => (
+                  <div key={r.id} className="flex items-center gap-1.5 flex-wrap">
+                    <button className="underline text-stone-700 hover:text-stone-900 text-left"
+                      onClick={() => onOpenRule?.(r.id)}>{r.statement}</button>
+                    <span className="text-[9px] text-stone-400 capitalize">
+                      ({r.status}{r.effect && r.effect !== 'informational' ? ` · ${r.effect === 'block' ? 'blocks' : 'needs approval'}` : ''})
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </>
       )}
     </PanelShell>
@@ -231,6 +253,26 @@ export function BusinessObjectPanel({ objectId, onClose, onOpenResource,
 export function ResourcePanel({ refId, onClose, onOpenObject, crumbs }) {
   const [data, setData] = useState(null);
   const [failed, setFailed] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState(null);
+
+  // Phase 6F: bounded onboarding history — loaded only on demand.
+  useEffect(() => {
+    if (!showHistory || history) return;
+    let alive = true;
+    (async () => {
+      try {
+        const res = await authFetch(
+          `/api/ontology/enterprise/resources/${refId}/onboarding-history`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.json();
+        if (alive) setHistory(body);
+      } catch {
+        if (alive) setHistory({ runs: [] }); // honest empty on failure
+      }
+    })();
+    return () => { alive = false; };
+  }, [showHistory, refId, history]);
 
   useEffect(() => {
     let alive = true;
@@ -271,6 +313,45 @@ export function ResourcePanel({ refId, onClose, onOpenObject, crumbs }) {
               </div>
             ) : (
               <p className="text-stone-400 mt-1">Never onboarded — no onboarding runs recorded.</p>
+            )}
+            {/* Phase 6F: Resource → onboarding-history leg (bounded, on demand) */}
+            {data.onboarding.status && (
+              <div className="mt-1.5">
+                <button onClick={() => setShowHistory((s) => !s)}
+                  className="text-[10px] px-2 py-0.5 rounded-md border border-stone-200 bg-white text-stone-600 hover:bg-stone-100">
+                  {showHistory ? 'Hide history' : 'Show history'}
+                </button>
+                {showHistory && (
+                  <div className="mt-1.5 space-y-1.5">
+                    {history === null ? (
+                      <p className="flex items-center gap-1.5 text-stone-400">
+                        <Loader2 size={11} className="animate-spin" /> Loading history…</p>
+                    ) : history.runs.length === 0 ? (
+                      <p className="text-stone-400">No onboarding runs recorded.</p>
+                    ) : (
+                      history.runs.map((r, i) => (
+                        <div key={i} className="rounded-lg border border-stone-100 bg-stone-50 px-2 py-1.5 text-[10px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className="capitalize text-stone-700">{r.status}</span>
+                            {r.attempt != null && <span className="text-stone-400">attempt {r.attempt}</span>}
+                            {r.created_at && <span className="text-stone-400 ml-auto">{new Date(r.created_at).toLocaleString()}</span>}
+                          </div>
+                          {(r.steps || []).length > 0 && (
+                            <div className="mt-0.5 text-stone-500">
+                              {r.steps.map((s, j) => (
+                                <span key={j} className="mr-1.5">
+                                  {s.step}: <span className={s.status === 'ok' ? 'text-emerald-700' : 'text-red-600'}>{s.status}</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {r.error && <div className="text-red-600">{r.error}</div>}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
           <div>

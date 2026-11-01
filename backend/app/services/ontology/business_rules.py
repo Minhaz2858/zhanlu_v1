@@ -158,6 +158,10 @@ def serialize_rule(rule: BusinessRule) -> dict:
         "source_evidence_ids": rule.source_evidence_ids or [],
         "status": rule.status,
         "applies_to": rule.applies_to,
+        # Phase 6F: marker-protocol effect (block | approval | informational)
+        # — enforcement still depends on status=='enabled'; presented as
+        # metadata, never as an enforcement claim by itself.
+        "effect": _rule_effect(rule.statement),
         "review_history": rule.review_history or [],
         "created_date": rule.created_date.isoformat()
         if rule.created_date else None,
@@ -191,7 +195,31 @@ def list_business_rules(db: Session, org_id: str, *, status: str | None = None,
 
 def get_business_rule(db: Session, org_id: str, rule_id: str) -> dict | None:
     rule = _load_rule(db, org_id, rule_id)
-    return serialize_rule(rule) if rule else None
+    if rule is None:
+        return None
+    out = serialize_rule(rule)
+    # Phase 6F: resolve evidence ids to org ProcessEvidence rows — a rule's
+    # evidence trail becomes navigable. Missing/deleted ids stay listed,
+    # honestly marked unavailable (never dropped, never invented).
+    from app.models.enterprise_process import ProcessEvidence
+
+    ids = rule.source_evidence_ids or []
+    rows: dict = {}
+    if ids:
+        for e in db.query(ProcessEvidence).filter(
+                ProcessEvidence.org_id == org_id,
+                ProcessEvidence.id.in_(ids)).all():
+            rows[e.id] = e
+    out["resolved_evidence"] = [{
+        "id": rid,
+        "available": rid in rows,
+        **({"source_ref": rows[rid].source_ref,
+            "evidence_kind": rows[rid].evidence_kind,
+            "evidence_status": rows[rid].evidence_status,
+            "process_id": rows[rid].process_id}
+           if rid in rows else {}),
+    } for rid in ids]
+    return out
 
 
 # ── Phase 3D.2 — governed-action pre-checks (deterministic, no LLM) ─────────
@@ -222,6 +250,12 @@ def _rule_effect(statement: str | None) -> str:
         if head.startswith(f"{marker}:"):
             return effect
     return "informational"
+
+
+# Phase 6F: public alias — presentation layers (drilldowns, rule browsers)
+# surface the marker-protocol effect so users can distinguish executable
+# guidance from informational knowledge without re-implementing the parse.
+rule_effect = _rule_effect
 
 
 def applicable_action_rules(

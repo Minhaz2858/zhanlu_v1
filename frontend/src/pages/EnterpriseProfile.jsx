@@ -1,19 +1,28 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Building2, RefreshCw, Loader2, Download, MapPin, Radar, Plus,
   CircleDot, Layers, Database, ShieldCheck, History, Network, Boxes,
   Workflow, Search, AlertTriangle, CheckCircle2, Activity, Target, Gauge,
   GitBranch, TrendingDown, FileSearch, ShieldAlert, ClipboardCheck,
+  ScrollText, Bot,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { authFetch } from '@/api/authFetch';
 import { useAuth } from '@/lib/AuthContext';
 import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
+import {
+  ENTERPRISE_AREAS, ENTERPRISE_TABS,
+  parseEnterpriseView, buildEnterpriseSearch,
+} from '@/lib/enterpriseUrlState';
 import OntologyGraph from '@/components/ontology/OntologyGraph';
 import EnterpriseMap from '@/components/enterprise/EnterpriseMap';
 import { BusinessObjectPanel, ResourcePanel } from '@/components/enterprise/Drilldown';
 import ProcessFlowCanvas from '@/components/enterprise/ProcessFlowCanvas';
 import ReviewCenter from '@/components/enterprise/ReviewCenter';
+import BusinessRulesBrowser from '@/components/enterprise/BusinessRulesBrowser';
+import WorkforcePanel from '@/components/enterprise/WorkforcePanel';
+import ResourceDirectory from '@/components/enterprise/ResourceDirectory';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts';
@@ -1564,21 +1573,17 @@ function BusinessProcesses({ onOpenFlow }) {
   );
 }
 
-const EXPERIENCES = [
-  { key: 'M', label: 'Enterprise Map', icon: Boxes },
-  { key: 'A', label: 'Executive', icon: Gauge },
-  { key: 'B', label: 'Situation Room', icon: FileSearch },
-  { key: 'C', label: 'Object Explorer', icon: Network },
-  { key: 'D', label: 'Decisions', icon: Workflow },
-  { key: 'E', label: 'Outcomes', icon: Activity },
-  { key: 'F', label: 'Processes', icon: GitBranch },
-  { key: 'G', label: 'Health', icon: ShieldCheck },
-  { key: 'R', label: 'Review', icon: ClipboardCheck, adminOnly: true },
-];
+/* Phase 6F: tab icons — labels/groups come from enterpriseUrlState (the
+   six conceptual areas are navigation groups over the SAME components). */
+const TAB_ICONS = {
+  M: Boxes, A: Gauge, B: FileSearch, C: Network, D: Workflow, E: Activity,
+  F: GitBranch, G: ShieldCheck, R: ClipboardCheck, K: ScrollText,
+  W: Bot, S: Database,
+};
+const ADMIN_ONLY_TABS = ['R'];
 
 export default function EnterpriseProfile() {
   const { isAdmin } = useAuth();
-  const [exp, setExp] = useState('M');
   const [overview, setOverview] = useState(null);
   const [objects, setObjects] = useState([]);
   const [value, setValue] = useState([]);
@@ -1586,9 +1591,26 @@ export default function EnterpriseProfile() {
   const [discovering, setDiscovering] = useState(false);
   const [flowProcessId, setFlowProcessId] = useState(null);
   const [detailProcessId, setDetailProcessId] = useState(null);
-  // Phase 6C: business-object / resource drilldown drawers
-  const [objectId, setObjectId] = useState(null);
-  const [resourceId, setResourceId] = useState(null);
+
+  // Phase 6F: shareable deep-links — the whole view (tab + object/resource/
+  // rule refs) lives in the URL; refresh preserves it, invalid or
+  // non-permitted refs fall back honestly (parse never renders a view the
+  // user may not access).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = useMemo(
+    () => parseEnterpriseView(searchParams, {
+      adminKeys: isAdmin ? ADMIN_ONLY_TABS : [],
+    }),
+    [searchParams, isAdmin]);
+  const setView = useCallback((patch) => {
+    setSearchParams(
+      buildEnterpriseSearch({ ...view, ...patch }),
+      { replace: false });
+  }, [view, setSearchParams]);
+  const setExp = useCallback((exp) => setView({ exp }), [setView]);
+  const setObjectId = useCallback((objectId) => setView({ objectId }), [setView]);
+  const setResourceId = useCallback((resourceId) => setView({ resourceId }), [setView]);
+  const openRule = useCallback((ruleId) => setView({ exp: 'K', ruleId }), [setView]);
 
   const openProcess = useCallback((processId, asFlow) => {
     if (asFlow) setFlowProcessId(processId);
@@ -1623,54 +1645,73 @@ export default function EnterpriseProfile() {
 
   if (!overview) {
     return (
-      <div className="flex items-center justify-center py-24 text-stone-400">
+      <div className="flex items-center justify-center py-24 text-muted-foreground/80">
         <Loader2 size={18} className="animate-spin mr-2" /> Loading enterprise profile…
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-stone-50">
+    <div className="h-full overflow-y-auto bg-muted/40">
       <div className="max-w-6xl mx-auto px-6 py-8">
         <div className="flex items-center gap-3">
-          <Building2 size={22} className="text-stone-700" />
-          <h1 className="text-lg font-semibold text-stone-900">Enterprise Business Operating Model</h1>
-          <span className="text-[11px] text-stone-400">governed intelligence → business decisions → measured outcomes</span>
+          <Building2 size={22} className="text-foreground" />
+          <h1 className="text-lg font-semibold text-foreground">Enterprise Business Operating Model</h1>
+          <span className="text-[11px] text-muted-foreground/80">governed intelligence → business decisions → measured outcomes</span>
           <button onClick={runDiscovery} disabled={discovering}
-            className="ml-auto flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-100 disabled:opacity-50">
+            className="ml-auto flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md border border-border bg-card text-foreground hover:bg-muted/60 disabled:opacity-50">
             {discovering ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
             {discovering ? 'Discovering…' : 'Run auto-discovery'}
           </button>
         </div>
 
-        <div className="mt-5 flex items-center gap-1 border-b border-stone-200">
-          {EXPERIENCES.filter((e) => e.key !== 'R' || isAdmin).map((e) => {
-            const Icon = e.icon;
-            const active = exp === e.key;
+        {/* Phase 6F: six human-facing navigation areas over the SAME tabs —
+            no duplicate views; admin-only tabs are filtered per user. */}
+        <div className="mt-5 flex items-center gap-1 border-b border-border flex-wrap">
+          {ENTERPRISE_AREAS.map((area) => {
+            const tabs = area.tabs.filter((k) => !ADMIN_ONLY_TABS.includes(k) || isAdmin);
+            if (tabs.length === 0) return null;
             return (
-              <button key={e.key} onClick={() => setExp(e.key)}
-                className={`flex items-center gap-1.5 px-3 py-2 text-[12px] border-b-2 -mb-px ${
-                  active ? 'border-stone-800 text-stone-900 font-medium' : 'border-transparent text-stone-500 hover:text-stone-700'}`}>
-                <Icon size={13} /> {e.label}
-              </button>
+              <div key={area.key} className="flex items-center">
+                <span className="text-[9px] uppercase tracking-wide text-muted-foreground/60 px-1.5 whitespace-nowrap"
+                  title={`Area: ${area.label}`}>{area.label}</span>
+                {tabs.map((key) => {
+                  const Icon = TAB_ICONS[key];
+                  const active = view.exp === key;
+                  return (
+                    <button key={key} onClick={() => setExp(key)}
+                      title={ENTERPRISE_TABS[key]}
+                      className={`flex items-center gap-1.5 px-3 py-2 text-[12px] border-b-2 -mb-px ${
+                        active ? 'border-border text-foreground font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
+                      <Icon size={13} /> {ENTERPRISE_TABS[key]}
+                    </button>
+                  );
+                })}
+                <span className="w-2" />
+              </div>
             );
           })}
         </div>
 
         <div className="mt-6">
-          {exp === 'M' && <EnterpriseMap onOpenProcess={openProcess}
-            onNavigate={setExp} canReview={isAdmin} />}
-          {exp === 'A' && <ExecutiveOverview />}
-          {exp === 'B' && <SituationRoom />}
-          {exp === 'C' && <BusinessObjectExplorer />}
-          {exp === 'D' && <DecisionCenter />}
-          {exp === 'E' && <OutcomeTracking />}
-          {exp === 'F' && <BusinessProcesses onOpenFlow={setFlowProcessId} />}
-          {exp === 'G' && (
+          {view.exp === 'M' && <EnterpriseMap onOpenProcess={openProcess}
+            onNavigate={setExp} canReview={isAdmin} onOpenRule={openRule} />}
+          {view.exp === 'A' && <ExecutiveOverview />}
+          {view.exp === 'B' && <SituationRoom />}
+          {view.exp === 'C' && <BusinessObjectExplorer />}
+          {view.exp === 'D' && <DecisionCenter />}
+          {view.exp === 'E' && <OutcomeTracking />}
+          {view.exp === 'F' && <BusinessProcesses onOpenFlow={setFlowProcessId} />}
+          {view.exp === 'G' && (
             <OperationalHealth overview={overview} value={value}
               selectedDomain={selectedDomain} setSelectedDomain={setSelectedDomain} />
           )}
-          {exp === 'R' && isAdmin && <ReviewCenter onOpenProcess={openProcess} />}
+          {view.exp === 'K' && <BusinessRulesBrowser isAdmin={isAdmin}
+            ruleId={view.ruleId} onOpenRule={openRule}
+            onClose={() => setView({ ruleId: null })} />}
+          {view.exp === 'S' && <ResourceDirectory onOpenResource={setResourceId} />}
+          {view.exp === 'W' && <WorkforcePanel />}
+          {view.exp === 'R' && isAdmin && <ReviewCenter onOpenProcess={openProcess} />}
         </div>
       </div>
 
@@ -1688,16 +1729,17 @@ export default function EnterpriseProfile() {
           onClose={() => setDetailProcessId(null)}
           onOpenFlow={setFlowProcessId} />
       )}
-      {objectId && (
-        <BusinessObjectPanel objectId={objectId}
+      {view.objectId && (
+        <BusinessObjectPanel objectId={view.objectId}
           crumbs={[{ label: 'Enterprise' }, { label: 'Business object' }]}
           onClose={() => setObjectId(null)}
           onOpenResource={setResourceId}
           onOpenProcess={(pid) => { setObjectId(null); openProcess(pid, true); }}
-          onOpenObject={setObjectId} />
+          onOpenObject={setObjectId}
+          onOpenRule={openRule} />
       )}
-      {resourceId && (
-        <ResourcePanel refId={resourceId}
+      {view.resourceId && (
+        <ResourcePanel refId={view.resourceId}
           crumbs={[{ label: 'Enterprise' }, { label: 'Resource' }]}
           onClose={() => setResourceId(null)}
           onOpenObject={setObjectId} />

@@ -205,7 +205,7 @@ const LEGEND = [
   { label: 'observed', fill: '#ecfdf5' },
 ];
 
-export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, canReview = false }) {
+export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, onOpenRule, canReview = false }) {
   const [map, setMap] = useState(null);
   const [loading, setLoading] = useState(true);
   // Phase 6E: configurable reporting window (7/30/90) — governs the changes
@@ -301,7 +301,8 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, 
         onOpenProcess={onOpenProcess} onInvestigateBlocked={() => setShowBlocked(true)} />}
 
       {showBlocked && (
-        <BlockedActionsPanel days={days} onClose={() => setShowBlocked(false)} />
+        <BlockedActionsPanel days={days} onClose={() => setShowBlocked(false)}
+          onOpenRule={onOpenRule} />
       )}
 
       <div className="mt-2 flex items-center gap-3 flex-wrap text-[10px] text-stone-500">

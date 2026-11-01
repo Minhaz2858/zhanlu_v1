@@ -13,7 +13,7 @@ import { toast } from 'sonner';
    panel never implies a disabled/proposed rule was enforcement. Only
    blocks are listed; allow / require_approval events are not blocks. */
 
-export default function BlockedActionsPanel({ days = 30, onClose }) {
+export default function BlockedActionsPanel({ days = 30, onClose, onOpenRule }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -101,7 +101,12 @@ export default function BlockedActionsPanel({ days = 30, onClose }) {
                               </div>
                             ) : (
                               <div key={r.id} className="text-stone-700">
-                                “{r.statement}”
+                                {onOpenRule ? (
+                                  <button className="underline hover:text-stone-900"
+                                    onClick={() => onOpenRule(r.id)}>“{r.statement}”</button>
+                                ) : (
+                                  <span>“{r.statement}”</span>
+                                )}
                                 <span className="ml-1 text-[9px] text-stone-400 capitalize">
                                   (rule status: {r.status || '—'} — current status, shown as reference only)
                                 </span>

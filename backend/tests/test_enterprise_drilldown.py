@@ -41,12 +41,13 @@ def client():
     eng = create_engine(
         "sqlite://", connect_args={"check_same_thread": False},
         poolclass=StaticPool)
+    from app.models.business_rule import BusinessRule
     Base.metadata.create_all(eng, tables=[
         OntologyDomain.__table__, OntologyObject.__table__,
         OntologyLink.__table__, BusinessProcess.__table__,
         ProcessEvidence.__table__, EnterpriseResource.__table__,
         EnterpriseOnboardingRun.__table__, KnowledgeBase.__table__,
-        OrgUnit.__table__])
+        OrgUnit.__table__, BusinessRule.__table__])
     s = sessionmaker(bind=eng)()
     app = FastAPI()
     app.include_router(ontology_router, prefix="/api")

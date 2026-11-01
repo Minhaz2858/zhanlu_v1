@@ -1535,6 +1535,21 @@ def enterprise_business_object(
             resource = {"id": kb.id, "name": kb.name,
                         "kind": "knowledge_base",
                         "source_kind": getattr(kb, "source_kind", None)}
+
+    # Phase 6F: rules whose PERSISTED scope references this object or its
+    # domain — never inferred, cross-org excluded by the org wall.
+    from app.models.business_rule import BusinessRule
+    from app.services.ontology.business_rules import rule_effect
+    rule_scope_ids = [object_id] + ([obj.domain_id] if obj.domain_id else [])
+    related_rules = [
+        {"id": r.id, "statement": r.statement, "status": r.status,
+         "scope": r.scope, "effect": rule_effect(r.statement)}
+        for r in db.query(BusinessRule).filter(
+            BusinessRule.org_id == org,
+            BusinessRule.is_deleted == False,  # noqa: E712
+            BusinessRule.scope.in_(["object", "domain"]),
+            BusinessRule.scope_ref_id.in_(rule_scope_ids)).all()
+    ]
     return {
         "id": obj.id, "name": obj.name,
         "description": obj.description,
@@ -1544,6 +1559,7 @@ def enterprise_business_object(
         "backing": {"kind": obj.backing_kind, "ref": ref,
                     "resource": resource},
         "links": links, "processes": procs,
+        "related_rules": related_rules,
     }
 
 
@@ -1606,6 +1622,88 @@ def enterprise_resource_summary(
     ]
     return {"identity": identity, "onboarding": onboarding,
             "related_objects": related}
+
+
+@router.get("/ontology/enterprise/resources/{ref_id}/onboarding-history")
+def enterprise_resource_onboarding_history(
+    ref_id: str,
+    limit: int = Query(default=20, ge=1, le=50),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Phase 6F — Resource → onboarding-history link: bounded, newest-first
+    run history for one resource. Same identity resolution (and fail-closed
+    404) as the summary endpoint; step payloads are summarized to
+    {step, status} — no full step JSON, no credentials."""
+    org = _org_or_404(user, None)
+    from app.models.enterprise_onboarding import EnterpriseOnboardingRun
+    from app.models.knowledge_base import KnowledgeBase
+
+    from app.models.enterprise_process import EnterpriseResource
+
+    inv = db.query(EnterpriseResource).filter(
+        EnterpriseResource.org_id == org,
+        EnterpriseResource.ref_id == ref_id,
+        EnterpriseResource.is_deleted == False).first()  # noqa: E712
+    kb = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == ref_id,
+        KnowledgeBase.org_id == org,
+        KnowledgeBase.is_deleted == False).first()  # noqa: E712
+    if inv is None and kb is None:
+        raise HTTPException(status_code=404, detail="Resource not found")
+
+    rows = db.query(EnterpriseOnboardingRun).filter(
+        EnterpriseOnboardingRun.org_id == org,
+        EnterpriseOnboardingRun.is_deleted == False,  # noqa: E712
+        EnterpriseOnboardingRun.resource_id == ref_id).order_by(
+        EnterpriseOnboardingRun.created_date.desc()).limit(limit).all()
+    runs = [{
+        "status": r.status,
+        "attempt": r.attempt,
+        "error": (r.error or None),
+        "created_at": (r.created_date.isoformat()
+                       if r.created_date else None),
+        "steps": [{"step": s.get("step"), "status": s.get("status")}
+                  for s in (r.steps_json or [])
+                  if isinstance(s, dict)][:20],
+    } for r in rows]
+    return {
+        "identity": {
+            "id": ref_id,
+            "name": ((inv.name if inv else None)
+                     or (kb.name if kb else ref_id)),
+            "kind": ((inv.resource_kind if inv else None)
+                     or (getattr(kb, "source_kind", None)
+                         or "knowledge_base")),
+        },
+        "total": len(runs),
+        "runs": runs,
+    }
+
+
+@router.get("/ontology/enterprise/assistant-context")
+def enterprise_assistant_context(
+    project_id: str | None = Query(default=None),
+    agent_id: str | None = Query(default=None),
+    query: str | None = Query(default=None),
+    budget: int = Query(default=2000, ge=100, le=4000),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Phase 6F — AI Workforce explainability: exposes the EXISTING
+    Business Context Service builder (no duplication, no second context
+    system). Returns the BCS contract (sections, status, warnings,
+    token budget, evidence coverage) so users can see which enterprise
+    knowledge informs an assistant and whether context is incomplete.
+    Backing refs / SQL / credentials are never included by the builder;
+    project authorization stays with the BCS/project-access contract
+    (unauthorized existing project → 404, propagated)."""
+    org = _org_or_404(user, None)
+    from app.services.enterprise.business_context import build_business_context
+
+    return build_business_context(
+        db, user, org, project_id=project_id, agent_id=agent_id,
+        query=query, budget_tokens=budget)
 
 
 @router.post("/ontology/enterprise/processes/{process_id}/confirm")

@@ -674,3 +674,80 @@ executed-record inspector (audit row ids only); agent-run outcomes cover
 process-matched runs within the bounded scan; snapshot has no i18n; window
 affects changes + blocked counts only (onboarding health is latest-run-based
 by design).
+
+## Phase 6F — Enterprise Intelligence final UX & integration (2026-11-01, DONE)
+
+Consolidation phase: NO new stores, NO migrations, NO second analytics or
+context system. All backend additions are additive read-only enrichments of
+EXISTING endpoints; frontend adds navigation grouping, shareable deep-links,
+and the missing investigation links.
+
+Backend (all TDD RED→GREEN, `tests/test_enterprise_knowledge_6f.py` 11):
+- `BusinessRule` detail gains `effect` (marker protocol: block | approval |
+  informational — public `rule_effect` alias) and `resolved_evidence`
+  (source_evidence_ids → org ProcessEvidence rows; missing ids honestly
+  marked unavailable, never dropped). `effect` is additive on every rule
+  serialization (list, review returns).
+- `GET /ontology/enterprise/business-objects/{id}` gains `related_rules` —
+  ONLY rules whose PERSISTED scope references the object or its domain
+  (never inferred; cross-org excluded by the org wall).
+- `GET /ontology/enterprise/resources/{ref_id}/onboarding-history` —
+  bounded (≤50) newest-first run history; same identity resolution and
+  fail-closed 404 as the 6C summary endpoint; step payloads summarized to
+  {step, status} (no full steps_json, no credentials).
+- `GET /ontology/enterprise/assistant-context` — AI Workforce explainability
+  by calling the EXISTING `build_business_context` verbatim (no BCS
+  duplication). Unauthorized existing projects surface as
+  `authorized:false` + `unavailable_reason` (the BCS fail-open contract,
+  reused unchanged — the boundary is made VISIBLE, not hidden); cross-org
+  project names never leak; backing refs/SQL/credentials never included
+  ( asserted in tests).
+
+Frontend:
+- `lib/enterpriseUrlState.js` (pure, 5 tests): six navigation areas as
+  GROUPS over the existing tabs (Business Overview / How We Work /
+  Business Knowledge / Enterprise Resources / AI Workforce /
+  Administration); `parseEnterpriseView` drops invalid refs, falls back to
+  the Enterprise Map, and NEVER renders an admin-only tab for non-admins
+  (adminKeys filter); `buildEnterpriseSearch` round-trips omitting defaults.
+- `EnterpriseProfile.jsx` (SURGICAL — foreign-dirty file): view state
+  (exp + object/resource/rule refs) lives in URL search params via
+  react-router useSearchParams; grouped nav; new tabs K (Business Rules),
+  W (AI Workforce), S (Resources). Refresh preserves the full view;
+  invalid deep-links fall back honestly.
+- NEW `BusinessRulesBrowser.jsx` (6 tests): rules list with status chips +
+  marker-effect badges ("blocks execution" / "needs approval" /
+  "informational" — enforcement claims only for enabled rules), a
+  Documented/Discovered/Verified/Enabled/Observed glossary, detail view
+  with resolved evidence + review history, and admin review actions
+  (confirm/reject/enable/disable/resubmit) through the EXISTING lifecycle
+  API; honest 404/empty states.
+- NEW `WorkforcePanel.jsx` (5 tests): org agent↔domain bindings (existing
+  /ontology/bindings) + "What does an assistant see?" — the BCS context
+  explainer (status, evidence coverage, token budget, warnings, project +
+  resources with authorization boundary, rules split into executable /
+  verified-informational / hypotheses). Department association is labelled
+  context-only, never an access grant.
+- NEW `ResourceDirectory.jsx`: systems inventory from the SAME map payload;
+  click → existing Resource drilldown drawer.
+- `Drilldown.jsx`: BusinessObjectPanel gains "Business rules" section
+  (server-resolved, click → rule detail); ResourcePanel gains on-demand
+  bounded onboarding history (new endpoint).
+- `BlockedActionsPanel` + `EnterpriseMap`: blocked-action rule references
+  are now links into the rules browser (blocked → rule → evidence chain).
+
+Navigation chain verified: Business Overview → Department (6C drawer) →
+Process (flow/detail) → Activity (6A panel) → Business Object (6C) →
+Related Business Rule (6F) → Evidence (6F resolved_evidence) → Enterprise
+Resource (6C) → Onboarding history (6F).
+
+Tests: backend `test_enterprise_knowledge_6f.py` 11 + enterprise regression
+108 green; frontend 67 enterprise-slice tests (10 files) green; production
+build green.
+
+Limitations: process drawer/flow refs remain ephemeral (not deep-linked —
+process ids are already openable via the map/process tabs); AI Workforce
+lists org bindings, not per-user My Space agents (AgentApp is user-scoped
+by design); assistant-context explainer is org-member readable (no secret
+material by BCS contract); rules browser pagination is fixed at 50 items
+with status filter (no search box yet).
