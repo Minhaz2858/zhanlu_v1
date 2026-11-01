@@ -160,7 +160,10 @@ def test_risks_prohibitive_rules_blocks_and_stale_references(db):
     db.add(AuditEvent(org_id=ORG, event_type="business_rule_check",
                       event_source="ontology", actor_type="agent",
                       resource_type="action", outcome="denied",
-                      detail_json={"decision": "blocked"},
+                      # decision 'block' — the exact value written by
+                      # business_rules.audit_action_rule_decision (6E fix;
+                      # the writer never emits 'blocked')
+                      detail_json={"decision": "block"},
                       occurred_at=now - timedelta(days=1)))
     db.add(EnterpriseOnboardingRun(
         org_id=ORG, resource_type="datasource", resource_id="kb-1",
@@ -171,9 +174,9 @@ def test_risks_prohibitive_rules_blocks_and_stale_references(db):
     ov = enterprise_map(db, ORG)["overview"]
     risks = ov["risks"]
     assert risks["enabled_prohibitive_rules"] == 1  # proposed never counts
-    assert risks["blocked_actions_30d"] == 1
+    assert risks["blocked_actions"] == 1
     assert risks["stale_reference_resources"] == 1
-    assert "blocked_actions_30d" in risks["definitions"]
+    assert "blocked_actions" in risks["definitions"]
 
 
 def test_changes_from_real_audit_records_only(db):

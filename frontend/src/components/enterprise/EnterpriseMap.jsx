@@ -3,9 +3,10 @@ import {
   ReactFlow, Background, Controls, MiniMap, Handle, Position,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Loader2, RefreshCw, Boxes, Building2, Layers, Workflow, Database, Users, Zap, Activity, History } from 'lucide-react';
+import { Loader2, RefreshCw, Boxes, Building2, Layers, Workflow, Database, Users, Zap, Activity, History, Download, X } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 import { toast } from 'sonner';
+import BlockedActionsPanel from './BlockedActionsPanel';
 
 /**
  * Enterprise Map (EBPM Increment 4) — the primary landing experience.
@@ -207,11 +208,15 @@ const LEGEND = [
 export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, canReview = false }) {
   const [map, setMap] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Phase 6E: configurable reporting window (7/30/90) — governs the changes
+  // and blocked-action windows computed server-side; default 30 preserved.
+  const [days, setDays] = useState(30);
+  const [showBlocked, setShowBlocked] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await authFetch('/api/ontology/enterprise/map');
+      const res = await authFetch(`/api/ontology/enterprise/map?days=${days}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setMap(await res.json());
       onRefreshed?.();
@@ -221,8 +226,28 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, 
     } finally {
       setLoading(false);
     }
-  }, [onRefreshed]);
+  }, [days, onRefreshed]);
   useEffect(() => { load(); }, [load]);
+
+  // Phase 6E: executive snapshot export — server renders the SAME overview
+  // payload the UI shows (no client-side recomputation, no new figures).
+  const exportSnapshot = async () => {
+    try {
+      const res = await authFetch(`/api/ontology/enterprise/executive-snapshot?days=${days}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `executive-snapshot-${days}d.html`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error(`Snapshot export failed: ${e.message || e}`);
+    }
+  };
 
   const { nodes, edges } = useMemo(() => (map ? layoutMap(map) : { nodes: [], edges: [] }), [map]);
   const [selectedUnit, setSelectedUnit] = useState(null);
@@ -246,14 +271,38 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, 
         <span className="text-[11px] text-stone-400">
           discovered structure only — click a process to open its flow
         </span>
-        <button onClick={load}
-          className="ml-auto flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border border-stone-300 bg-white text-stone-600 hover:bg-stone-100">
-          <RefreshCw size={11} className={loading ? 'animate-spin' : ''} /> Refresh
-        </button>
+        {/* Phase 6E: reporting window — server-side computed, never clamped */}
+        <div className="ml-auto flex items-center gap-1 text-[10px] text-stone-500"
+          role="group" aria-label="Reporting window">
+          <span>Window:</span>
+          {[7, 30, 90].map((d) => (
+            <button key={d} onClick={() => setDays(d)}
+              aria-pressed={days === d}
+              className={`px-2 py-0.5 rounded-md border ${
+                days === d
+                  ? 'border-stone-500 bg-stone-100 text-stone-800 font-medium'
+                  : 'border-stone-200 bg-white text-stone-500 hover:bg-stone-50'}`}>
+              {d}d
+            </button>
+          ))}
+          <button onClick={exportSnapshot}
+            className="flex items-center gap-1 px-2 py-1 rounded-md border border-stone-300 bg-white text-stone-600 hover:bg-stone-100"
+            title="Download the executive snapshot (HTML) — same computed data as this page">
+            <Download size={11} /> Export snapshot
+          </button>
+          <button onClick={load}
+            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border border-stone-300 bg-white text-stone-600 hover:bg-stone-100">
+            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+        </div>
       </div>
 
       {ov && <OverviewPanels ov={ov} onNavigate={onNavigate} canReview={canReview}
-        onOpenProcess={onOpenProcess} />}
+        onOpenProcess={onOpenProcess} onInvestigateBlocked={() => setShowBlocked(true)} />}
+
+      {showBlocked && (
+        <BlockedActionsPanel days={days} onClose={() => setShowBlocked(false)} />
+      )}
 
       <div className="mt-2 flex items-center gap-3 flex-wrap text-[10px] text-stone-500">
         {LEGEND.map((l) => (
@@ -298,12 +347,31 @@ export default function EnterpriseMap({ onOpenProcess, onRefreshed, onNavigate, 
                     <p className="text-stone-400 mt-1">No processes with this unit as an activity performer yet.</p>
                   ) : (
                     <div className="mt-1 space-y-1">
-                      {deptProcesses.map((p) => (
-                        <button key={p.id} className="underline text-stone-700 hover:text-stone-900 block"
-                          onClick={() => { setSelectedUnit(null); onOpenProcess?.(p.id, true); }}>
-                          {p.name}
-                        </button>
-                      ))}
+                      {deptProcesses.map((p) => {
+                        // Phase 6E: per-process drilldown evidence from the
+                        // overview departments breakdown (status + observed
+                        // volume — volume is evidence, never a score)
+                        const bd = (map.overview?.departments || [])
+                          .find((d) => d.id === unit.id)?.process_breakdown
+                          ?.find((b) => b.id === p.id);
+                        return (
+                          <div key={p.id} className="flex items-center justify-between gap-2">
+                            <button className="underline text-stone-700 hover:text-stone-900"
+                              onClick={() => { setSelectedUnit(null); onOpenProcess?.(p.id, true); }}>
+                              {p.name}
+                            </button>
+                            {bd && (
+                              <span className="text-[9px] text-stone-500 whitespace-nowrap">
+                                <span className={`capitalize ${bd.evidence_status === 'verified' ? 'text-emerald-700' : bd.evidence_status === 'proposed' ? 'text-amber-700' : 'text-stone-400'}`}>
+                                  {bd.evidence_status}
+                                </span>
+                                {' · '}
+                                {bd.observed_executions} observed
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -405,7 +473,7 @@ function Kpi({ label, value, onClick, tone }) {
     : <div className={cls}>{body}</div>;
 }
 
-function OverviewPanels({ ov, onNavigate, canReview, onOpenProcess }) {
+function OverviewPanels({ ov, onNavigate, canReview, onOpenProcess, onInvestigateBlocked }) {
   const nav = (key) => (onNavigate ? () => onNavigate(key) : undefined);
   const p = ov.processes || {};
   const ob = ov.observed || { available: false };
@@ -514,7 +582,8 @@ function OverviewPanels({ ov, onNavigate, canReview, onOpenProcess }) {
       {/* ── Phase 6D: executive intelligence ───────────────────────────
           Four sections, every metric traceable (definitions rendered as
           tooltips + an explicit honesty line). Unavailable ≠ zero. */}
-      <ExecutiveIntelligence ov={ov} onNavigate={onNavigate} canReview={canReview} />
+      <ExecutiveIntelligence ov={ov} onNavigate={onNavigate} canReview={canReview}
+        onInvestigateBlocked={onInvestigateBlocked} />
     </div>
   );
 }
@@ -523,7 +592,7 @@ function DefTitle({ text, children }) {
   return <span title={text} className="underline decoration-dotted underline-offset-2">{children}</span>;
 }
 
-function ExecutiveIntelligence({ ov, onNavigate, canReview }) {
+function ExecutiveIntelligence({ ov, onNavigate, canReview, onInvestigateBlocked }) {
   const perf = ov.performance || { available: false };
   const depts = ov.departments || [];
   const risks = ov.risks || { available: false };
@@ -553,6 +622,18 @@ function ExecutiveIntelligence({ ov, onNavigate, canReview }) {
             </span>
             <span className="text-stone-500">Observed executions: <b className="text-stone-800">{perf.total_executions}</b></span>
             <span className="text-stone-500">Last 7 days: <b className="text-stone-800">{perf.last_7d_executions}</b></span>
+            {/* Phase 6E: AgentRun TERMINAL outcomes — separate segment, no
+                double counting with the nl2sql ratio; running/queued excluded */}
+            {perf.agent_runs && perf.agent_runs.total != null && (
+              <span className="text-stone-500">
+                Agent runs (terminal):{' '}
+                <DefTitle text={perf.definitions?.['agent_runs.total'] || 'Terminal agent runs only (completed/failed)'}>
+                  <b className="text-stone-800">{perf.agent_runs.total}</b>
+                </DefTitle>
+                {' '}({perf.agent_runs.completed} completed, {perf.agent_runs.failed} failed,
+                rate {perf.agent_runs.success_rate == null ? '—' : `${Math.round(perf.agent_runs.success_rate * 100)}%`})
+              </span>
+            )}
             {perf.latest_execution_at && (
               <span className="text-stone-500">Latest: <b className="text-stone-800">{new Date(perf.latest_execution_at).toLocaleDateString()}</b></span>
             )}
@@ -599,8 +680,9 @@ function ExecutiveIntelligence({ ov, onNavigate, canReview }) {
         </div>
       )}
 
-      {/* Risks — every signal traces to real records */}
-      {risks.available && (risks.enabled_prohibitive_rules > 0 || risks.blocked_actions_30d > 0 ||
+      {/* Risks — every signal traces to real records; the blocked-action
+          window follows the configured reporting window (Phase 6E) */}
+      {risks.available && (risks.enabled_prohibitive_rules > 0 || risks.blocked_actions > 0 ||
           risks.failed_onboardings > 0 || risks.stale_reference_resources > 0) && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
           <h3 className="text-[12px] font-semibold text-red-800">Business risks</h3>
@@ -608,9 +690,9 @@ function ExecutiveIntelligence({ ov, onNavigate, canReview }) {
             {risks.enabled_prohibitive_rules > 0 && (
               <span><b>{risks.enabled_prohibitive_rules}</b> active prohibitive rule(s)</span>
             )}
-            {risks.blocked_actions_30d > 0 && (
-              <DefTitle text={risks.definitions?.blocked_actions_30d}>
-                <span><b>{risks.blocked_actions_30d}</b> action(s) blocked by rules in 30 days</span>
+            {risks.blocked_actions > 0 && (
+              <DefTitle text={risks.definitions?.blocked_actions}>
+                <span><b>{risks.blocked_actions}</b> action(s) blocked by rules in {risks.window_days ?? 30} days</span>
               </DefTitle>
             )}
             {risks.failed_onboardings > 0 && (
@@ -620,10 +702,16 @@ function ExecutiveIntelligence({ ov, onNavigate, canReview }) {
               <span><b>{risks.stale_reference_resources}</b> system(s) with stale data references</span>
             )}
           </div>
+          {risks.blocked_actions > 0 && onInvestigateBlocked && (
+            <button onClick={onInvestigateBlocked}
+              className="mt-2 text-[10px] px-2 py-1 rounded-md border border-red-300 bg-white text-red-700 hover:bg-red-100">
+              Investigate
+            </button>
+          )}
         </div>
       )}
 
-      {/* Operational changes — real audit records in a 30-day window */}
+      {/* Operational changes — window follows the reporting-window selector */}
       <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
         <h3 className="text-[12px] font-semibold text-stone-800 flex items-center gap-1.5">
           <History size={12} className="text-stone-500" /> Recent operational changes

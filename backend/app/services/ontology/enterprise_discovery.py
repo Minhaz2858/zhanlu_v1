@@ -1128,13 +1128,30 @@ def list_review_queue(db: Session, org_id: str) -> dict:
     }
 
 
-def enterprise_map(db: Session, org_id: str) -> dict:
+_ALLOWED_WINDOWS = (7, 30, 90)
+
+
+def _validate_days(days: int) -> int:
+    """Phase 6E: reporting window is a closed set — anything else is an
+    error, never silently clamped (a silently-clamped window would present
+    a different period than the one the manager asked for)."""
+    if days not in _ALLOWED_WINDOWS:
+        raise ValueError(
+            f"days must be one of {list(_ALLOWED_WINDOWS)}, got {days!r}")
+    return days
+
+
+def enterprise_map(db: Session, org_id: str, *, days: int = 30) -> dict:
     """Enterprise Map aggregation — the persisted business structure in one
     org-scoped payload: org units, capabilities, process families +
     processes, authorized systems/resources, and ONLY persisted
     relationships (process links + performer participation). Every section
     can be honestly empty; nothing is inferred beyond what discovery stored.
+
+    Phase 6E: ``days`` is the configurable reporting window (7/30/90) that
+    governs the operational-changes and blocked-action windows.
     """
+    days = _validate_days(days)
     from app.models.enterprise_process import (
         BusinessCapability, BusinessProcess, EnterpriseResource, OrgUnit,
         ProcessActivity, ProcessLink,
@@ -1226,15 +1243,18 @@ def enterprise_map(db: Session, org_id: str) -> dict:
         "families": fam_counts,
         "systems": systems,
         "process_links": links,
-        "overview": _map_overview(db, org_id, processes),
+        "overview": _map_overview(db, org_id, processes, days=days),
     }
 
 
-def _map_overview(db: Session, org_id: str, processes: list) -> dict:
+def _map_overview(db: Session, org_id: str, processes: list,
+                  *, days: int = 30) -> dict:
     """Phase 6B: executive overview — ONE org-scoped section computed from
     ALREADY-AUTHORITATIVE rows (no second store, no inference beyond what
     discovery persisted). observed NEVER counts as verification; missing
-    sections surface ``available: false`` — UNAVAILABLE, never zero."""
+    sections surface ``available: false`` — UNAVAILABLE, never zero.
+    Phase 6E: ``days`` (7/30/90) is the reporting window for changes and
+    blocked-action counts."""
     from app.models.agent_run import AgentRun
     from app.models.business_rule import BusinessRule
     from app.models.enterprise_process import EnterpriseResource
@@ -1375,15 +1395,21 @@ def _map_overview(db: Session, org_id: str, processes: list) -> dict:
         "attention": attention,
         "performance": _exec_performance(db, org_id, processes),
         "departments": _department_distribution(db, org_id, processes),
-        "risks": _risk_signals(db, org_id),
-        "changes": _operational_changes(db, org_id),
+        "risks": _risk_signals(db, org_id, days=days),
+        "changes": _operational_changes(db, org_id, days=days),
     }
 
 
 def _exec_performance(db: Session, org_id: str, processes: list) -> dict:
     """Phase 6D: REAL execution outcomes from matched nl2sql rows. The
     success rate is success / total MATCHED rows with a recorded outcome —
-    it is NOT an SLA and never implies process health by volume."""
+    it is NOT an SLA and never implies process health by volume.
+
+    Phase 6E: ``agent_runs`` adds org-verified AgentRun TERMINAL outcomes
+    (completed/failed) as a SEPARATE segment — running/queued runs are
+    never counted, and agent outcomes never merge into the nl2sql ratio
+    (no double counting)."""
+    from app.models.agent_run import AgentRun
     from app.models.nl2sql_query_log import Nl2sqlQueryLog
 
     org_pids = [p["id"] for p in processes]
@@ -1397,8 +1423,19 @@ def _exec_performance(db: Session, org_id: str, processes: list) -> dict:
                                "by total matched rows — an execution-outcome "
                                "ratio, NOT an SLA or process-health score",
                "last_7d_executions": "matched rows created in the last 7 days",
+               "agent_runs.total": "org-verified AgentRun rows matched to an "
+                                   "org process whose status is terminal "
+                                   "('completed'|'failed'); running/queued "
+                                   "runs are excluded — data scan bounded to "
+                                   "the 500 most recent rows",
+               "agent_runs.success_rate": "AgentRun status=='completed' "
+                                          "divided by terminal agent runs — "
+                                          "an outcome ratio, NOT an SLA",
            }}
+    agent = {"total": 0, "completed": 0, "failed": 0, "success_rate": None,
+             "latest_at": None}
     if not org_pids:
+        out["agent_runs"] = agent
         return out
     try:
         rows = db.query(Nl2sqlQueryLog).filter(
@@ -1425,9 +1462,34 @@ def _exec_performance(db: Session, org_id: str, processes: list) -> dict:
                 out["successful"] / out["total_executions"], 2)
         if times:
             out["latest_execution_at"] = max(times).isoformat()
+
+        # Phase 6E: agent terminal outcomes — org verified via caller_context
+        # (AgentRun has no org_id), bounded scan, terminal statuses only.
+        from app.services.enterprise.observations import _agent_run_org
+        ar_times = []
+        for r in db.query(AgentRun).filter(
+                AgentRun.process_id.in_(org_pids),
+                AgentRun.is_deleted == False).order_by(  # noqa: E712
+                AgentRun.created_date.desc()).limit(500).all():
+            if _agent_run_org(r) != org_id or r.status not in (
+                    "completed", "failed"):
+                continue
+            agent["total"] += 1
+            if r.status == "completed":
+                agent["completed"] += 1
+            else:
+                agent["failed"] += 1
+            if r.finished_at:
+                ar_times.append(r.finished_at)
+        if agent["total"]:
+            agent["success_rate"] = round(
+                agent["completed"] / agent["total"], 2)
+        if ar_times:
+            agent["latest_at"] = max(ar_times).isoformat()
     except Exception as e:  # noqa: BLE001
         logger.warning("enterprise map: performance section unavailable: %s", e)
         out["available"] = False
+    out["agent_runs"] = agent
     return out
 
 
@@ -1484,6 +1546,15 @@ def _department_distribution(db: Session, org_id: str, processes: list) -> list:
     for u in units:
         members = [p for p in processes
                    if u.name in (p.get("responsible_units") or [])]
+        # Phase 6E: per-process drilldown evidence for the department panel
+        # (bounded — the distribution stays a summary, not an unbounded dump)
+        ranked = sorted(members,
+                        key=lambda p: (-(obs_by_pid.get(p["id"], 0)),
+                                       p.get("name") or ""))
+        breakdown = [{"id": p["id"], "name": p.get("name"),
+                      "evidence_status": p.get("evidence_status"),
+                      "observed_executions": obs_by_pid.get(p["id"], 0)}
+                     for p in ranked[:20]]
         out.append({
             "id": u.id, "name": u.name, "unit_type": u.unit_type,
             "processes": len(members),
@@ -1493,6 +1564,8 @@ def _department_distribution(db: Session, org_id: str, processes: list) -> list:
                                       if p.get("evidence_status") == "proposed"),
             "observed_executions": sum(obs_by_pid.get(p["id"], 0)
                                        for p in members),
+            "process_breakdown": breakdown,
+            "breakdown_truncated": len(members) > len(breakdown),
             "definitions": defs,
         })
     return out
@@ -1501,15 +1574,19 @@ def _department_distribution(db: Session, org_id: str, processes: list) -> list:
 _PROHIBITIVE_MARKERS = ("prohibit:", "forbidden:", "deny:")
 
 
-def _risk_signals(db: Session, org_id: str) -> dict:
+def _risk_signals(db: Session, org_id: str, *, days: int = 30) -> dict:
     """Phase 6D: attention signals — ONLY categories backed by real rows.
     Proposed rules never count as enforced; blocks come from recorded
-    business_rule_check audit events."""
+    business_rule_check audit events. Phase 6E: the block count window is
+    configurable (7/30/90) and counts the ACTUAL recorded decision value
+    ``'block'`` — the value written by
+    ``business_rules.audit_action_rule_decision``."""
     from app.models.audit_event import AuditEvent
     from app.models.business_rule import BusinessRule
     from app.models.enterprise_onboarding import EnterpriseOnboardingRun
 
-    out = {"enabled_prohibitive_rules": 0, "blocked_actions_30d": 0,
+    out = {"window_days": days, "enabled_prohibitive_rules": 0,
+           "blocked_actions": 0,
            "failed_onboardings": 0, "stale_reference_resources": 0,
            "available": True,
            "definitions": {
@@ -1517,9 +1594,10 @@ def _risk_signals(db: Session, org_id: str) -> dict:
                                             "'enabled' whose statement carries "
                                             "an enforcement marker (PROHIBIT:/"
                                             "FORBIDDEN:/DENY:)",
-               "blocked_actions_30d": "AuditEvent business_rule_check rows "
-                                      "with decision 'blocked' in the last "
-                                      "30 days",
+               "blocked_actions": "AuditEvent business_rule_check rows with "
+                                  "detail_json.decision=='block' (the value "
+                                  "recorded by the rule pre-check) within "
+                                  "the last N days",
                "failed_onboardings": "resources whose LATEST onboarding run "
                                      "failed or partially failed",
                "stale_reference_resources": "resources whose latest run "
@@ -1534,14 +1612,14 @@ def _risk_signals(db: Session, org_id: str) -> dict:
         out["enabled_prohibitive_rules"] = sum(
             1 for r in rules
             if (r.statement or "").lower().startswith(_PROHIBITIVE_MARKERS))
-        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         blocked = db.query(AuditEvent).filter(
             AuditEvent.org_id == org_id,
             AuditEvent.event_type == "business_rule_check",
             AuditEvent.occurred_at >= cutoff).all()
-        out["blocked_actions_30d"] = sum(
+        out["blocked_actions"] = sum(
             1 for a in blocked
-            if (a.detail_json or {}).get("decision") == "blocked")
+            if (a.detail_json or {}).get("decision") == "block")
         runs = db.query(EnterpriseOnboardingRun).filter(
             EnterpriseOnboardingRun.org_id == org_id,
             EnterpriseOnboardingRun.is_deleted == False).order_by(  # noqa: E712
@@ -1565,12 +1643,13 @@ def _risk_signals(db: Session, org_id: str) -> dict:
     return out
 
 
-def _operational_changes(db: Session, org_id: str) -> dict:
-    """Phase 6D: operational changes — REAL audit records within a 30-day
-    window, grouped by type. No trends manufactured from snapshots."""
+def _operational_changes(db: Session, org_id: str, *, days: int = 30) -> dict:
+    """Phase 6D: operational changes — REAL audit records within a
+    configurable window (Phase 6E: 7/30/90), grouped by type. No trends
+    manufactured from snapshots."""
     from app.models.audit_event import AuditEvent
 
-    out = {"window_days": 30, "events": [], "recent": [], "available": True,
+    out = {"window_days": days, "events": [], "recent": [], "available": True,
            "definitions": {
                "events": "org audit events grouped by event_type within the "
                          "window — every entry traces to an AuditEvent row",
@@ -1578,7 +1657,7 @@ def _operational_changes(db: Session, org_id: str) -> dict:
                          "navigation handles to the underlying records",
            }}
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         rows = db.query(AuditEvent).filter(
             AuditEvent.org_id == org_id,
             AuditEvent.occurred_at >= cutoff).order_by(
@@ -1607,3 +1686,225 @@ def _operational_changes(db: Session, org_id: str) -> dict:
         logger.warning("enterprise map: changes section unavailable: %s", e)
         out["available"] = False
     return out
+
+
+def blocked_actions_section(db: Session, org_id: str, *, days: int = 30,
+                            limit: int = 100) -> dict:
+    """Phase 6E: investigation view of RECORDED business-rule blocks.
+
+    Source of truth: AuditEvent rows of type ``business_rule_check`` whose
+    ``detail_json.decision == 'block'`` — the exact value the deterministic
+    rule pre-check writes when it refuses an action. ``allow`` and
+    ``require_approval`` events are NOT blocks and never listed. Rule
+    references are resolved against org-scoped BusinessRule rows; a rule
+    that no longer resolves is honestly marked ``unavailable`` — never
+    dropped, never renamed. Resolution is naming only: a disabled or
+    proposed rule is reported with its CURRENT status, never presented as
+    enforcement.
+    """
+    from app.models.audit_event import AuditEvent
+    from app.models.business_rule import BusinessRule
+
+    out = {"window_days": days, "total_blocked": 0, "items": [],
+           "available": True,
+           "definitions": {
+               "total_blocked": "AuditEvent business_rule_check rows with "
+                                "detail_json.decision=='block' within the "
+                                "window — exactly the pre-check refusals, "
+                                "no re-derivation",
+               "violated_rules": "rule ids recorded on the audit row, "
+                                 "resolved to org BusinessRule rows; "
+                                 "unresolvable ids are marked unavailable",
+           }}
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        rows = db.query(AuditEvent).filter(
+            AuditEvent.org_id == org_id,
+            AuditEvent.event_type == "business_rule_check",
+            AuditEvent.occurred_at >= cutoff).order_by(
+            AuditEvent.occurred_at.desc()).all()
+        blocked = [r for r in rows
+                   if (r.detail_json or {}).get("decision") == "block"]
+        out["total_blocked"] = len(blocked)
+
+        rule_ids = sorted({rid
+                           for r in blocked
+                           for rid in ((r.detail_json or {}).get(
+                               "violated_rule_ids") or [])
+                           if rid})
+        rules_by_id = {}
+        if rule_ids:
+            for rr in db.query(BusinessRule).filter(
+                    BusinessRule.org_id == org_id,
+                    BusinessRule.id.in_(rule_ids)).all():
+                rules_by_id[rr.id] = rr
+
+        def _rule_ref(rid):
+            rr = rules_by_id.get(rid)
+            if rr is None:
+                return {"id": rid, "statement": None, "status": None,
+                        "unavailable": True}
+            return {"id": rid, "statement": rr.statement,
+                    "status": rr.status, "unavailable": False}
+
+        for r in blocked[:limit]:
+            d = r.detail_json or {}
+            out["items"].append({
+                "occurred_at": r.occurred_at.isoformat()
+                if r.occurred_at else None,
+                "action_id": r.resource_id,
+                "action_name": d.get("action_name"),
+                "tool_name": d.get("tool_name"),
+                "actor_type": r.actor_type,
+                "actor_id": r.actor_id,
+                "violated_rules": [_rule_ref(rid) for rid
+                                   in (d.get("violated_rule_ids") or [])],
+                "applicable_rule_ids": d.get("applicable_rule_ids") or [],
+                "approval_required": bool(d.get("approval_required")),
+                "evaluation_status": d.get("evaluation_status"),
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("enterprise map: blocked-actions section "
+                       "unavailable: %s", e)
+        out["available"] = False
+    return out
+
+
+def render_executive_snapshot_html(payload: dict, org_name: str,
+                                   generated_at: datetime) -> str:
+    """Phase 6E: executive snapshot export — static, self-contained HTML
+    rendered from the SAME computed ``enterprise_map`` payload the UI
+    shows. No charts, no trends, no recomputation: every number is copied
+    verbatim from the payload; unavailable sections are marked
+    unavailable; a provenance footer states the audit basis.
+
+    ``payload`` is the full ``enterprise_map`` return value (its
+    ``overview`` section carries the executive intelligence).
+    """
+    from html import escape
+
+    ov = payload.get("overview") or {}
+    days = ((ov.get("changes") or {}).get("window_days")
+            or (ov.get("risks") or {}).get("window_days") or 30)
+    e = escape
+    gen = generated_at.astimezone(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC")
+
+    def _unavailable(section):
+        return "" if section.get("available", True) else \
+            '<p class="un">unavailable</p>'
+
+    proc = ov.get("processes") or {}
+    ob = ov.get("observed") or {"available": False}
+    k = ov.get("knowledge") or {"available": False}
+    perf = ov.get("performance") or {"available": False}
+    agent = perf.get("agent_runs") or {}
+    risks = ov.get("risks") or {"available": False}
+    ch = ov.get("changes") or {"available": False}
+    depts = ov.get("departments") or []
+
+    def _rate(r):
+        return "—" if r is None else f"{round(r * 100)}%"
+
+    dept_rows = "".join(
+        f"<tr><td>{e(d.get('name') or '—')}</td>"
+        f"<td>{d.get('processes', '—')}</td>"
+        f"<td>{d.get('verified_processes', '—')}</td>"
+        f"<td>{d.get('proposed_processes', '—')}</td>"
+        f"<td>{d.get('observed_executions', '—')}</td></tr>"
+        for d in depts)
+
+    change_rows = "".join(
+        f"<tr><td>{e(c.get('event_type') or '—').replace('_', ' ')}</td>"
+        f"<td>{c.get('count', '—')}</td>"
+        f"<td>{e((c.get('latest_at') or '—')[:19])}</td></tr>"
+        for c in (ch.get("events") or [])[:15])
+
+    proc_rows = "".join(
+        f"<tr><td>{e(p.get('name') or '—')}</td>"
+        f"<td>{e(p.get('process_family') or '—')}</td>"
+        f"<td>{e(p.get('discovery_status') or '—')}</td>"
+        f"<td>{e(p.get('evidence_status') or '—')}</td></tr>"
+        for p in (payload.get("processes") or [])[:15])
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Executive snapshot — {e(org_name)}</title>
+<style>
+body{{font-family:Georgia,serif;margin:2rem;color:#1c1917;max-width:60rem}}
+h1{{font-size:1.3rem}} h2{{font-size:1rem;border-bottom:1px solid #d6d3d1;
+padding-bottom:.2rem;margin-top:1.6rem}}
+table{{border-collapse:collapse;width:100%;font-size:.8rem}}
+td,th{{border:1px solid #d6d3d1;padding:.3rem .5rem;text-align:left}}
+th{{background:#f5f5f4}}
+.un{{color:#a8a29e;font-style:italic}}
+.meta,.prov{{color:#78716c;font-size:.75rem}}
+.dl{{display:inline-block;margin-right:1.2rem}}
+</style></head><body>
+<h1>Executive snapshot — {e(org_name)}</h1>
+<p class="meta">Reporting window: {days} days · Generated {e(gen)} ·
+Data basis: persisted discovery, execution logs and audit records only —
+no estimated or modelled figures.</p>
+
+<h2>Processes</h2>
+<p class="dl">Total: <b>{proc.get('total', 'unavailable')}</b></p>
+<p class="dl">Verified: <b>{proc.get('verified', 'unavailable')}</b></p>
+<p class="dl">Proposed: <b>{proc.get('proposed', 'unavailable')}</b></p>
+<p class="dl">Rejected: <b>{proc.get('rejected', 'unavailable')}</b></p>
+{f'''<table><tr><th>Process</th><th>Family</th><th>Discovery</th><th>Evidence</th></tr>{proc_rows}</table>''' if proc_rows else '<p class="un">No processes recorded.</p>'}
+
+<h2>Observed executions</h2>
+{_unavailable(ob)}
+<p class="dl">Matched executions: <b>{ob.get('total_executions', 'unavailable') if ob.get('available') else 'unavailable'}</b></p>
+<p class="dl">Processes with observations: <b>{ob.get('processes_with_observations', 'unavailable') if ob.get('available') else 'unavailable'}</b></p>
+<p class="dl">Latest observed: <b>{e((ob.get('latest_observed_at') or '—')[:19]) if ob.get('available') else 'unavailable'}</b></p>
+
+<h2>Business knowledge coverage</h2>
+{_unavailable(k)}
+<p class="dl">Objects: <b>{(k.get('objects') or {}).get('total', 'unavailable') if k.get('available') else 'unavailable'}</b>
+(verified {(k.get('objects') or {}).get('verified', '—') if k.get('available') else '—'})</p>
+<p class="dl">Links: <b>{k.get('links', 'unavailable') if k.get('available') else 'unavailable'}</b></p>
+<p class="dl">Terminology: <b>{k.get('terminology', 'unavailable') if k.get('available') else 'unavailable'}</b></p>
+<p class="dl">Metrics: <b>{k.get('metrics', 'unavailable') if k.get('available') else 'unavailable'}</b></p>
+<p class="dl">Rules: <b>{(k.get('rules') or {}).get('total', 'unavailable') if k.get('available') else 'unavailable'}</b>
+(enabled {(k.get('rules') or {}).get('enabled', '—') if k.get('available') else '—'})</p>
+
+<h2>Operational performance</h2>
+{_unavailable(perf)}
+<p class="dl">Query executions: <b>{perf.get('total_executions', 'unavailable') if perf.get('available') else 'unavailable'}</b></p>
+<p class="dl">Success rate: <b>{_rate(perf.get('success_rate')) if perf.get('available') else 'unavailable'}</b>
+{'<span class="un">(no outcome data yet — not a zero)</span>' if perf.get('available') and perf.get('success_rate') is None else ''}</p>
+<p class="dl">Agent runs (terminal): <b>{agent.get('total', 'unavailable') if perf.get('available') else 'unavailable'}</b>
+(completed {agent.get('completed', '—') if perf.get('available') else '—'},
+failed {agent.get('failed', '—') if perf.get('available') else '—'},
+rate {_rate(agent.get('success_rate')) if perf.get('available') else '—'})</p>
+<p class="prov">Success rate is an execution-outcome ratio over matched rows —
+not an SLA and not a process-health score. Agent-run outcomes count only
+terminal runs (completed/failed); running/queued runs are excluded.</p>
+
+<h2>Departments</h2>
+{'' if depts else '<p class="un">No performer-based department associations recorded.</p>'}
+{f'''<table><tr><th>Department</th><th>Processes</th><th>Verified</th>
+<th>Awaiting review</th><th>Execution evidence</th></tr>{dept_rows}</table>''' if depts else ''}
+<p class="prov">Associations come from recorded activity performers;
+execution evidence is volume evidence, never a ranking.</p>
+
+<h2>Business risks</h2>
+{_unavailable(risks)}
+<p class="dl">Active prohibitive rules: <b>{risks.get('enabled_prohibitive_rules', 'unavailable') if risks.get('available') else 'unavailable'}</b></p>
+<p class="dl">Actions blocked by rules ({days}d): <b>{risks.get('blocked_actions', 'unavailable') if risks.get('available') else 'unavailable'}</b></p>
+<p class="dl">Systems with failed onboarding: <b>{risks.get('failed_onboardings', 'unavailable') if risks.get('available') else 'unavailable'}</b></p>
+<p class="dl">Systems with stale references: <b>{risks.get('stale_reference_resources', 'unavailable') if risks.get('available') else 'unavailable'}</b></p>
+
+<h2>Operational changes ({days}-day window)</h2>
+{_unavailable(ch)}
+{f'''<table><tr><th>Change type</th><th>Count</th><th>Latest</th></tr>{change_rows}</table>''' if ch.get('events') else '<p class="un">No recorded operational changes in this window.</p>'}
+
+<p class="prov">Provenance: every figure on this page is copied from the
+Enterprise Map overview computed for org <b>{e(org_name)}</b> at export
+time — process statuses from persisted discovery, execution outcomes from
+org-scoped query logs and terminal agent runs, risk and change signals
+from audit records. Metrics marked unavailable have no recorded data; they
+are never shown as zero. This document contains no forecasts or modelled
+values.</p>
+</body></html>"""

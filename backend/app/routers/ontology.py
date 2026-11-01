@@ -1315,15 +1315,81 @@ def enterprise_entity_reject(
 @router.get("/ontology/enterprise/map")
 def enterprise_map_endpoint(
     org_id: str | None = Query(default=None),
+    days: int = Query(default=30),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_required),
 ):
     """Enterprise Map aggregation — org units, capabilities, process
     families + processes, and ONLY persisted relationships (process links,
-    performer participation). Org-scoped; every section honestly empty."""
-    from app.services.ontology.enterprise_discovery import enterprise_map
+    performer participation). Org-scoped; every section honestly empty.
 
-    return enterprise_map(db, _org_or_404(user, org_id))
+    Phase 6E: ``days`` is the reporting window (7/30/90) for the changes
+    and blocked-action counts; anything else is rejected (422), never
+    silently clamped."""
+    from app.services.ontology.enterprise_discovery import (
+        _validate_days, enterprise_map)
+
+    try:
+        days = _validate_days(days)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return enterprise_map(db, _org_or_404(user, org_id), days=days)
+
+
+@router.get("/ontology/enterprise/blocked-actions")
+def enterprise_blocked_actions_endpoint(
+    org_id: str | None = Query(default=None),
+    days: int = Query(default=30),
+    limit: int = Query(default=100, ge=1, le=200),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Phase 6E: blocked-action investigation — AuditEvent
+    ``business_rule_check`` rows with the recorded decision ``block``,
+    rule references resolved against org BusinessRule rows (unresolvable
+    ids honestly marked unavailable). Org-scoped; blocks only."""
+    from app.services.ontology.enterprise_discovery import (
+        _validate_days, blocked_actions_section)
+
+    try:
+        days = _validate_days(days)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return blocked_actions_section(db, _org_or_404(user, org_id),
+                                   days=days, limit=limit)
+
+
+@router.get("/ontology/enterprise/executive-snapshot")
+def enterprise_executive_snapshot_endpoint(
+    org_id: str | None = Query(default=None),
+    days: int = Query(default=30),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Phase 6E: executive snapshot export — a self-contained HTML document
+    rendered from the SAME computed Enterprise Map overview the UI shows
+    (generated_at + provenance footer; unavailable metrics marked; no
+    charts, no forecasts, no recomputation)."""
+    from datetime import datetime as _dt
+
+    from fastapi import Response
+
+    from app.services.ontology.enterprise_discovery import (
+        _validate_days, enterprise_map, render_executive_snapshot_html)
+
+    try:
+        days = _validate_days(days)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    org = _org_or_404(user, org_id)
+    payload = enterprise_map(db, org, days=days)
+    now = _dt.now(timezone.utc)
+    html = render_executive_snapshot_html(payload, org, now)
+    stamp = now.strftime("%Y%m%d-%H%M")
+    return Response(
+        content=html, media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="executive-snapshot-{org}-{days}d-{stamp}.html"'})
 
 
 @router.get("/ontology/enterprise/processes")

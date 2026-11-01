@@ -608,3 +608,69 @@ Files: `enterprise_discovery.py` (+231), `EnterpriseMap.jsx` (+143), new `test_e
 Limitations: success rate covers only nl2sql-matched executions (agent-run outcomes are not persisted as success/failure); department association is performer-based only (no dept-declared ownership); changes panel is count+recent (no per-item drill yet); 30-day window is fixed.
 
 Phase 6E recommendation (NOT implemented): per-department drilldown pages with trend charts, blocked-action inspection list (navigate to rule + audit record), execution-outcome capture for agent runs, configurable change window, exportable executive snapshot.
+
+## Phase 6E — Management drilldown, accountability & executive reporting (2026-11-01, DONE)
+
+All TDD RED→GREEN. Additive-only on the existing Enterprise Map overview; no new
+stores, no parallel analytics, no fabricated figures. Evidence governance triple
+(documented / configured / observed) preserved; missing data surfaced as
+unavailable — never zero.
+
+Backend (`enterprise_discovery.py` +255, `ontology.py` +69):
+- Configurable reporting window `days` ∈ {7, 30, 90} (closed set; anything else
+  → 422, never silently clamped) on `GET /ontology/enterprise/map`, new
+  `GET /ontology/enterprise/blocked-actions`, new
+  `GET /ontology/enterprise/executive-snapshot`. Default 30 preserved.
+- **Bug fix (6D carry-over):** `_risk_signals` counted `detail_json.decision ==
+  'blocked'` but the ONLY writer (`business_rules.audit_action_rule_decision`)
+  records `'block' | 'allow' | 'require_approval'` — the 6D counter matched no
+  real rows. Renamed metric `blocked_actions_30d` → `blocked_actions` (+ per-
+  section `window_days`) and fixed the value to `'block'`. 6D test updated to
+  the real writer value.
+- Agent-run outcome observability: `performance.agent_runs` — org-verified via
+  `caller_context` (AgentRun has no org_id), matched to org processes, bounded
+  500-row scan, TERMINAL statuses only (completed/failed; running/queued never
+  counted), success_rate null when no terminal data. Separate segment from the
+  nl2sql ratio — no double counting. `definitions` for every metric.
+- Blocked-action investigation (`blocked_actions_section`): AuditEvent
+  `business_rule_check` rows with decision `'block'` ONLY (allow /
+  require_approval are not blocks); violated rule refs resolved against
+  org-scoped BusinessRule rows; unresolvable ids honestly marked
+  `unavailable` (never dropped/renamed); current rule status shown as
+  reference metadata only — never presented as enforcement.
+- Executive snapshot export: `render_executive_snapshot_html` renders the SAME
+  computed overview payload (no recomputation, no client-side figures) as a
+  self-contained HTML attachment with generated_at (UTC), reporting window,
+  per-section unavailable marks, bounded process table (15) and a provenance
+  footer stating the audit basis. No charts, no forecasts, no modelled values.
+- Department drilldown: per-dept `process_breakdown` (id/name/evidence_status/
+  observed_executions, ranked by observed volume then name, capped 20 with
+  `breakdown_truncated` flag).
+
+Frontend:
+- `EnterpriseMap.jsx`: reporting-window selector (7d/30d/90d, aria-pressed) in
+  the header → refetch `?days=N`; "Export snapshot" button (authFetch blob →
+  download); agent-runs terminal line with DefTitle definition tooltip; risks
+  blocked label follows `window_days`; "Investigate" opens the new drawer;
+  department drawer shows per-process evidence status + observed volume.
+- New `BlockedActionsPanel.jsx` drawer: fetches `/blocked-actions?days=`,
+  honest empty state ("No actions were blocked…"), unavailable state, rule
+  statements with current-status annotation ("shown as reference only").
+- Latent-bug fix: `X` icon was used by the 6C department drawer but never
+  imported (ReferenceError on drawer render) — now imported.
+
+Tests: new `tests/test_enterprise_executive_6e.py` (18: window honored for
+changes + blocked counts, default 30, invalid days ValueError + HTTP 422,
+terminal-only agent outcomes, separation/no-double-count, null success rate,
+cross-org exclusion, blocked-only + rule-name resolution + unavailable marks +
+window/cross-org, snapshot provenance/value-consistency/days, dept breakdown +
+cap) + `EnterpriseMap.management.test.jsx` (7). Updated 6D suites to the real
+writer value and renamed key. Results: 107 backend enterprise-slice + 40
+frontend enterprise tests green; production build green.
+
+Limitations: snapshot is HTML (print-to-PDF from browser; native PDF/PPTX not
+attempted — no existing infra); blocked-action list is not linked to an
+executed-record inspector (audit row ids only); agent-run outcomes cover
+process-matched runs within the bounded scan; snapshot has no i18n; window
+affects changes + blocked counts only (onboarding health is latest-run-based
+by design).
