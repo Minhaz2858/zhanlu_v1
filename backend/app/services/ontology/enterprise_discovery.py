@@ -10,7 +10,7 @@ inferred/proposed with evidence quotes.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -1373,4 +1373,237 @@ def _map_overview(db: Session, org_id: str, processes: list) -> dict:
             EnterpriseResource.org_id == org_id,
             EnterpriseResource.is_deleted == False).count(),  # noqa: E712
         "attention": attention,
+        "performance": _exec_performance(db, org_id, processes),
+        "departments": _department_distribution(db, org_id, processes),
+        "risks": _risk_signals(db, org_id),
+        "changes": _operational_changes(db, org_id),
     }
+
+
+def _exec_performance(db: Session, org_id: str, processes: list) -> dict:
+    """Phase 6D: REAL execution outcomes from matched nl2sql rows. The
+    success rate is success / total MATCHED rows with a recorded outcome —
+    it is NOT an SLA and never implies process health by volume."""
+    from app.models.nl2sql_query_log import Nl2sqlQueryLog
+
+    org_pids = [p["id"] for p in processes]
+    out = {"total_executions": 0, "successful": 0, "failed": 0,
+           "success_rate": None, "last_7d_executions": 0,
+           "latest_execution_at": None, "available": True,
+           "definitions": {
+               "total_executions": "count of nl2sql_query_logs rows whose "
+                                   "evidence matched an org process",
+               "success_rate": "nl2sql_query_logs.outcome=='success' divided "
+                               "by total matched rows — an execution-outcome "
+                               "ratio, NOT an SLA or process-health score",
+               "last_7d_executions": "matched rows created in the last 7 days",
+           }}
+    if not org_pids:
+        return out
+    try:
+        rows = db.query(Nl2sqlQueryLog).filter(
+            Nl2sqlQueryLog.org_id == org_id,
+            Nl2sqlQueryLog.process_id.in_(org_pids),
+            Nl2sqlQueryLog.is_deleted == False).all()  # noqa: E712
+        now = datetime.now(timezone.utc)
+        times = []
+        for r in rows:
+            out["total_executions"] += 1
+            if r.outcome == "success":
+                out["successful"] += 1
+            elif r.outcome in ("error", "failed", "denied"):
+                out["failed"] += 1
+            ts = r.created_date
+            if ts is not None:
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                times.append(ts)
+                if now - ts <= timedelta(days=7):
+                    out["last_7d_executions"] += 1
+        if out["total_executions"]:
+            out["success_rate"] = round(
+                out["successful"] / out["total_executions"], 2)
+        if times:
+            out["latest_execution_at"] = max(times).isoformat()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("enterprise map: performance section unavailable: %s", e)
+        out["available"] = False
+    return out
+
+
+def _department_distribution(db: Session, org_id: str, processes: list) -> list:
+    """Phase 6D: performer-based department distribution — associations come
+    ONLY from activity performers persisted during discovery. No scores, no
+    ranking: observed_executions is evidence volume, never quality."""
+    from app.models.agent_run import AgentRun
+    from app.models.nl2sql_query_log import Nl2sqlQueryLog
+    from app.models.enterprise_process import OrgUnit
+    from sqlalchemy import func
+
+    defs = {
+        "processes": "persisted processes with at least one activity "
+                     "performed by this unit (activity performers recorded "
+                     "during discovery)",
+        "observed_executions": "org-verified executions matched to the "
+                               "unit's processes — volume evidence only, "
+                               "NOT a performance score",
+    }
+    units = db.query(OrgUnit).filter(
+        OrgUnit.org_id == org_id,
+        OrgUnit.is_deleted == False).order_by(OrgUnit.name).all()  # noqa: E712
+    if not units:
+        return []
+    org_pids = [p["id"] for p in processes]
+    pid_proc = {p["id"]: p for p in processes}
+    # per-process observed counts (org-verified)
+    obs_by_pid: dict = {}
+    try:
+        if org_pids:
+            for (pid, c) in db.query(
+                    Nl2sqlQueryLog.process_id,
+                    func.count(Nl2sqlQueryLog.id)).filter(
+                Nl2sqlQueryLog.org_id == org_id,
+                Nl2sqlQueryLog.process_id.in_(org_pids),
+                Nl2sqlQueryLog.is_deleted == False).group_by(  # noqa: E712
+                Nl2sqlQueryLog.process_id).all():
+                obs_by_pid[pid] = c
+            from app.services.enterprise.observations import _agent_run_org
+            ar = db.query(AgentRun).filter(
+                AgentRun.process_id.in_(org_pids),
+                AgentRun.is_deleted == False).order_by(  # noqa: E712
+                AgentRun.created_date.desc()).limit(500).all()
+            for r in ar:
+                if _agent_run_org(r) == org_id:
+                    obs_by_pid[r.process_id] = obs_by_pid.get(
+                        r.process_id, 0) + 1
+    except Exception as e:  # noqa: BLE001 — counts stay partial, never fake
+        logger.warning("enterprise map: department observed counts "
+                       "partial: %s", e)
+
+    out = []
+    for u in units:
+        members = [p for p in processes
+                   if u.name in (p.get("responsible_units") or [])]
+        out.append({
+            "id": u.id, "name": u.name, "unit_type": u.unit_type,
+            "processes": len(members),
+            "verified_processes": sum(1 for p in members
+                                      if p.get("evidence_status") == "verified"),
+            "proposed_processes": sum(1 for p in members
+                                      if p.get("evidence_status") == "proposed"),
+            "observed_executions": sum(obs_by_pid.get(p["id"], 0)
+                                       for p in members),
+            "definitions": defs,
+        })
+    return out
+
+
+_PROHIBITIVE_MARKERS = ("prohibit:", "forbidden:", "deny:")
+
+
+def _risk_signals(db: Session, org_id: str) -> dict:
+    """Phase 6D: attention signals — ONLY categories backed by real rows.
+    Proposed rules never count as enforced; blocks come from recorded
+    business_rule_check audit events."""
+    from app.models.audit_event import AuditEvent
+    from app.models.business_rule import BusinessRule
+    from app.models.enterprise_onboarding import EnterpriseOnboardingRun
+
+    out = {"enabled_prohibitive_rules": 0, "blocked_actions_30d": 0,
+           "failed_onboardings": 0, "stale_reference_resources": 0,
+           "available": True,
+           "definitions": {
+               "enabled_prohibitive_rules": "BusinessRule rows status="
+                                            "'enabled' whose statement carries "
+                                            "an enforcement marker (PROHIBIT:/"
+                                            "FORBIDDEN:/DENY:)",
+               "blocked_actions_30d": "AuditEvent business_rule_check rows "
+                                      "with decision 'blocked' in the last "
+                                      "30 days",
+               "failed_onboardings": "resources whose LATEST onboarding run "
+                                     "failed or partially failed",
+               "stale_reference_resources": "resources whose latest run "
+                                            "reported removed catalog "
+                                            "tables (stale references)",
+           }}
+    try:
+        rules = db.query(BusinessRule).filter(
+            BusinessRule.org_id == org_id,
+            BusinessRule.is_deleted == False,  # noqa: E712
+            BusinessRule.status == "enabled").all()
+        out["enabled_prohibitive_rules"] = sum(
+            1 for r in rules
+            if (r.statement or "").lower().startswith(_PROHIBITIVE_MARKERS))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        blocked = db.query(AuditEvent).filter(
+            AuditEvent.org_id == org_id,
+            AuditEvent.event_type == "business_rule_check",
+            AuditEvent.occurred_at >= cutoff).all()
+        out["blocked_actions_30d"] = sum(
+            1 for a in blocked
+            if (a.detail_json or {}).get("decision") == "blocked")
+        runs = db.query(EnterpriseOnboardingRun).filter(
+            EnterpriseOnboardingRun.org_id == org_id,
+            EnterpriseOnboardingRun.is_deleted == False).order_by(  # noqa: E712
+            EnterpriseOnboardingRun.created_date.desc()).limit(200).all()
+        latest: dict = {}
+        for r in runs:
+            key = (r.resource_type, r.resource_id)
+            if key not in latest:
+                latest[key] = r
+        out["failed_onboardings"] = sum(
+            1 for r in latest.values()
+            if r.status in ("partial_failed", "failed"))
+        out["stale_reference_resources"] = sum(
+            1 for r in latest.values()
+            if any(s.get("step") == "stale_references"
+                   and (s.get("detail") or {}).get("removed_tables")
+                   for s in (r.steps_json or [])))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("enterprise map: risks section unavailable: %s", e)
+        out["available"] = False
+    return out
+
+
+def _operational_changes(db: Session, org_id: str) -> dict:
+    """Phase 6D: operational changes — REAL audit records within a 30-day
+    window, grouped by type. No trends manufactured from snapshots."""
+    from app.models.audit_event import AuditEvent
+
+    out = {"window_days": 30, "events": [], "recent": [], "available": True,
+           "definitions": {
+               "events": "org audit events grouped by event_type within the "
+                         "window — every entry traces to an AuditEvent row",
+               "recent": "most recent audit events (type, target, time) — "
+                         "navigation handles to the underlying records",
+           }}
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        rows = db.query(AuditEvent).filter(
+            AuditEvent.org_id == org_id,
+            AuditEvent.occurred_at >= cutoff).order_by(
+            AuditEvent.occurred_at.desc()).limit(500).all()
+        grouped: dict = {}
+        for r in rows:
+            g = grouped.setdefault(r.event_type, {"count": 0, "latest": None})
+            g["count"] += 1
+            if g["latest"] is None or (r.occurred_at and
+                                       r.occurred_at > g["latest"]):
+                g["latest"] = r.occurred_at
+        out["events"] = [
+            {"event_type": t, "count": g["count"],
+             "latest_at": g["latest"].isoformat() if g["latest"] else None}
+            for t, g in sorted(grouped.items(),
+                               key=lambda kv: -(kv[1]["count"]))]
+        out["recent"] = [
+            {"event_type": r.event_type,
+             "occurred_at": r.occurred_at.isoformat()
+             if r.occurred_at else None,
+             "resource_type": r.resource_type,
+             "resource_id": r.resource_id,
+             "actor_name": r.actor_name}
+            for r in rows[:8]]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("enterprise map: changes section unavailable: %s", e)
+        out["available"] = False
+    return out

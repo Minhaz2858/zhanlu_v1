@@ -3,7 +3,7 @@ import {
   ReactFlow, Background, Controls, MiniMap, Handle, Position,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Loader2, RefreshCw, Boxes, Building2, Layers, Workflow, Database, Users, Zap } from 'lucide-react';
+import { Loader2, RefreshCw, Boxes, Building2, Layers, Workflow, Database, Users, Zap, Activity, History } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 import { toast } from 'sonner';
 
@@ -510,6 +510,149 @@ function OverviewPanels({ ov, onNavigate, canReview, onOpenProcess }) {
           </div>
         </div>
       )}
+
+      {/* ── Phase 6D: executive intelligence ───────────────────────────
+          Four sections, every metric traceable (definitions rendered as
+          tooltips + an explicit honesty line). Unavailable ≠ zero. */}
+      <ExecutiveIntelligence ov={ov} onNavigate={onNavigate} canReview={canReview} />
+    </div>
+  );
+}
+
+function DefTitle({ text, children }) {
+  return <span title={text} className="underline decoration-dotted underline-offset-2">{children}</span>;
+}
+
+function ExecutiveIntelligence({ ov, onNavigate, canReview }) {
+  const perf = ov.performance || { available: false };
+  const depts = ov.departments || [];
+  const risks = ov.risks || { available: false };
+  const ch = ov.changes || { available: false };
+
+  return (
+    <div className="space-y-3">
+      {/* How we operate — real execution outcomes only */}
+      <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+        <h3 className="text-[12px] font-semibold text-stone-800 flex items-center gap-1.5">
+          <Activity size={12} className="text-stone-500" /> How we operate
+        </h3>
+        {!perf.available ? (
+          <p className="mt-1.5 text-[11px] text-stone-400">Performance data unavailable.</p>
+        ) : (
+          <div className="mt-2 flex flex-wrap items-baseline gap-x-6 gap-y-1 text-[11px]">
+            <span className="text-stone-500">
+              <DefTitle text={perf.definitions?.success_rate || 'Execution outcome ratio'}>
+                Execution success rate
+              </DefTitle>:{' '}
+              <b className="text-stone-800 text-[14px]">
+                {perf.success_rate == null ? '—' : `${Math.round(perf.success_rate * 100)}%`}
+              </b>
+              {perf.success_rate == null && (
+                <span className="text-stone-400"> (no outcome data yet — not a zero)</span>
+              )}
+            </span>
+            <span className="text-stone-500">Observed executions: <b className="text-stone-800">{perf.total_executions}</b></span>
+            <span className="text-stone-500">Last 7 days: <b className="text-stone-800">{perf.last_7d_executions}</b></span>
+            {perf.latest_execution_at && (
+              <span className="text-stone-500">Latest: <b className="text-stone-800">{new Date(perf.latest_execution_at).toLocaleDateString()}</b></span>
+            )}
+            <span className="text-[9px] text-stone-400 w-full">
+              An execution-outcome ratio from matched query logs — volume is evidence, not a performance score; no SLA is implied.
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Departments — performer-based distribution, no ranking */}
+      {depts.length > 0 && (
+        <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+          <h3 className="text-[12px] font-semibold text-stone-800 flex items-center gap-1.5">
+            <Users size={12} className="text-stone-500" /> Departments
+          </h3>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="text-[9px] uppercase tracking-wide text-stone-400 text-left">
+                  <th className="pr-3 font-medium">Department</th>
+                  <th className="pr-3 font-medium" title={depts[0]?.definitions?.processes}>Processes</th>
+                  <th className="pr-3 font-medium">Verified</th>
+                  <th className="pr-3 font-medium">Awaiting review</th>
+                  <th className="font-medium" title={depts[0]?.definitions?.observed_executions}>Execution evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {depts.map((d) => (
+                  <tr key={d.id} className="border-t border-stone-100">
+                    <td className="pr-3 py-1 font-medium text-stone-800">{d.name}</td>
+                    <td className="pr-3">{d.processes}</td>
+                    <td className="pr-3 text-emerald-700">{d.verified_processes}</td>
+                    <td className="pr-3 text-amber-700">{d.proposed_processes}</td>
+                    <td>{d.observed_executions}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-1.5 text-[9px] text-stone-400">
+            Associations come from recorded activity performers. Execution evidence is volume evidence, not a performance score — departments are never ranked.
+          </p>
+        </div>
+      )}
+
+      {/* Risks — every signal traces to real records */}
+      {risks.available && (risks.enabled_prohibitive_rules > 0 || risks.blocked_actions_30d > 0 ||
+          risks.failed_onboardings > 0 || risks.stale_reference_resources > 0) && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+          <h3 className="text-[12px] font-semibold text-red-800">Business risks</h3>
+          <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-[11px] text-red-800">
+            {risks.enabled_prohibitive_rules > 0 && (
+              <span><b>{risks.enabled_prohibitive_rules}</b> active prohibitive rule(s)</span>
+            )}
+            {risks.blocked_actions_30d > 0 && (
+              <DefTitle text={risks.definitions?.blocked_actions_30d}>
+                <span><b>{risks.blocked_actions_30d}</b> action(s) blocked by rules in 30 days</span>
+              </DefTitle>
+            )}
+            {risks.failed_onboardings > 0 && (
+              <span><b>{risks.failed_onboardings}</b> system(s) with failed onboarding</span>
+            )}
+            {risks.stale_reference_resources > 0 && (
+              <span><b>{risks.stale_reference_resources}</b> system(s) with stale data references</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Operational changes — real audit records in a 30-day window */}
+      <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+        <h3 className="text-[12px] font-semibold text-stone-800 flex items-center gap-1.5">
+          <History size={12} className="text-stone-500" /> Recent operational changes
+          <span className="text-[9px] text-stone-400 font-normal">last {ch.window_days ?? 30} days</span>
+        </h3>
+        {!ch.available ? (
+          <p className="mt-1.5 text-[11px] text-stone-400">Change data unavailable.</p>
+        ) : ch.events.length === 0 ? (
+          <p className="mt-1.5 text-[11px] text-stone-400">No recorded operational changes in this window.</p>
+        ) : (
+          <div className="mt-2 space-y-1">
+            {ch.events.slice(0, 5).map((e) => (
+              <div key={e.event_type} className="flex items-center justify-between text-[11px]">
+                <span className="text-stone-700">{e.event_type.replace(/_/g, ' ')}</span>
+                <span className="text-stone-500">
+                  {e.count} · latest {e.latest_at ? new Date(e.latest_at).toLocaleDateString() : '—'}
+                </span>
+              </div>
+            ))}
+            {ch.recent.length > 0 && (
+              <p className="text-[9px] text-stone-400 pt-1">
+                latest: {ch.recent[0].event_type.replace(/_/g, ' ')}
+                {ch.recent[0].resource_type ? ` → ${ch.recent[0].resource_type}` : ''}
+                {ch.recent[0].occurred_at ? ` · ${new Date(ch.recent[0].occurred_at).toLocaleString()}` : ''}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

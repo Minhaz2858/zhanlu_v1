@@ -592,3 +592,19 @@ Files: `ontology.py` (+152), `Drilldown.jsx` (new), `EnterpriseMap.jsx`/`Process
 Limitations: department panel is map-payload-scoped (no separate org-unit API; unit hierarchy not shown — OrgUnit parent names are not in the map payload); capability navigation remains the map's family grouping (no separate capability→process API); resource→evidence navigation surfaces evidence via the object's process links, not a standalone evidence browser; AgentRun-scan bounds apply to map-level observed totals.
 
 Phase 6D recommendation (NOT implemented): unit hierarchy + capability→process API enrichment, standalone evidence browser with review actions, execution-trend on the catalogue cards, saved drilldown deep-links.
+### Phase 6D — Executive Intelligence & Business Outcomes (2026-11-01, DONE)
+
+The Enterprise Map becomes an executive intelligence experience — grounded ONLY in persisted records, every metric traceable, no fabricated KPIs/trends/scores.
+
+- **Backend (4 additive `_map_overview` sections, each with machine-readable `definitions`)**:
+  - `performance` — execution outcomes from MATCHED nl2sql rows: volume, success/failure counts, success_rate (success/total; `null` when no data — NEVER 0%/100%), 7-day volume, latest execution. Explicitly an outcome ratio, NOT an SLA or health score.
+  - `departments` — performer-based distribution (processes, verified/proposed, observed volume via org-verified counts; AgentRun bounded 500). No ranking, no scores — "volume evidence, not a performance score" stated in API + UI.
+  - `risks` — enabled prohibitive rules (enforcement-marker protocol; proposed NEVER counts), recorded rule blocks (business_rule_check audit, 30d), failed onboarding, stale-reference resources.
+  - `changes` — real AuditEvent rows in a 30-day window, grouped by type + 8 most recent with target refs; nothing manufactured from snapshots.
+- **Frontend (`ExecutiveIntelligence` in EnterpriseMap)**: "How we operate" panel (success rate with definition tooltip + honesty line), Departments table (no ranking), Business-risks panel, Recent-operational-changes panel; unavailable sections render "unavailable"; undefined rates render "—" (never 0%).
+
+Files: `enterprise_discovery.py` (+231), `EnterpriseMap.jsx` (+143), new `test_enterprise_executive_overview.py` (8) + `EnterpriseMap.executive.test.jsx` (6). Results: 69 backend + 33 frontend enterprise regression green; production build green.
+
+Limitations: success rate covers only nl2sql-matched executions (agent-run outcomes are not persisted as success/failure); department association is performer-based only (no dept-declared ownership); changes panel is count+recent (no per-item drill yet); 30-day window is fixed.
+
+Phase 6E recommendation (NOT implemented): per-department drilldown pages with trend charts, blocked-action inspection list (navigate to rule + audit record), execution-outcome capture for agent runs, configurable change window, exportable executive snapshot.
