@@ -17,6 +17,10 @@ const KIND_META = {
   process: { label: 'Process', icon: ClipboardCheck },
   activity: { label: 'Activity', icon: ClipboardCheck },
   evidence: { label: 'Evidence', icon: FileText },
+  // Phase 7B — ontology relationships + document-derived knowledge join the
+  // SAME queue: one review center, every AI proposal, one audit trail.
+  link: { label: 'Relationship', icon: ClipboardCheck },
+  document_proposal: { label: 'Document proposal', icon: FileText },
 };
 const SECTIONS = [
   ['org_units', 'org_unit', 'Proposed departments & units'],
@@ -24,7 +28,20 @@ const SECTIONS = [
   ['processes', 'process', 'Proposed processes'],
   ['activities', 'activity', 'Proposed activities'],
   ['evidence', 'evidence', 'Evidence requiring review'],
+  ['links', 'link', 'Proposed relationships'],
+  ['document_proposals', 'document_proposal', 'Document-derived proposals'],
 ];
+const SECTION_KEY_BY_KIND = {
+  org_unit: 'org_units', capability: 'capabilities',
+  process: 'processes', activity: 'activities', evidence: 'evidence',
+  link: 'links', document_proposal: 'document_proposals',
+};
+// Document-derived knowledge is reviewed through its own lifecycle routes
+// (atomic approve/reject service with decision events); everything else
+// uses the generic enterprise confirm/reject endpoints.
+const REVIEW_URL = (kind, id, decision) => kind === 'document_proposal'
+  ? `/api/ontology/document-evidence/${id}/${decision === 'confirm' ? 'approve' : 'reject'}`
+  : `/api/ontology/enterprise/${kind}/${id}/${decision}`;
 
 export default function ReviewCenter({ onOpenProcess }) {
   const [queue, setQueue] = useState(null);
@@ -47,8 +64,7 @@ export default function ReviewCenter({ onOpenProcess }) {
   const review = async (kind, id, decision) => {
     setBusyId(`${kind}:${id}`);
     try {
-      const res = await authFetch(
-        `/api/ontology/enterprise/${kind}/${id}/${decision}`,
+      const res = await authFetch(REVIEW_URL(kind, id, decision),
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -64,8 +80,7 @@ export default function ReviewCenter({ onOpenProcess }) {
       setReason('');
       setQueue((prev) => {
         if (!prev) return prev;
-        const sectionKey = { org_unit: 'org_units', capability: 'capabilities',
-          process: 'processes', activity: 'activities', evidence: 'evidence' }[kind];
+        const sectionKey = SECTION_KEY_BY_KIND[kind];
         const next = {
           ...prev,
           [sectionKey]: (prev[sectionKey] || []).filter((i) => i.id !== id),
@@ -116,6 +131,14 @@ export default function ReviewCenter({ onOpenProcess }) {
           placeholder="Filter by label, source or quote…"
           className="text-[12px] pl-8 pr-3 py-2 w-72 border border-stone-300 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-stone-400" />
       </div>
+
+      {(queue.hidden_document_proposals || 0) > 0 && (
+        <p className="mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-1.5">
+          {queue.hidden_document_proposals} document proposal
+          {queue.hidden_document_proposals === 1 ? '' : 's'} hidden — your account
+          lacks access to the source document(s). Ask an owner for access to review them.
+        </p>
+      )}
 
       {total === 0 ? (
         <div className="mt-5 rounded-xl border border-dashed border-stone-300 bg-white px-6 py-12 text-center">
@@ -182,6 +205,9 @@ export default function ReviewCenter({ onOpenProcess }) {
                         {item.performer && <p className="mt-0.5 text-[11px] text-stone-500">performed by: {item.performer}</p>}
                         {item.quote && (
                           <p className="mt-1 text-[11px] text-stone-600 italic line-clamp-2">“{item.quote}”</p>
+                        )}
+                        {item.location_json?.page != null && (
+                          <p className="mt-0.5 text-[10px] text-stone-400">location: page {item.location_json.page}</p>
                         )}
                         {item.source_ref && (
                           <p className="mt-0.5 text-[10px] text-stone-400">source: {item.source_ref}</p>

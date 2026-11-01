@@ -1096,11 +1096,19 @@ def enterprise_review_queue(
     admin: User = Depends(require_org_admin),
 ):
     """Central Review Queue (org-admin): every AI proposal awaiting a human
-    decision — org units, capabilities, processes, activities and evidence
-    rows — with confidence, provenance and source references."""
-    from app.services.ontology.enterprise_discovery import list_review_queue
+    decision — org units, capabilities, processes, activities, evidence
+    rows, document proposals (D6-gated) and proposed ontology
+    relationships — with confidence, provenance and source references."""
+    from app.services.ontology.enterprise_discovery import (
+        list_review_queue, review_queue_links_and_documents)
 
-    return list_review_queue(db, admin.org_id)
+    result = list_review_queue(db, admin.org_id)
+    # Phase 7B: the two remaining categories join the SAME queue — no
+    # second queue system.
+    result.update(review_queue_links_and_documents(db, admin.org_id, admin))
+    result["counts"]["links"] = len(result["links"])
+    result["counts"]["document_proposals"] = len(result["document_proposals"])
+    return result
 
 
 # --- BusinessRule governance & review lifecycle (Phase 1B.1) -------------
@@ -1278,6 +1286,17 @@ def enterprise_entity_confirm(
 
     if kind in ("process", "processes"):  # 'processes' = legacy route alias
         result = confirm_process(db, admin.org_id, entity_id, admin)
+    elif kind == "link":  # Phase 7B: proposed ontology relationships
+        from app.services.ontology.enterprise_discovery import (
+            LinkReviewConflict, review_ontology_link)
+        try:
+            result = review_ontology_link(
+                db, admin.org_id, entity_id, "confirm", admin,
+                reason=(body.reason if body else None))
+        except LinkReviewConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     else:
         result = review_entity(db, admin.org_id, kind, entity_id,
                                "confirm", admin,
@@ -1303,6 +1322,17 @@ def enterprise_entity_reject(
     if kind in ("process", "processes"):  # 'processes' = legacy route alias
         result = reject_process(db, admin.org_id, entity_id, admin,
                                 reason=(body.reason if body else None))
+    elif kind == "link":  # Phase 7B: proposed ontology relationships
+        from app.services.ontology.enterprise_discovery import (
+            LinkReviewConflict, review_ontology_link)
+        try:
+            result = review_ontology_link(
+                db, admin.org_id, entity_id, "reject", admin,
+                reason=(body.reason if body else None))
+        except LinkReviewConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     else:
         result = review_entity(db, admin.org_id, kind, entity_id,
                                "reject", admin,

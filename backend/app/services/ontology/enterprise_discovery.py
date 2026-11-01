@@ -1128,6 +1128,144 @@ def list_review_queue(db: Session, org_id: str) -> dict:
     }
 
 
+class LinkReviewConflict(ValueError):
+    """A review decision that conflicts with the link's current lifecycle
+    state (duplicate decision, or the link already reached a terminal
+    state). Maps to HTTP 409 — the state is preserved, never mutated."""
+
+
+def review_ontology_link(db: Session, org_id: str, link_id: str,
+                         decision: str, reviewer, reason: str | None = None):
+    """Phase 7B: OntologyLink review lifecycle — proposed|inferred →
+    verified | rejected, via the SAME bookkeeping as every other reviewable
+    kind (provenance review_history + AuditEvent; no migration: history
+    lives in provenance_json).
+
+    Safety contract:
+    - org-scoped on the link row itself (cross-org → not found);
+    - BOTH endpoint objects must exist, belong to the SAME org, and not be
+      deleted — a relationship with a missing or foreign endpoint can never
+      be confirmed (no cross-org edges, no invented relationships);
+    - duplicate / terminal-state decisions raise LinkReviewConflict and
+      preserve the current state;
+    - human review never CREATES a relationship — it only decides one.
+    """
+    from app.models.audit_event import AuditEvent
+    from app.models.ontology import OntologyLink, OntologyObject
+
+    if decision not in ("confirm", "reject"):
+        return None
+    link = (
+        db.query(OntologyLink)
+        .filter(OntologyLink.id == link_id,
+                OntologyLink.org_id == org_id,
+                OntologyLink.is_deleted == False)  # noqa: E712
+        .with_for_update()  # no-op on SQLite; serializes concurrent reviews
+        .first()
+    )
+    if link is None:
+        return None
+    current = link.evidence_status
+    if current not in ("proposed", "inferred"):
+        raise LinkReviewConflict(
+            f"relationship is {current!r} — only a proposed relationship "
+            f"can be reviewed")
+    a = db.query(OntologyObject).filter(
+        OntologyObject.id == link.from_object_id,
+        OntologyObject.org_id == org_id,
+        OntologyObject.is_deleted == False).first()  # noqa: E712
+    b = db.query(OntologyObject).filter(
+        OntologyObject.id == link.to_object_id,
+        OntologyObject.org_id == org_id,
+        OntologyObject.is_deleted == False).first()  # noqa: E712
+    if a is None or b is None:
+        raise ValueError(
+            "relationship endpoints must exist and belong to the "
+            "organization before review — refusal, never a guess")
+    _record_review(db, org_id, "ontology_link", link,
+                   "confirmed" if decision == "confirm" else "rejected",
+                   reviewer, reason,
+                   label=f"{a.name} —{link.link_type}→ {b.name}")
+    link.evidence_status = "verified" if decision == "confirm" else "rejected"
+    db.commit()
+    db.refresh(link)
+    return {
+        "kind": "link", "id": link.id,
+        "evidence_status": link.evidence_status,
+        "reason": reason,
+        "review_history": (link.provenance_json or {}).get(
+            "review_history", []),
+    }
+
+
+def review_queue_links_and_documents(db: Session, org_id: str, admin) -> dict:
+    """Phase 7B: the two remaining proposal categories for the unified
+    review queue — proposed ontology relationships and document-derived
+    proposals (D6 document-access gated: restricted-source proposals are
+    HIDDEN from admins without document access, honestly counted)."""
+    from app.models.ontology import (
+        DocumentProposal, OntologyLink, OntologyObject)
+    from app.services.ontology.doc_access import document_access_state
+
+    links = []
+    for l in (db.query(OntologyLink).filter(
+            OntologyLink.org_id == org_id,
+            OntologyLink.evidence_status.in_(("proposed", "inferred")),
+            OntologyLink.is_deleted == False)  # noqa: E712
+            .order_by(OntologyLink.created_date.desc()).all()):
+        prov = l.provenance_json or {}
+        a = db.query(OntologyObject).filter(
+            OntologyObject.id == l.from_object_id).first()
+        b = db.query(OntologyObject).filter(
+            OntologyObject.id == l.to_object_id).first()
+        links.append({
+            "kind": "link", "id": l.id,
+            "label": f"{(a.name if a else '?')} —{l.link_type}→ "
+                     f"{(b.name if b else '?')}",
+            "evidence_status": l.evidence_status,
+            "confidence": l.confidence,
+            "link_type": l.link_type,
+            "from_object_id": l.from_object_id,
+            "to_object_id": l.to_object_id,
+            "discovery_method": prov.get("discovery_method")
+            or prov.get("by"),
+            "evidence_ids": prov.get("evidence_ids") or [],
+            "review_history": prov.get("review_history") or [],
+        })
+
+    proposals, hidden = [], 0
+    for p in db.query(DocumentProposal).filter(
+            DocumentProposal.org_id == org_id,
+            DocumentProposal.status == "proposed").order_by(
+            DocumentProposal.created_date.desc()).all():
+        from app.models.knowledge_base import KnowledgeBase
+        kb = db.query(KnowledgeBase).filter(
+            KnowledgeBase.id == p.source_kb_id).first()
+        if not document_access_state(db, admin, kb)["allowed"]:
+            hidden += 1
+            continue
+        payload = p.payload_json or {}
+        proposals.append({
+            "kind": "document_proposal", "id": p.id,
+            "label": payload.get("name") or (p.quote or "")[:80],
+            "evidence_status": p.status,
+            "confidence": None,
+            "proposal_kind": p.proposal_kind,
+            "description": payload.get("description"),
+            "quote": p.quote,
+            "location_json": p.location_json,
+            "source_ref": f"doc:{(p.doc_version_id or '')[:8]}:"
+                          f"{p.chunk_key}",
+            "discovery_method": p.method,
+            "review_history": [],
+        })
+    return {"links": links, "document_proposals": proposals,
+            "hidden_document_proposals": hidden}
+
+
+
+
+
 _ALLOWED_WINDOWS = (7, 30, 90)
 
 

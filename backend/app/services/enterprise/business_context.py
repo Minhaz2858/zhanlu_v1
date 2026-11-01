@@ -231,22 +231,33 @@ def _ontology_candidates(db: Session, org_id: str, q_tokens: set[str],
     objects = [{
         "id": o.id, "name": o.name, "display_name": o.display_name,
         "backing_kind": o.backing_kind,
+        "evidence_status": getattr(o, "evidence_status", None),
         # backing_ref is intentionally NOT exposed (never leak table/entity
         # identity into prompts; runtime resolvers own that mapping)
     } for _, o in selected]
     ids = {o["id"] for o in objects}
-    by_id = {o.id: o for _, o in selected}
+    by_id = {o["id"]: o for o in objects}
     links = db.query(OntologyLink).filter(
         OntologyLink.org_id == org_id,
         OntologyLink.is_deleted == False,  # noqa: E712
     ).all()
-    rel = [
-        {"from": by_id[l.from_object_id]["name"],
-         "to": by_id[l.to_object_id]["name"],
-         "type": l.link_type, "evidence_status": l.evidence_status}
-        for l in links
-        if l.from_object_id in ids and l.to_object_id in ids
-    ]
+    rel = []
+    for l in links:
+        if l.from_object_id not in ids or l.to_object_id not in ids:
+            continue
+        status = l.evidence_status
+        if status == "rejected":
+            # Phase 7B: rejected relationships are NEVER included — a human
+            # declined this edge and rediscovery does not resurrect it.
+            continue
+        entry = {"from": by_id[l.from_object_id]["name"],
+                 "to": by_id[l.to_object_id]["name"],
+                 "type": l.link_type, "evidence_status": status}
+        if status != "verified":
+            # verified relationships are facts; everything else is an
+            # explicitly labeled hypothesis
+            entry["hypothesis"] = True
+        rel.append(entry)
     return objects, rel
 
 
@@ -560,6 +571,10 @@ def build_ontology_planning_context(
         if not a or not b:
             continue
         status = getattr(l, "evidence_status", None) or "proposed"
+        if status == "rejected":
+            # Phase 7B: rejected relationships are NEVER included — a human
+            # declined this edge and rediscovery does not resurrect it.
+            continue
         entry = {
             "from": a["name"], "to": b["name"], "type": l.link_type,
             "from_table": a.get("backing_table"),

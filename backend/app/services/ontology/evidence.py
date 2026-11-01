@@ -186,8 +186,14 @@ def stamp_link(link: OntologyLink, *, by: str | None,
                status: str = STATUS_INFERRED) -> None:
     """Links created/confirmed by humans or automation land here; legacy
     links backfilled as proposed. `verified` requires an explicit human
-    confirmation flow (PRD P3 identity-review queue will call this —
-    deliberately kept ahead of that phase; not yet wired)."""
+    confirmation flow (the Phase 7B relationship review).
+
+    Phase 7B hardening: terminal states survive rediscovery — a `verified`
+    relationship is never downgraded and a `rejected` one never silently
+    returns to proposed/inferred. Rediscovery of the same pair must create
+    a NEW proposal row instead of touching the reviewed one."""
+    if link.evidence_status in (STATUS_VERIFIED, "rejected"):
+        return
     if not is_valid_status(status) or status == STATUS_VERIFIED:
         status = STATUS_INFERRED
     link.evidence_status = status

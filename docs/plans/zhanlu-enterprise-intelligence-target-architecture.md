@@ -851,3 +851,65 @@ Tests: 10 new/updated frontend tests (admin card + drawer + close, count
 from real queue payload, non-admin never sees the entry nor calls the
 admin API, glossary 7 states, AI lifecycle card). Enterprise frontend 79
 tests / 11 files green; backend governance suites 50 green; build green.
+
+## Phase 7B — Complete enterprise knowledge governance (2026-11-02, DONE)
+
+Closes the two review lifecycles Phase 7A found missing, integrating them
+into the EXISTING unified queue and BCS contract. DocumentProposal
+approve/reject/revise already existed (atomic document_review service,
+DocumentDecisionEvents, D2 stamp, D6 gating) — exercised, not
+reimplemented. OntologyLink had NO review lifecycle — that is the
+genuine 7B work.
+
+Backend (no migration; review history rides provenance_json):
+- `review_ontology_link` (enterprise_discovery.py): org-scoped FOR UPDATE
+  fetch; ONLY proposed/inferred reviewable (terminal states → 409
+  LinkReviewConflict); BOTH endpoint objects validated (exist, same org,
+  not deleted → 400); reuses the shared `_record_review` convention
+  (provenance review_history + AuditEvent `ontology_link_{confirmed|
+  rejected}`); sets verified/rejected; commits; returns the decision
+  envelope.
+- `review_queue_links_and_documents`: proposed/inferred links (label
+  "A —type→ B", confidence, discovery method, evidence ids) + proposed
+  DocumentProposals gated by the D6 document-access gate — restricted-
+  source proposals are HIDDEN from admins without document access and
+  honestly counted in `hidden_document_proposals`. Queue endpoint merges
+  both under `links` / `document_proposals` with counts; the generic
+  enterprise confirm/reject endpoints gained a `kind='link'` branch
+  (409 on terminal-state conflicts, 400 on invalid endpoints).
+- `stamp_link` hardening: terminal states (verified/rejected) survive
+  rediscovery — never downgraded.
+- BCS lifecycle honesty: rejected links EXCLUDED from
+  `build_business_context` candidates (previously leaked as
+  hypothesis-labeled edges); proposed/inferred links explicitly carry
+  `hypothesis: true` while verified links are plain facts; ontology
+  candidate objects now expose their `evidence_status`. The latent
+  `by_id` model-row-vs-dict subscript bug in `_ontology_candidates` was
+  found and fixed by this suite.
+
+Frontend (ReviewCenter):
+- `link` and `document_proposal` join KIND_META/SECTIONS — same queue,
+  same audit trail. Links confirm/reject through the generic
+  `/enterprise/link/{id}/{decision}` endpoints; document proposals route
+  through their own atomic `/document-evidence/{id}/approve|reject`
+  lifecycle. Quote + page location rendered for document proposals
+  (progressive disclosure); D6-hidden proposals disclosed honestly
+  ("N document proposals hidden — your account lacks access to the
+  source document(s)").
+
+Security: org-scoped everywhere (link + both endpoints); org-admin
+gating on all review writes; every decision audited; document-access
+gate unchanged and now also guards the queue listing; rejected
+knowledge is structurally unreachable by BCS.
+
+Tests (TDD RED→GREEN): backend `tests/test_governance_7b.py` 13 green
+(link lifecycle incl. 409/404/400 paths, terminal-state rediscovery,
+admin gating, unified queue + D6 hidden counting, BCS
+fact/hypothesis/exclusion, document-approve→verified-object with ZERO
+BusinessRules created); frontend `ReviewCenter.7b.test.jsx` 7 green
+(section render, correct endpoint per kind, reason-bearing rejection,
+hidden-count disclosure, post-decision removal). Regression: 161
+backend enterprise/ontology/BCS tests green; enterprise frontend 61/9
+green; build green. Known-unrelated pre-existing failures in 7 foreign-
+WIP frontend files (Sidebar, Chat steer, previewToken, translations,
+ProjectDetail) — untouched and out of scope.
