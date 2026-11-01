@@ -92,7 +92,8 @@ export default function BusinessLogicPanel() {
             </div>
           )}
           <p className="mt-2 text-[10px] text-stone-400">
-            Lifecycle review happens in the administration area.
+            Rule lifecycle changes (enable / disable) are restricted to
+            authorized administrators.
           </p>
         </div>
 

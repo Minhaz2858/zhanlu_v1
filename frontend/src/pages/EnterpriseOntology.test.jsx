@@ -190,9 +190,13 @@ describe('EnterpriseOntology — one page, four sections (redesign)', () => {
     expect(screen.getByText(/Place a customer order/)).toBeInTheDocument();
     const actionsCard = screen.getByText('Business actions').closest('div');
     expect(within(actionsCard).getByText(/approval required/i)).toBeInTheDocument();
-    // read-only: no lifecycle buttons on this page (admin area owns those)
+    // read-only: no lifecycle buttons on this page; the old "administration
+    // area" pointer is gone with the enterprise-profile page — the note now
+    // points to governed admin operations instead
     expect(screen.queryByRole('button', { name: 'Enable' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+    expect(screen.queryByText(/administration area/i)).toBeNull();
+    expect(screen.getByText(/authorized administrators/i)).toBeInTheDocument();
   });
 
   it('AI intelligence reuses the workforce context explainer', async () => {

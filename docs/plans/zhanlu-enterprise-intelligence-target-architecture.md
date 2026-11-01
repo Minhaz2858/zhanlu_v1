@@ -802,3 +802,15 @@ Tests: `pages/EnterpriseOntology.test.jsx` (8 — four-section nav without
 the old clutter, real-data metrics, honest empty/unavailable states, graph
 + drawer, read-only logic, workforce reuse, URL section state). Enterprise
 frontend regression: 75 tests / 11 files green; production build green.
+
+### Follow-up (2026-11-01): Enterprise Profile page retired from the UI
+
+Per owner decision, `/admin/enterprise-profile` is no longer routed or
+linked — `/admin/enterprise-ontology` is the single enterprise UI entry.
+The `EnterpriseProfile.jsx` component, its test suite, and ALL backend
+capabilities (review lifecycle, decisions, situation room, 6C/6E/6F APIs)
+remain in the codebase and behind existing authorized endpoints — only the
+route and sidebar entry were removed. The Business Logic section's
+lifecycle pointer now states that rule enable/disable is restricted to
+authorized administrators (governed APIs remain authoritative). Sidebar
+staged surgically (foreign WIP preserved). Tests: 75/11 green; build green.
