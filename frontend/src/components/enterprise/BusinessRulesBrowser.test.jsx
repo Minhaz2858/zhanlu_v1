@@ -66,7 +66,8 @@ describe('BusinessRulesBrowser (Phase 6F — knowledge investigation)', () => {
     await waitFor(() => expect(screen.getByText(/selling below cost/)).toBeInTheDocument());
     const glossary = screen.getByText(/What do the states mean\?/).closest('details');
     expect(glossary).not.toBeNull();
-    for (const term of ['Documented', 'Discovered', 'Verified', 'Enabled', 'Observed']) {
+    for (const term of ['Documented', 'Discovered', 'Proposed', 'Verified',
+                        'Enabled', 'Observed', 'Rejected']) {
       expect(within(glossary).getByText(term)).toBeInTheDocument();
     }
   });

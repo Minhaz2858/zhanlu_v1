@@ -15,6 +15,9 @@ vi.mock('reactflow', () => ({
 import EnterpriseOntology from './EnterpriseOntology';
 import OntologyGraphPanel from '@/components/ontology/OntologyGraphPanel';
 
+const authState = { isAdmin: false };
+vi.mock('@/lib/AuthContext', () => ({ useAuth: () => authState }));
+
 describe('OntologyGraphPanel — intermediate-render safety (regression)', () => {
   it('does not crash while links are still loading (objects set, links null)', () => {
     // Regression: the page sets objects and links across an await boundary,
@@ -107,7 +110,19 @@ const actions = [
     risk_tier: 'low', requires_approval: false, object_id: null },
 ];
 
+const reviewQueue = {
+  org_units: [], capabilities: [],
+  processes: [{ kind: 'process', id: 'p9', label: 'Invoice reconciliation',
+                evidence_status: 'proposed', confidence: 0.82,
+                discovery_method: 'document_mining', evidence_ids: ['ev-7'],
+                review_history: [] }],
+  activities: [], evidence: [],
+  counts: { org_units: 0, capabilities: 0, processes: 1, activities: 0,
+            evidence: 0 },
+};
+
 beforeEach(() => {
+  authState.isAdmin = false; // never leak admin between tests
   mockFetchGlobal = vi.fn(async (url) => {
     const u = String(url);
     if (u.includes('/ontology/overview')) {
@@ -124,6 +139,9 @@ beforeEach(() => {
       return { ok: true, json: async () => rulesList };
     }
     if (u.includes('/ontology/actions')) return { ok: true, json: async () => actions };
+    if (u.includes('/enterprise/review-queue')) {
+      return { ok: true, json: async () => reviewQueue };
+    }
     if (u.includes('/ontology/bindings')) {
       return { ok: true, json: async () => overview.bindings };
     }
@@ -253,5 +271,42 @@ describe('EnterpriseOntology — one page, four sections (redesign)', () => {
     });
     mount('/');
     await waitFor(() => expect(screen.getAllByText(/unavailable/i).length).toBeGreaterThan(0));
+  });
+
+  // --- Phase 7A: governance & review experience --------------------------
+
+  it('admins see the pending-review count and can open the review drawer', async () => {
+    authState.isAdmin = true;
+    mount('/');
+    await waitFor(() => expect(screen.getByText(/need human review/i)).toBeInTheDocument());
+    const card = screen.getByText(/need human review/i).closest('div');
+    expect(within(card).getByText('1')).toBeInTheDocument(); // pending count
+    fireEvent.click(within(card).getByRole('button', { name: /review now/i }));
+    // drawer reuses the EXISTING ReviewCenter over the existing queue API
+    await waitFor(() => expect(screen.getByText(/Invoice reconciliation/)).toBeInTheDocument());
+    expect(screen.getByText(/awaiting human verification/i)).toBeInTheDocument();
+    // provenance: confidence + evidence reference count (ids in tooltip)
+    expect(screen.getByText(/confidence 82%/)).toBeInTheDocument();
+    expect(screen.getByText(/1 evidence ref\(s\)/)).toBeInTheDocument();
+    // close returns to the overview without leaving the page
+    fireEvent.click(screen.getByRole('button', { name: /close/i }));
+    await waitFor(() => expect(screen.queryByText(/awaiting human verification/i)).toBeNull());
+  });
+
+  it('non-admins never see the review entry and never call the admin queue API', async () => {
+    mount('/');
+    await waitFor(() => expect(screen.getByText('Business objects')).toBeInTheDocument());
+    expect(screen.queryByText(/Needs human review/)).toBeNull();
+    expect(mockFetchGlobal.mock.calls.filter((c) =>
+      String(c[0]).includes('/enterprise/review-queue'))).toHaveLength(0);
+  });
+
+  it('AI Intelligence states the lifecycle transparency contract', async () => {
+    mount('/?view=ai');
+    await waitFor(() => expect(screen.getByText('general_assistant')).toBeInTheDocument());
+    expect(screen.getByText(/What can influence AI answers/i)).toBeInTheDocument();
+    expect(screen.getByText(/verified facts and enabled rules/i)).toBeInTheDocument();
+    expect(screen.getByText(/hypotheses/i)).toBeInTheDocument();
+    expect(screen.getByText(/never included/i)).toBeInTheDocument();
   });
 });

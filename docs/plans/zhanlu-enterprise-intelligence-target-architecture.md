@@ -814,3 +814,40 @@ route and sidebar entry were removed. The Business Logic section's
 lifecycle pointer now states that rule enable/disable is restricted to
 authorized administrators (governed APIs remain authoritative). Sidebar
 staged surgically (foreign WIP preserved). Tests: 75/11 green; build green.
+
+## Phase 7A — Enterprise knowledge governance & review experience (2026-11-01, DONE)
+
+Integration-only phase inside the one-page Enterprise Ontology. ZERO new
+backend endpoints — every review capability already existed and is reused
+verbatim; no duplicate review UI logic was written.
+
+Governance capability inventory (inspected before implementation):
+- SUPPORTED: discovery entities (org units, capabilities, processes,
+  activities, evidence rows) via the org-admin review-queue +
+  {kind}/{id}/confirm|reject endpoints and the EXISTING ReviewCenter
+  component; BusinessRules via the full lifecycle (confirm/reject/
+  enable/disable/resubmit; proposed→enabled NEVER allowed; audited with
+  reasons) and the BusinessRulesBrowser in Business Logic.
+- NOT SUPPORTED (honestly absent, no lifecycle claimed): DocumentProposal
+  (model exists, no review API) and OntologyLink review (proposed
+  relationships are visible with evidence status in Business Model but
+  have no confirm/reject endpoints).
+
+Delivered:
+- Overview (admins only): compact "N discovery proposal(s) need human
+  review" card → "Review now" opens a thin GovernanceDrawer that embeds
+  the EXISTING ReviewCenter (progressive disclosure: concise proposal
+  first, confidence + evidence-reference count on the card, evidence ids
+  in tooltip; confirm/reject with audited reasons). The admin-only queue
+  API is never called for ordinary members.
+- Business Logic: rules glossary extended with Proposed and Rejected so
+  all seven lifecycle states are explained and never conflated.
+- AI Intelligence: lifecycle-transparency card stating the BCS contract
+  verbatim — AI works from verified facts and enabled rules; proposed
+  knowledge appears only as capped, clearly labeled hypotheses; rejected
+  or disabled knowledge is never included in assistant context.
+
+Tests: 10 new/updated frontend tests (admin card + drawer + close, count
+from real queue payload, non-admin never sees the entry nor calls the
+admin API, glossary 7 states, AI lifecycle card). Enterprise frontend 79
+tests / 11 files green; backend governance suites 50 green; build green.

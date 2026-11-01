@@ -25,10 +25,12 @@ import { EVIDENCE_BADGE_STYLE } from '@/lib/evidenceStatuses';
 
 const STATES = [
   { term: 'Documented', def: 'recorded from authoritative company documents during onboarding' },
-  { term: 'Discovered', def: 'proposed by AI discovery — awaiting human review' },
+  { term: 'Discovered', def: 'found by AI discovery — becomes Proposed until reviewed' },
+  { term: 'Proposed', def: 'awaiting a human decision — a hypothesis, never guidance' },
   { term: 'Verified', def: 'confirmed by a human reviewer — still informational until enabled' },
   { term: 'Enabled', def: 'verified AND executable — gates governed actions per the marker protocol' },
   { term: 'Observed', def: 'seen in real executions — evidence only, never promotes verification' },
+  { term: 'Rejected', def: 'declined by a reviewer — excluded from AI context until resubmitted' },
 ];
 
 const STATUS_CLS = {

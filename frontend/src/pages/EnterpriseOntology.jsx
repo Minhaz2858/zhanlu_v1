@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { authFetch } from '@/api/authFetch';
+import { useAuth } from '@/lib/AuthContext';
 import OntologyOverview from '@/components/ontology/OntologyOverview';
 import OntologyGraphPanel from '@/components/ontology/OntologyGraphPanel';
 import BusinessLogicPanel from '@/components/ontology/BusinessLogicPanel';
 import WorkforcePanel from '@/components/enterprise/WorkforcePanel';
+import GovernanceDrawer from '@/components/ontology/GovernanceDrawer';
 
 /* Enterprise Ontology — ONE page, four sections.
 
@@ -26,6 +28,7 @@ const VIEW_KEYS = { Overview: 'overview', 'Business Model': 'model',
 const LAYER_TO_SECTION = { data: 'overview', ontology: 'model', ai: 'ai', decisions: 'ai' };
 
 export default function EnterpriseOntology() {
+  const { isAdmin } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const raw = searchParams.get('view');
   const view = Object.values(VIEW_KEYS).includes(raw) ? raw : 'overview';
@@ -36,6 +39,25 @@ export default function EnterpriseOntology() {
   const [links, setLinks] = useState(null);
   const [modelFailed, setModelFailed] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Phase 7A: governance — admins get a pending-review count on the
+  // overview and a drawer that reuses the existing ReviewCenter.
+  const [pendingReviews, setPendingReviews] = useState(null);
+  const [showGovernance, setShowGovernance] = useState(false);
+
+  useEffect(() => {
+    if (!isAdmin) return; // admin-only endpoint — never called for members
+    let alive = true;
+    (async () => {
+      try {
+        const res = await authFetch('/api/ontology/enterprise/review-queue');
+        if (!res.ok) { if (alive) setPendingReviews(null); return; }
+        const q = await res.json();
+        if (alive) setPendingReviews(Object.values(q.counts || {})
+          .reduce((a, b) => a + b, 0));
+      } catch { if (alive) setPendingReviews(null); }
+    })();
+    return () => { alive = false; };
+  }, [isAdmin, showGovernance]);
 
   useEffect(() => {
     let alive = true;
@@ -120,18 +142,56 @@ export default function EnterpriseOntology() {
         ) : (
           <main>
             {view === 'overview' && (
-              <OntologyOverview overview={overview} systems={systems}
-                onLayerClick={(layer) => setView(
-                  Object.keys(VIEW_KEYS).find(
-                    (k) => VIEW_KEYS[k] === LAYER_TO_SECTION[layer]))} />
+              <>
+                <OntologyOverview overview={overview} systems={systems}
+                  onLayerClick={(layer) => setView(
+                    Object.keys(VIEW_KEYS).find(
+                      (k) => VIEW_KEYS[k] === LAYER_TO_SECTION[layer]))} />
+                {/* Phase 7A: governance entry — admins only; the queue API
+                    is org-admin gated server-side, this only avoids noise */}
+                {isAdmin && pendingReviews != null && (
+                  <div className="mt-4 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center gap-3">
+                    <span className="text-[12px] text-stone-700">
+                      <b>{pendingReviews}</b> AI discovery proposal(s)&nbsp;
+                      <span className="text-stone-500">Need human review</span>
+                    </span>
+                    <button onClick={() => setShowGovernance(true)}
+                      className="ml-auto text-[11px] px-2.5 py-1.5 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-100">
+                      Review now
+                    </button>
+                  </div>
+                )}
+              </>
             )}
             {view === 'model' && (
               <OntologyGraphPanel overview={overview} objects={objects}
                 links={links} failed={modelFailed} />
             )}
             {view === 'logic' && <BusinessLogicPanel />}
-            {view === 'ai' && <WorkforcePanel />}
+            {view === 'ai' && (
+              <>
+                {/* Phase 7A: lifecycle transparency — the exact contract the
+                    existing BCS enforces (enabled=executable, verified=
+                    informational, proposed=hypotheses, rejected excluded) */}
+                <div className="mb-4 rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-600">
+                  <h3 className="text-[12px] font-medium text-stone-800">
+                    What can influence AI answers
+                  </h3>
+                  <p className="mt-1">
+                    AI assistants work from <b>verified facts and enabled rules</b>.
+                    Discovered-but-unreviewed knowledge appears only as clearly
+                    labeled <b>hypotheses</b> (non-binding, limited in count).
+                    Rejected or disabled knowledge is <b>never included</b> in
+                    assistant context.
+                  </p>
+                </div>
+                <WorkforcePanel />
+              </>
+            )}
           </main>
+        )}
+        {showGovernance && (
+          <GovernanceDrawer onClose={() => setShowGovernance(false)} />
         )}
       </div>
     </div>
