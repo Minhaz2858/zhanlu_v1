@@ -68,8 +68,14 @@ export default function EnterpriseOntology() {
         ]);
         if (!alive) return;
         if (!ob.ok || !lb.ok) { setModelFailed(true); return; }
-        setObjects(await ob.json());
-        setLinks(await lb.json());
+        // resolve BOTH bodies before setting state: two awaited setState
+        // calls would flush an intermediate render with objects set and
+        // links still null (the panel crashed on that before its guard)
+        const objs = await ob.json();
+        const lns = await lb.json();
+        if (!alive) return;
+        setObjects(objs);
+        setLinks(lns);
         setModelFailed(false);
       } catch {
         if (alive) setModelFailed(true);

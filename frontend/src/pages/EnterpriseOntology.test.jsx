@@ -13,6 +13,19 @@ vi.mock('reactflow', () => ({
 }));
 
 import EnterpriseOntology from './EnterpriseOntology';
+import OntologyGraphPanel from '@/components/ontology/OntologyGraphPanel';
+
+describe('OntologyGraphPanel — intermediate-render safety (regression)', () => {
+  it('does not crash while links are still loading (objects set, links null)', () => {
+    // Regression: the page sets objects and links across an await boundary,
+    // so the panel can render once with objects set and links still null —
+    // this used to throw "Cannot read properties of null (reading 'map')".
+    expect(() => render(
+      <OntologyGraphPanel overview={overview} objects={objects} links={null} />
+    )).not.toThrow();
+    expect(screen.getByText(/Loading business model/)).toBeInTheDocument();
+  });
+});
 
 function LocationProbe() {
   const loc = useLocation();

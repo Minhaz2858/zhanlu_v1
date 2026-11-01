@@ -59,7 +59,9 @@ export default function OntologyGraphPanel({ overview, objects, links, failed, o
   if (failed) {
     return <p className="text-[12px] text-stone-400">The business model is not available right now.</p>;
   }
-  if (!objects) {
+  // both datasets must be present before the graph renders — the page may
+  // briefly hold objects with links still null (intermediate render)
+  if (!objects || !links) {
     return <p className="flex items-center gap-1.5 text-[12px] text-stone-400">
       <Loader2 size={13} className="animate-spin" /> Loading business model…</p>;
   }
@@ -97,7 +99,7 @@ export default function OntologyGraphPanel({ overview, objects, links, failed, o
             return (
               <div key={g.domain?.id || 'orphan'}
                 className="absolute text-[10px] font-medium uppercase tracking-wide text-stone-400"
-                style={{ left: first.x, top: 0 }}>
+                style={{ left: first?.x || 0, top: 0 }}>
                 {/* captions sit above the column, nodes shift below */}
               </div>
             );
