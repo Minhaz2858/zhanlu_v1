@@ -751,3 +751,54 @@ lists org bindings, not per-user My Space agents (AgentApp is user-scoped
 by design); assistant-context explainer is org-member readable (no secret
 material by BCS contract); rules browser pagination is fixed at 50 items
 with status filter (no search box yet).
+
+## Enterprise Ontology UI redesign (2026-11-01) — one page, four sections
+
+Frontend-only information-architecture redesign (no backend changes, no
+migrations, no new stores). Conceptual reference: the light single-page
+style of the previous ecisco_global_ontology.html (structure only — no
+Ecisco sample data, hardcoded counts, or customer-specific definitions).
+Core principle shown on the overview: **Enterprise Data → Enterprise
+Ontology → AI Intelligence → Business Decisions.**
+
+New page `/admin/enterprise-ontology` (`pages/EnterpriseOntology.jsx`) with
+URL section state (`?view=overview|model|logic|ai`), four sections:
+
+- **Overview (default)** — `components/ontology/ArchitectureFlow.jsx`
+  (clickable four-layer principle) + `OntologyOverview.jsx`: five compact
+  metrics — Connected Data Sources (`/enterprise/map` systems, names shown
+  as visible text), Business Objects and Object Relationships
+  (`/ontology/overview` totals), Governed Business Rules (enabled-rule
+  total from the rules API), Connected AI Agents (bindings length) — plus
+  a domain summary line. Unavailable metrics show "— · unavailable";
+  empty ontology shows an honest "Nothing connected yet" state; values are
+  never fabricated.
+- **Business Model** — `OntologyGraphPanel.jsx`: dependency-free SVG graph,
+  objects grouped by domain in deterministic columns (emerald border/dot =
+  verified evidence, dashed grey edges = proposed), relationships listed
+  with source → target semantics and evidence status. Object click opens
+  the REUSED `BusinessObjectPanel` drawer (description, attributes, related
+  objects, backing resource, governance status + related rules) — no
+  separate navigation pages.
+- **Business Logic** — `BusinessLogicPanel.jsx` (read-only): rules
+  (statement, status, marker-protocol effect only for ENABLED rules, scoped
+  object names) and actions (name, purpose, approval requirement) from the
+  existing APIs; explicit pointer to the administration area for lifecycle
+  management. No Enable/Confirm buttons on this page.
+- **AI Intelligence** — reuses the Phase 6F `WorkforcePanel` verbatim
+  (bindings + BCS context explainer). No second context system.
+
+Navigation: sidebar gains an "Enterprise Ontology" entry visible to ALL org
+members (read-only, org-scoped); the admin-gated "Enterprise Profile"
+remains as the administration area — no feature, API, permission, or
+backend capability removed. Old deep-links to `/admin/enterprise-profile`
+keep working.
+
+Design: white background, neutral stone borders, 13–17px type scale,
+emerald strictly for verified/enabled states, generous whitespace, no badge
+clutter, no oversized chrome.
+
+Tests: `pages/EnterpriseOntology.test.jsx` (8 — four-section nav without
+the old clutter, real-data metrics, honest empty/unavailable states, graph
++ drawer, read-only logic, workforce reuse, URL section state). Enterprise
+frontend regression: 75 tests / 11 files green; production build green.
