@@ -3160,38 +3160,57 @@ def _shadow_validate_and_log(
 
         session = SessionLocal()
         try:
-            session.add(
-                Nl2sqlQueryLog(
-                    id=str(_uuid.uuid4()),
-                    datasource_id=kb_id,
-                    question=question,
-                    generated_sql=sql or None,
-                    sql_hash=res.get("sql_hash") or None,
-                    lineage_json=_lineage,
-                    org_id=_org,
-                    row_count=row_count,
-                    duration_ms=duration_ms,
-                    validation_errors=(
-                        {"errors": res.get("errors")} if res.get("errors") else None
-                    ),
-                    policy_decision=(
-                        "allowed" if res.get("policy_allowed", True) else "denied"
-                    ),
-                    # 2026-10-11: was unconditional "shadow" — this is the
-                    # ONLY writer of nl2sql_query_logs on the live path, and
-                    # both behavioral-enrichment consumers (workload_miner,
-                    # query_log_retrieval) filter outcome=='success', so they
-                    # found NOTHING forever despite hundreds of executions.
-                    # Record the real execution outcome; the shadow
-                    # classification stays in `explanation` (auditable).
-                    outcome=("success" if live_success else "failed"),
-                    explanation=(
-                        f"shadow_class={cls}; live_success={live_success}; "
-                        f"live_error={live_error[:200]}"
-                    ),
-                )
+            _log_row = Nl2sqlQueryLog(
+                id=str(_uuid.uuid4()),
+                datasource_id=kb_id,
+                question=question,
+                generated_sql=sql or None,
+                sql_hash=res.get("sql_hash") or None,
+                lineage_json=_lineage,
+                org_id=_org,
+                row_count=row_count,
+                duration_ms=duration_ms,
+                validation_errors=(
+                    {"errors": res.get("errors")} if res.get("errors") else None
+                ),
+                policy_decision=(
+                    "allowed" if res.get("policy_allowed", True) else "denied"
+                ),
+                # 2026-10-11: was unconditional "shadow" — this is the
+                # ONLY writer of nl2sql_query_logs on the live path, and
+                # both behavioral-enrichment consumers (workload_miner,
+                # query_log_retrieval) filter outcome=='success', so they
+                # found NOTHING forever despite hundreds of executions.
+                # Record the real execution outcome; the shadow
+                # classification stays in `explanation` (auditable).
+                outcome=("success" if live_success else "failed"),
+                explanation=(
+                    f"shadow_class={cls}; live_success={live_success}; "
+                    f"live_error={live_error[:200]}"
+                ),
             )
+            session.add(_log_row)
             session.commit()
+            # Phase 4 §5: observed-execution integration — AFTER commit, so
+            # the observation carries the real persisted log ID (not a
+            # placeholder). record_observation is honest by contract (no
+            # match → no stamping; never touches process statuses) and
+            # fail-open: observation can never break the log write.
+            if getattr(settings, "ONTOLOGY_OBSERVATIONS_ENABLED", False) \
+                    and _org and _log_row.id:
+                try:
+                    from app.services.enterprise.observations import (
+                        record_observation,
+                    )
+
+                    _obs_session = SessionLocal()
+                    try:
+                        record_observation(_obs_session, _org,
+                                           "nl2sql_query", _log_row.id)
+                    finally:
+                        _obs_session.close()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("observation recording skipped: %s", e)
         finally:
             session.close()
     except Exception as e:

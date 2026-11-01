@@ -1736,6 +1736,11 @@ class Settings(BaseSettings):
     #   enabled SQL rules) into table candidate ranking. Default OFF —
     #   retrieval is byte-identical when disabled. Rollback: set False.
     NL2SQL_ONTOLOGY_ENABLED: bool = False
+    # ONTOLOGY_OBSERVATIONS_ENABLED (Phase 4, 2026-11-01): stamp observed-
+    #   execution linkage (process_id/match_confidence/match_method) onto
+    #   nl2sql_query_logs rows via the deterministic matcher. Default OFF —
+    #   the log row is byte-identical when disabled. Rollback: set False.
+    ONTOLOGY_OBSERVATIONS_ENABLED: bool = False
     # CREDENTIAL_ENCRYPTION_KEY (IBM framework-audit #3): Fernet key (or any
     # passphrase — SHA-256-derived) encrypting stored credentials at rest
     # (MCP OAuth tokens, external-agent bearer tokens). Empty = derived from
