@@ -830,6 +830,40 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_logger.warning("Catalog watchdog startup error (non-fatal): %s", e)
 
+    # Phase 5C: enterprise ontology drift watchdog — re-onboards drifted
+    # resources via the Phase 4 pipeline. Self-disables when
+    # ONTOLOGY_DRIFT_WATCHDOG_ENABLED is False (no task, no scans).
+    drift_watchdog_stop = asyncio.Event()
+    drift_watchdog_task = None
+    try:
+        from app.services.enterprise.drift_watchdog import (
+            run_drift_watchdog,
+        )
+        drift_watchdog_task = asyncio.create_task(
+            run_drift_watchdog(drift_watchdog_stop),
+            name="ontology-drift-watchdog",
+        )
+    except Exception as e:
+        startup_logger.warning("Drift watchdog startup error (non-fatal): %s", e)
+
+    # B8 (2026-10-22): periodic catalog coverage refresh — re-probes table
+    # min/max dates so stale data-window annotations (which reroute_uncovered
+    # acts on) don't misroute recent-period questions. Flag-gated and non-fatal.
+    coverage_refresh_stop = asyncio.Event()
+    coverage_refresh_task = None
+    try:
+        from app.services.knowledge_graph.catalog_coverage_refresh import (
+            run_catalog_coverage_refresh,
+        )
+        coverage_refresh_task = asyncio.create_task(
+            run_catalog_coverage_refresh(coverage_refresh_stop),
+            name="catalog-coverage-refresh",
+        )
+    except Exception as e:
+        startup_logger.warning(
+            "Catalog coverage-refresh startup error (non-fatal): %s", e
+        )
+
     # OCI stage: offline workload mining — periodically mine the successful
     # NL2SQL query logs (frequent joins, common filters, popular tables) into
     # query_workload_stats, which SemanticStore reads as workload evidence.
@@ -936,6 +970,26 @@ async def lifespan(app: FastAPI):
             pass
         except Exception as e:
             startup_logger.warning("Catalog watchdog shutdown error: %s", e)
+
+    # Phase 5C: stop the enterprise ontology drift watchdog cleanly
+    drift_watchdog_stop.set()
+    if drift_watchdog_task is not None:
+        try:
+            await asyncio.wait_for(drift_watchdog_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        except Exception as e:
+            startup_logger.warning("Drift watchdog shutdown error: %s", e)
+
+    # B8 (2026-10-22): stop the catalog coverage-refresh loop
+    coverage_refresh_stop.set()
+    if coverage_refresh_task is not None:
+        try:
+            await asyncio.wait_for(coverage_refresh_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        except Exception as e:
+            startup_logger.warning("Catalog coverage-refresh shutdown error: %s", e)
 
     # P3-2: stop the ontology sensing loop
     sensing_stop.set()

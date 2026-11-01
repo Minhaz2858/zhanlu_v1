@@ -1741,6 +1741,15 @@ class Settings(BaseSettings):
     #   nl2sql_query_logs rows via the deterministic matcher. Default OFF —
     #   the log row is byte-identical when disabled. Rollback: set False.
     ONTOLOGY_OBSERVATIONS_ENABLED: bool = False
+    # ONTOLOGY_DRIFT_WATCHDOG_* (Phase 5C, 2026-11-01): lifespan watchdog
+    #   that scans onboarded enterprise resources on a fixed interval and
+    #   re-onboards drifted ones via the Phase 4 pipeline (digest-driven;
+    #   per-resource failure isolation + backoff). Default OFF — no scans,
+    #   no background task. Rollback: set False (or leave default).
+    ONTOLOGY_DRIFT_WATCHDOG_ENABLED: bool = False
+    ONTOLOGY_DRIFT_WATCHDOG_INTERVAL_SECONDS: int = 3600
+    ONTOLOGY_DRIFT_WATCHDOG_MAX_RESOURCES_PER_CYCLE: int = 20
+    ONTOLOGY_DRIFT_WATCHDOG_RETRY_BACKOFF_SECONDS: int = 900
     # CREDENTIAL_ENCRYPTION_KEY (IBM framework-audit #3): Fernet key (or any
     # passphrase — SHA-256-derived) encrypting stored credentials at rest
     # (MCP OAuth tokens, external-agent bearer tokens). Empty = derived from
