@@ -6,7 +6,7 @@ Tool-call arrays and iteration counts are snapshotted for observability.
 """
 
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Integer, Text, DateTime
+from sqlalchemy import Column, String, Integer, Text, DateTime, Float
 from app.models.base import TimestampedBase
 
 
@@ -37,3 +37,11 @@ class AgentRun(TimestampedBase):
     error = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
+
+    # --- Phase 3E observed-execution linkage (additive, NULL = never
+    # matched; historical rows untouched). Observed NEVER promotes
+    # process evidence_status / discovery_status.
+    process_id = Column(String(36), nullable=True, index=True)
+    activity_seq = Column(Integer, nullable=True)
+    match_confidence = Column(Float, nullable=True)
+    match_method = Column(String(40), nullable=True)

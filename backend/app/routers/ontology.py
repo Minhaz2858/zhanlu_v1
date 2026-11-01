@@ -1365,6 +1365,31 @@ def enterprise_process_detail(
     return detail
 
 
+@router.get("/ontology/enterprise/processes/{process_id}/observations")
+def enterprise_process_observations(
+    process_id: str,
+    record_type: str | None = Query(default=None),
+    record_id: str | None = Query(default=None),
+    org_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Phase 3E — observed-execution summary for one process (org-scoped,
+    fail closed). Observed ≠ verified ≠ documented: the summary counts
+    executions whose evidence matched; it never changes process status.
+    Pass record_type+record_id to inspect one execution's match decision
+    (unmatched executions are otherwise not enumerated — bounded query)."""
+    from app.services.enterprise.observations import process_observations
+
+    obs = process_observations(
+        db, _org_or_404(user, org_id), process_id,
+        inspect_record=(record_type, record_id)
+        if record_type and record_id else None)
+    if obs is None:
+        raise HTTPException(status_code=404, detail="Process not found")
+    return obs
+
+
 @router.post("/ontology/enterprise/processes/{process_id}/confirm")
 def enterprise_process_confirm(
     process_id: str,

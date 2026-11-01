@@ -865,6 +865,28 @@ def get_process(db: Session, org_id: str, process_id: str) -> dict | None:
                                       "source_ref": e["source_ref"]})
 
     prov = row.provenance_json or {}
+    # Phase 3E: observed-execution summary rides ADDITIVELY beside the
+    # documented/configured statuses — observed evidence is shown
+    # SEPARATELY and never changes discovery_status/evidence_status.
+    try:
+        from app.services.enterprise.observations import process_observations
+
+        _obs = process_observations(db, org_id, process_id, limit=20) or {}
+        observed = {
+            "execution_count": _obs.get("execution_count", 0),
+            "activity_counts": _obs.get("activity_counts", {}),
+            "confidence_distribution": _obs.get(
+                "confidence_distribution",
+                {"high": 0, "medium": 0, "low": 0}),
+            "time_range": _obs.get("time_range"),
+            "note": _obs.get("note"),
+        }
+    except Exception as e:  # fail-open: detail never breaks on observation
+        logger.warning("process detail: observation summary unavailable: %s", e)
+        observed = {"execution_count": 0, "activity_counts": {},
+                    "confidence_distribution": {"high": 0, "medium": 0,
+                                                "low": 0},
+                    "time_range": None, "note": None}
     return {
         "id": row.id, "name": row.name, "purpose": row.purpose,
         "trigger_event": row.trigger_event, "objective": row.objective,
@@ -880,6 +902,7 @@ def get_process(db: Session, org_id: str, process_id: str) -> dict | None:
         "evidence": evidence,
         "related_processes": related,
         "ontology_connections": ontology_refs,
+        "observed_executions": observed,
         "updated_date": row.updated_date.isoformat() if row.updated_date else None,
     }
 

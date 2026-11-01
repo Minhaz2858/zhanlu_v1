@@ -33,3 +33,10 @@ class Nl2sqlQueryLog(TimestampedBase):
     outcome: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # success / denied / error
     user_feedback: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # thumbs_up / thumbs_down
     explanation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Phase 3E — observed-execution linkage (additive, NULL = never matched;
+    # historical rows untouched). match_method: explicit | ontology_object |
+    # tool_binding | lineage. Observed NEVER promotes process status.
+    process_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    activity_seq: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    match_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    match_method: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
