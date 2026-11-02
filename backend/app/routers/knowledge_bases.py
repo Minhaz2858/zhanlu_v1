@@ -825,6 +825,14 @@ async def create_kb_guideline(app_id: str, kb_id: str, body: dict, db: Session =
     kind = str((body or {}).get("kind") or "other").strip()
     if not title or not content:
         raise HTTPException(status_code=400, detail="title and content are required")
+    # Phase 7C (A1): the `[business-rule:...]` title namespace belongs to the
+    # BusinessRule bridge — a manual row there would be swept by the next
+    # sync and a renamed derived row would become an unretractable line.
+    if title.startswith("[business-rule:"):
+        raise HTTPException(
+            status_code=400,
+            detail="titles beginning with '[business-rule:' are reserved for "
+                   "synced business rules — choose a different title")
     if kind not in GUIDELINE_KINDS:
         kind = "other"
     row = SemanticGuideline(
@@ -866,7 +874,16 @@ async def update_kb_guideline(
     if row is None:
         raise HTTPException(status_code=404, detail="Guideline not found")
     if "title" in (body or {}):
-        row.title = str(body["title"]).strip() or row.title
+        new_title = str(body["title"]).strip()
+        # Phase 7C (A1): renaming into (or out of) the bridge's marker
+        # namespace is refused — a renamed derived row would become a
+        # stale manual line no sync can retract.
+        if new_title.startswith("[business-rule:"):
+            raise HTTPException(
+                status_code=400,
+                detail="titles beginning with '[business-rule:' are reserved "
+                       "for synced business rules")
+        row.title = new_title or row.title
     if "content" in (body or {}):
         row.content = str(body["content"]).strip() or row.content
     if "kind" in (body or {}) and body["kind"] in GUIDELINE_KINDS:
