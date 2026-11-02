@@ -635,10 +635,21 @@ def _write_audit(
         if len(binding_id) > 36:
             binding_id = binding_id[:36]
         outcome = "success" if decision == "allowed" else ("denied" if decision == "denied" else "failure")
+        # Phase 7C (C1): stamp the real tenant org from the binding row —
+        # before 7C every nl2sql audit row fell to the "default-org" server
+        # default regardless of the requesting tenant. Fail-open: an
+        # unresolvable binding still writes (org stays at the default).
+        _audit_org = None
+        if binding_id:
+            from app.models.agent_data_binding import AgentDataBinding
+            _binding = db.query(AgentDataBinding).filter(
+                AgentDataBinding.id == binding_id).first()
+            _audit_org = getattr(_binding, "org_id", None)
         event = AuditEvent(
             id=str(uuid4()),
             event_type="nl2sql_query",
             event_source="nl2sql",
+            **({"org_id": _audit_org} if _audit_org else {}),
             trace_id=binding_id,
             actor_type="system",
             actor_id=None,

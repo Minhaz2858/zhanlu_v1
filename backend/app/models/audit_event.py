@@ -13,6 +13,19 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
 
+# ── Phase 7C (C2): registry ↔ reality reconciliation ────────────────────────
+# The registry documents the event vocabulary; it is NOT a write-time
+# validator (historical/legacy events must stay readable, and the dynamic
+# review family below is intentionally open). The contract test
+# (tests/test_audit_event_registry.py) asserts every statically-known
+# writer type is registered here.
+#
+# Dynamic families (documented, not enumerable):
+#   * review decisions:  f"{resource_type}_{decision}" — the shared
+#     `_record_review` convention (e.g. ontology_object_confirmed,
+#     ontology_link_rejected, agent_app_created...)
+#   * business rule lifecycle: f"business_rule_{decision}" where decision
+#     ∈ {confirmed, rejected, enabled, disabled, resubmitted}
 AUDIT_EVENT_TYPES = [
     "nl2sql_query", "datasource_connect", "metric_access",
     "policy_violation", "skill_create", "skill_publish",
@@ -21,9 +34,33 @@ AUDIT_EVENT_TYPES = [
     # Ontology (written by services/ontology/{fanout,escalation}.py and
     # permissions.py since P0-2; registered 2026-10-30 — gap audit G3-bug)
     "ontology_fanout", "escalation_created", "escalation_resolved",
+    # Enterprise resources + lifecycle (Phase 0B/4/7C)
+    "resource_deleted", "resource_onboarded", "outcome_verified",
+    # Identity resolution (P3)
+    "identity_review",
+    # Document evidence review (Phase 3B)
+    "ontology_document_review",
+    # Business rules (Phase 1B/7C)
+    "business_rule_check", "business_rule_guidelines_synced",
+    "business_rule_confirmed", "business_rule_rejected",
+    "business_rule_enabled", "business_rule_disabled",
+    "business_rule_resubmitted",
+    # ERP submission outcomes (erp_tools)
+    "erp_submission_succeeded", "erp_submission_failed",
 ]
-AUDIT_EVENT_SOURCES = ["nl2sql", "studio", "agent", "governance", "system", "user", "ontology"]
-AUDIT_OUTCOMES = ["success", "failure", "denied", "warning"]
+AUDIT_EVENT_SOURCES = [
+    "nl2sql", "studio", "agent", "governance", "system", "user",
+    "ontology",
+    # written by enterprise/{cleanup,onboarding,business_rules}.py and
+    # identity review since Phase 0B — reconciled 2026-11-02 (7C)
+    "enterprise",
+]
+# "completed" (onboarding runs), "error" (outcome_verified failures) and
+# "positive" (escalation CSAT) are written in production — registered.
+AUDIT_OUTCOMES = [
+    "success", "failure", "denied", "warning",
+    "completed", "error", "positive",
+]
 
 
 class AuditEvent(TimestampedBase):
