@@ -3134,31 +3134,33 @@ def _shadow_validate_and_log(
     if ontology_provenance:
         _lineage = dict(_lineage) if isinstance(_lineage, dict) else {}
         _lineage["ontology"] = ontology_provenance
-        # Phase 3C: canonical provenance envelope (prov-v1) rides beside
-        # the raw section — unifying ontology planning evidence and the
-        # executed statement's SQL lineage in ONE auditable contract.
-        # Phase 5A: entries are org-stamped and carry the execution_ref of
-        # the log row they persist on. Fail-open: a converter bug can
-        # never break the telemetry row.
-        try:
-            from app.services.enterprise.provenance import (
-                execution_ref as _execution_ref,
-                from_ontology_provenance,
-                from_sql_lineage,
-                serialize_provenance,
-            )
+    # Phase 3C/7C: canonical provenance envelope (prov-v1) rides beside the
+    # raw section. Phase 7C (E1): the envelope builds whenever ANY evidence
+    # exists — SQL lineage alone (no planning provenance) now reaches the
+    # contract too, instead of being silently dropped by the old gate.
+    # Phase 5A: entries are org-stamped and carry the execution_ref of the
+    # log row they persist on. Fail-open: a converter bug can never break
+    # the telemetry row.
+    try:
+        from app.services.enterprise.provenance import (
+            execution_ref as _execution_ref,
+            from_ontology_provenance,
+            from_sql_lineage,
+            serialize_provenance,
+        )
 
-            _xref = _execution_ref("nl2sql_query", _log_id)
-            _entries = (from_ontology_provenance(
-                            ontology_provenance, org_id=_org,
-                            resource_id=kb_id, execution_ref=_xref)
-                        + from_sql_lineage(_lineage, org_id=_org,
-                                           resource_id=kb_id,
-                                           execution_ref=_xref))
-            if _entries:  # no evidence → no section, never an empty envelope
-                _lineage["provenance"] = serialize_provenance(_entries)
-        except Exception as e:
-            logger.debug("canonical provenance serialization failed: %s", e)
+        _xref = _execution_ref("nl2sql_query", _log_id)
+        _entries = (from_ontology_provenance(
+                        ontology_provenance, org_id=_org,
+                        resource_id=kb_id, execution_ref=_xref)
+                    + from_sql_lineage(_lineage, org_id=_org,
+                                       resource_id=kb_id,
+                                       execution_ref=_xref))
+        if _entries:  # no evidence → no section, never an empty envelope
+            _lineage = dict(_lineage) if isinstance(_lineage, dict) else {}
+            _lineage["provenance"] = serialize_provenance(_entries)
+    except Exception as e:
+        logger.debug("canonical provenance serialization failed: %s", e)
 
     try:
         # Multi-tenant stamping (audit fix): the log inherits the org of the

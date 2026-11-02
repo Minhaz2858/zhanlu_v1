@@ -373,9 +373,12 @@ def from_document_proposal(
         source_ref=_row_get(proposal, "chunk_key"),
         kind=_row_get(proposal, "proposal_kind"),
         retrieval_method=_row_get(proposal, "method"),
+        # Phase 7C (E2): omit-when-absent — a source row/dict carrying no
+        # lifecycle field must NOT be labeled "proposed" by invention
+        # (tri-state honesty; real DocumentProposal rows always carry
+        # status, so production entries are unchanged).
         evidence_status=(_row_get(proposal, "evidence_status")
-                         or _row_get(proposal, "status")
-                         or "proposed"),
+                         or _row_get(proposal, "status")),
         retrieved=True, influenced=False, execution_ref=execution_ref)
 
 
@@ -399,6 +402,9 @@ def from_process_evidence(
         process_id=_row_get(evidence, "process_id"),
         activity_seq=_row_get(evidence, "activity_seq"),
         kind=_row_get(evidence, "evidence_kind"),
-        evidence_status=_row_get(evidence, "evidence_status", "proposed"),
+        # Phase 7C (E2): omit-when-absent (real ProcessEvidence rows carry
+        # the model default "proposed" verbatim; foreign dicts without any
+        # status field are no longer fabricated as "proposed")
+        evidence_status=_row_get(evidence, "evidence_status"),
         confidence=confidence,
         retrieved=True, influenced=False, execution_ref=execution_ref)

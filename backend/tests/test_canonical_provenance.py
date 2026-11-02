@@ -284,14 +284,38 @@ def test_historical_rows_without_canonical_section_unchanged(log_db):
     original = appdb.SessionLocal
     appdb.SessionLocal = sessionmaker(bind=log_db.get_bind())
     try:
-        # a pre-3C writer call (no ontology provenance): no canonical
-        # section is fabricated, legacy row byte-identical
+        # Phase 7C (E1): SQL lineage alone now reaches the canonical
+        # contract; the raw "ontology" section is still gated on real
+        # planning provenance and every legacy lineage field is intact
+        # (historical readers keep working).
         _shadow_validate_and_log(
             "kb-1", "orders", "SELECT id FROM sales_order",
             live_success=True)
     finally:
         appdb.SessionLocal = original
     row = log_db.query(Nl2sqlQueryLog).one()
-    assert "provenance" not in (row.lineage_json or {})
     assert "ontology" not in (row.lineage_json or {})
     assert "sales_order" in row.lineage_json["tables"]
+    prov = (row.lineage_json or {}).get("provenance")
+    assert prov and prov["version"] == "prov-v1"
+    assert all(e["source_type"] == "sql_lineage"
+               for e in prov["entries"])
+
+
+# ── Phase 7C (E2): no invented evidence_status ───────────────────────────────
+
+def test_foreign_dict_without_status_is_not_labeled_proposed():
+    from app.services.enterprise.provenance import (
+        from_document_proposal, from_process_evidence)
+    doc_entry = from_document_proposal(
+        {"id": "d1", "kb_id": "kb-1", "chunk_key": "c1"}, org_id="org-x")
+    assert "evidence_status" not in doc_entry  # omitted, never invented
+    pe_entry = from_process_evidence(
+        {"id": "p1", "process_id": "proc-1", "source_ref": "r"},
+        org_id="org-x")
+    assert "evidence_status" not in pe_entry
+    # real rows keep passing their status through verbatim
+    real = from_process_evidence(
+        {"id": "p2", "process_id": "proc-1", "source_ref": "r",
+         "evidence_status": "verified"}, org_id="org-x")
+    assert real["evidence_status"] == "verified"
