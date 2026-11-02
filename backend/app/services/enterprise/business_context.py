@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.services.compaction.token_estimator import estimate_text_tokens
@@ -178,6 +179,10 @@ def _process_candidates(db: Session, org_id: str, q_tokens: set[str],
     rows = db.query(BusinessProcess).filter(
         BusinessProcess.org_id == org_id,
         BusinessProcess.is_deleted == False,  # noqa: E712
+        # Phase 7C (T19): a human REJECTED this process — it must never
+        # enter AI execution context (invariant 8), labeled or not.
+        or_(BusinessProcess.evidence_status.is_(None),
+            BusinessProcess.evidence_status != "rejected"),
     ).all()
     scored = []
     for p in rows:
@@ -278,7 +283,8 @@ def _terminology_candidates(db: Session, org_id: str,
 
 
 def _rule_candidates(db: Session, org_id: str, q_tokens: set[str],
-                     boost: set[str]) -> list[dict]:
+                     boost: set[str],
+                     agent_bound_kb_ids: set[str] | None = None) -> list[dict]:
     from app.models.business_rule import BusinessRule
 
     rows = db.query(BusinessRule).filter(
@@ -288,6 +294,16 @@ def _rule_candidates(db: Session, org_id: str, q_tokens: set[str],
     ).all()
     scored = []
     for r in rows:
+        # Phase 7C (F2): datasource-scoped rules narrow, never widen — when
+        # the calling agent's bound KBs are known, a rule scoped to other
+        # datasources does not enter this agent's context. Org-wide rules
+        # (NULL/empty datasource_ids) always pass; with NO agent scoping
+        # available, previous behavior is preserved (never widen by
+        # removing guidance either).
+        if agent_bound_kb_ids is not None:
+            rule_ds = {str(d) for d in (r.datasource_ids or [])}
+            if rule_ds and not (rule_ds & agent_bound_kb_ids):
+                continue
         s = _score(f"{r.statement} {r.scope}", q_tokens, boost)
         prio = {"enabled": _PRIO_RULE_ENABLED, "verified": _PRIO_RULE_INFORMATIONAL,
                 "proposed": _PRIO_RULE_PROPOSED}[r.status]
@@ -316,6 +332,11 @@ def _metric_candidates(db: Session, org_id: str, q_tokens: set[str]) -> list[dic
     rows = db.query(MetricDefinition).filter(
         MetricDefinition.org_id == org_id,
         MetricDefinition.is_deleted == False,  # noqa: E712
+        # Phase 7C (T19): parity with the NL2SQL planning path — only
+        # enabled, published metrics inform context (verified ≠ enabled;
+        # a draft metric's name/semantics are not yet governed).
+        MetricDefinition.is_enabled.is_(True),
+        MetricDefinition.lifecycle == "published",
     ).all()
     scored = sorted(
         rows,
@@ -356,12 +377,35 @@ def build_business_context(
         boost = _tokens(project.get("name") or "") | _tokens(
             (project.get("department") or {}).get("name") or "")
 
+    # Phase 7C (F2): resolve the calling agent's bound KBs so datasource-
+    # scoped rules narrow to this agent's actual reach. Narrow-only: any
+    # resolution failure falls back to the previous unscoped behavior.
+    agent_bound_kb_ids: set[str] | None = None
+    if agent_id:
+        try:
+            from app.models.agent_app import AgentApp
+
+            agent_row = (
+                db.query(AgentApp)
+                .filter(AgentApp.id == agent_id,
+                        AgentApp.org_id == org_id,
+                        AgentApp.is_deleted == False)  # noqa: E712
+                .first()
+            )
+            if agent_row and isinstance(agent_row.knowledge_bases, list):
+                agent_bound_kb_ids = {str(k) for k in agent_row.knowledge_bases}
+        except Exception as exc:  # honest, narrow-only fallback
+            logger.warning("bcs: agent binding resolution failed: %s", exc)
+            agent_bound_kb_ids = None
+
     processes, objects, links, terms, rules, metrics = [], [], [], [], [], []
     for name, fn in (
         ("processes", lambda: _process_candidates(db, org_id, q_tokens, boost)),
         ("ontology", lambda: _ontology_candidates(db, org_id, q_tokens, boost)),
         ("terminology", lambda: _terminology_candidates(db, org_id, q_tokens)),
-        ("business_rules", lambda: _rule_candidates(db, org_id, q_tokens, boost)),
+        ("business_rules", lambda: _rule_candidates(
+            db, org_id, q_tokens, boost,
+            agent_bound_kb_ids=agent_bound_kb_ids)),
         ("metrics", lambda: _metric_candidates(db, org_id, q_tokens)),
     ):
         try:

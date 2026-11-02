@@ -264,3 +264,77 @@ def test_partial_state_on_section_failure_and_missing_project(db):
     assert "section_unavailable:processes" in ctx2["warnings"]
     assert ctx2["processes"] == []
     assert "section_unavailable:processes" in render_prompt_block(ctx2)
+
+
+# ── Phase 7C (T18/T19): scoping + lifecycle honesty in chat context ─────────
+
+@pytest.fixture()
+def db7c(db):
+    from app.models.agent_app import AgentApp
+    eng = db.get_bind()
+    Base.metadata.create_all(eng, tables=[AgentApp.__table__])
+    db.add(AgentApp(id="app-a", name="DB analyst", org_id=ORG,
+                    knowledge_bases=["kb-a"]))
+    db.commit()
+    return db
+
+
+def test_scoped_rules_narrow_to_agent_bound_datasources(db7c):
+    db7c.add(BusinessRule(
+        id="br-db-a", org_id=ORG, statement="Orders ship in 3 days",
+        scope="org", applies_to="sql", status="enabled",
+        datasource_ids=["kb-a"]))
+    db7c.add(BusinessRule(
+        id="br-db-x", org_id=ORG, statement="Finance closes on the 5th",
+        scope="org", applies_to="sql", status="enabled",
+        datasource_ids=["kb-other"]))
+    db7c.add(BusinessRule(
+        id="br-org", org_id=ORG, statement="All amounts are USD",
+        scope="org", applies_to="sql", status="enabled",
+        datasource_ids=None))
+    db7c.commit()
+    ctx = build_business_context(db7c, _user(), ORG, agent_id="app-a")
+    ids = [r["id"] for r in ctx["business_rules"]]
+    assert "br-db-a" in ids and "br-org" in ids
+    assert "br-db-x" not in ids  # scoped away from this agent — narrow only
+
+
+def test_rule_scoping_never_widens_without_agent(db7c):
+    db7c.add(BusinessRule(
+        id="br-scoped", org_id=ORG, statement="Returns need approval",
+        scope="org", applies_to="sql", status="enabled",
+        datasource_ids=["kb-other"]))
+    db7c.commit()
+    ctx = build_business_context(db7c, _user(), ORG)  # no agent_id
+    assert "br-scoped" in [r["id"] for r in ctx["business_rules"]]
+
+
+def test_rejected_processes_excluded_from_context(db7c):
+    db7c.add(BusinessProcess(id="bp-live", org_id=ORG, name="Order intake",
+                             evidence_status="verified"))
+    db7c.add(BusinessProcess(id="bp-dead", org_id=ORG, name="Legacy intake",
+                             evidence_status="rejected"))
+    db7c.commit()
+    ctx = build_business_context(db7c, _user(), ORG, query="intake")
+    names = [p["name"] for p in ctx["processes"]]
+    assert "Order intake" in names and "Legacy intake" not in names
+
+
+def test_draft_and_disabled_metrics_excluded_from_context(db7c):
+    db7c.add(MetricDefinition(
+        id="m-live", org_id=ORG, name="On-time delivery",
+        datasource_id="kb-a", base_sql="SELECT 1", is_enabled=True,
+        lifecycle="published"))
+    db7c.add(MetricDefinition(
+        id="m-draft", org_id=ORG, name="Secret margin",
+        datasource_id="kb-a", base_sql="SELECT 2", is_enabled=True,
+        lifecycle="draft"))
+    db7c.add(MetricDefinition(
+        id="m-off", org_id=ORG, name="Disabled kpi",
+        datasource_id="kb-a", base_sql="SELECT 3", is_enabled=False,
+        lifecycle="published"))
+    db7c.commit()
+    ctx = build_business_context(db7c, _user(), ORG, query="margin delivery kpi")
+    ids = [m["id"] for m in ctx["metrics"]]
+    assert "m-live" in ids
+    assert "m-draft" not in ids and "m-off" not in ids

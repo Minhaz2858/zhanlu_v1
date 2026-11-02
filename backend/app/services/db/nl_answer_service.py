@@ -592,8 +592,13 @@ class NLAnswerService:
                             _kb_row = self._db.get(_KB, kb_id)
                             _kb_org = getattr(_kb_row, "org_id", None)
                             if _kb_org:
+                                # Phase 7C (F1): pass the datasource —
+                                # without it the datasource_ids narrowing
+                                # inside the builder was dead code and
+                                # scoped SQL rules leaked cross-datasource.
                                 _ontology_ctx = build_ontology_planning_context(
-                                    self._db, _kb_org, query=question)
+                                    self._db, _kb_org, query=question,
+                                    datasource_id=kb_id)
                     except Exception as _ont_err:
                         logger.warning(
                             "NLAnswer: ontology planning context unavailable "
