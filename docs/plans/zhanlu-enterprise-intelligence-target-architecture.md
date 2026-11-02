@@ -913,3 +913,71 @@ backend enterprise/ontology/BCS tests green; enterprise frontend 61/9
 green; build green. Known-unrelated pre-existing failures in 7 foreign-
 WIP frontend files (Sidebar, Chat steer, previewToken, translations,
 ProjectDetail) — untouched and out of scope.
+
+## Phase 7C — Enterprise architecture consolidation & technical-debt removal (2026-11-02, DONE)
+
+Audit doc: `2026-11-02-phase-7c-architecture-audit.md`; plan:
+`2026-11-02-phase-7c-implementation-plan.md`. Six workstreams audited
+read-only first (CONFIRMED vs SUSPECTED, evidence file:line), then 19
+tasks implemented TDD RED→GREEN→REFACTOR across 8 commits.
+
+Commits (branch `fix/automation-chat-artifacts-ordering`):
+`b5407ebb7` audit+plan → `7f27cd191` D0 → `d31fcd0a1` security T1-T3 →
+`e01b3825d` cleanup wiring T5-T10 → `b6eb164fb` provenance T11-T12 →
+`2c2f57687` audit governance T13-T14 → `78473cf62` marker guard T15 →
+`db19e237d` BCS T17-T19 → `3bc88d404` fixture parity.
+
+**Headline findings fixed:**
+- D0 (critical): production resource cleanup was DEAD —
+  `handle_resource_deleted` filtered the resource row on `is_deleted==False`
+  while every wired call site soft-deletes FIRST, so the org-verification
+  load returned None → LookupError → swallowed. Cleanup now loads the row
+  by id regardless of the delete flag (the load exists for org verification).
+- B1 (critical, cross-org): the v3 pinned `data_source_id` (client-writable
+  conversation metadata) could pin ANY org's KB into an agent's bound set —
+  org wall against the agent's org, fail-closed.
+- B2 (high): `/api/workspace-settings` honored a client-supplied org_id and
+  let any authenticated user flip any org's `auto_bind_all_datasources` —
+  org now comes from the verified user (mismatch → 403); writes are
+  org-admin gated.
+- F1 (high): Phase 3B datasource narrowing was dead code —
+  `build_ontology_planning_context` was called without `datasource_id`, so
+  datasource-scoped SQL rules leaked cross-datasource into planning.
+
+**By workstream:** A — `[business-rule:` title namespace reserved on
+guideline create/PATCH (400); ownership documented (BusinessRule
+authoritative, SemanticGuidelines = compatibility/retrieval layer).
+B — pinning org wall; workspace-settings authz; auto-bind docstring
+corrected (all KB kinds, deliberate per test contract) + deprecation note.
+C — nl2sql audit rows org-stamped from the binding row (were all
+`default-org`); AUDIT_* registry reconciled with ALL written vocabulary +
+codebase-grepping contract test; legacy entries kept readable.
+D — every real deletion path runs cleanup (dedicated automation DELETE,
+bulk delete_many via new id-returning `soft_delete_many_records`, AgentApp
+deletion now cleans its AgentDataBinding rows); watchdog checks
+`_resource_exists` before digest and TOMBSTONES deleted resources (run
+rows soft-deleted org-scoped) — no more failed run rows per cycle forever;
+`list_links` honors soft-delete; onboarding digest org-scoped.
+E — canonical prov-v1 envelope builds for lineage-only rows (the old
+`if ontology_provenance:` gate dropped SQL-lineage evidence); converters
+omit evidence_status when the source carries none (no invented "proposed");
+tri-state integrity re-verified (supports_answer set NOWHERE).
+F — rejected processes excluded from BCS payload; metric candidates gated
+`is_enabled`+`lifecycle='published'` (parity with planning); agent-bound
+rule narrowing (narrow-only) in chat context.
+
+**Deferred (documented, evidence-backed):** A2 sync-race unique index
+(fail-open bridge; per-row upsert is idempotent), A3 org-wide rules on
+new KBs (bridge docstring), B4 v2/v3 pinned-datasource inconsistency,
+C3 db_tools denial auditing (foreign-dirty hot file), F5 KG
+business-context consolidation (flag-gated), AgentRun-side provenance
+envelopes (write-path risk), auto-bind flag removal (needs user
+migration). NOT made: no Datasource deletion API invented; SemanticGuidelines
+not removed; v2 behavior unchanged.
+
+Tests: +35 new/updated backend tests (all RED-first where behavioral);
+final integration slice **314 passed / 0 failed** across 35 suites
+(cleanup, deletion paths, watchdog, provenance, audit, workspace,
+datasource pinning, BCS, planning, 7B, 6E/6F, p7, ontology, document
+review, phase-5 e2e). No migrations; no frontend changes; no new
+feature flags (existing flags untouched).
