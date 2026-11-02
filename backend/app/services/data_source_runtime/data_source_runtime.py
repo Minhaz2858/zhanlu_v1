@@ -15,15 +15,19 @@ Data Agent.
 The function `prepare_data_source_runtime()` is the single entry point
 the chat router calls before talking to the LLM.
 
-Org-level opt-in
-----------------
-The workspace setting ``auto_bind_all_datasources`` (default OFF) lets
-the user grant every agent in the workspace access to every connected
-database KB. When ON, the agent's bound list is unioned with every
-``KnowledgeBase`` row in the same (org, app) where ``source_kind ==
-'database'`` and ``is_deleted == False``. DATA-CORE-3 still holds
-because the user explicitly opts in at the workspace level — it's not
-a per-agent decision.
+Org-level opt-in (DEPRECATED — Phase 7C)
+----------------------------------------
+The workspace setting ``auto_bind_all_datasources`` (default OFF,
+org-admin gated since Phase 7C) unions the agent's bound list with EVERY
+non-deleted ``KnowledgeBase`` row in the same (org, app) — database AND
+file kinds (the code is authoritative here; an earlier docstring claimed
+database-only, but file KBs are a deliberate part of the runtime surface
+per tests/test_agent_datasource_wiring.py). DATA-CORE-3 still nominally
+holds because the user explicitly opts in at the workspace level — but
+the flag contradicts the Agent-Harness invariant that an agent selects
+among EXPLICITLY authorized sources, so it is slated for removal once
+workspace owners migrate to explicit agent bindings. Do not wire new
+features to it.
 
 The flag lookup uses ``workspace_settings_service.get_bool`` which is
 cached for 5 seconds so a tight agent loop doesn't hammer the DB.
@@ -1478,7 +1482,12 @@ def _prepare_data_source_runtime_impl(
             )
     if pinned_data_source_id and pinned_data_source_id not in bound_ids:
         pinned = db.get(KnowledgeBase, pinned_data_source_id)
-        if pinned is not None and not pinned.is_deleted:
+        # Phase 7C org wall (B1): the pinned id comes from CLIENT-WRITABLE
+        # conversation metadata — it may only widen scope WITHIN the
+        # agent's own org. No verifiable agent org → fail closed.
+        _agent_org = getattr(agent_app, "org_id", None) if agent_app else None
+        if pinned is not None and not pinned.is_deleted and \
+                getattr(pinned, "org_id", None) == _agent_org and _agent_org:
             bound_ids = list(bound_ids) + [pinned_data_source_id]
 
     # Guard: general_assistant must have zero data source access when no

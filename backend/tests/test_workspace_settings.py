@@ -41,9 +41,11 @@ from app.services.workspace_settings_service import (
 
 @pytest.fixture()
 def db_session():
+    from sqlalchemy.pool import StaticPool
     engine = create_engine(
-        "sqlite:///:memory:",
+        "sqlite://",
         connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
     Base.metadata.create_all(engine, tables=[WorkspaceSetting.__table__])
     Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -133,33 +135,44 @@ def test_set_value_upserts(db_session):
 # ---------------------------------------------------------------------------
 
 
+class _FakeUser:
+    def __init__(self, org_id="org-acme", role="user"):
+        self.id = "u-test"
+        self.org_id = org_id
+        self.role = role
+        self.email = "tester@test"
+        self.full_name = "Tester"
+        self.is_anonymous = False
+
+
 @pytest.fixture()
 def client(db_session):
-    """Provide a TestClient backed by the real zhanlu.db. The router
-    under test reads/writes ``workspace_settings`` rows; the table is
-    created in the real DB by the initial create_all sweep. We clean
-    the rows we create in each test by calling ``db_session.query(...).
-    delete()`` on teardown (the same session, different connection).
+    """TestClient with the router's DB session AND auth overridden.
+
+    Phase 7C (B2): the org is resolved from the VERIFIED user, and writes
+    require an org admin. ``state['role']`` toggles the authenticated
+    principal between org member and org admin.
     """
-    from app.deps import get_db as real_get_db
-    from app.database import SessionLocal
+    from app.deps import get_current_user_required, get_db
 
-    def _override():
-        # Use a fresh SessionLocal session per request so the test
-        # sees writes from the service layer immediately.
-        s = SessionLocal()
-        try:
-            yield s
-        finally:
-            s.close()
+    state = {"role": "admin"}
+    db_session.add.__self__  # keep linters honest about the session use
 
-    app.dependency_overrides[real_get_db] = _override
+    def _get_db():
+        yield db_session
+
+    def _user():
+        return _FakeUser(role=state["role"])
+
+    app.dependency_overrides[get_db] = _get_db
+    app.dependency_overrides[get_current_user_required] = _user
     try:
         with TestClient(app) as c:
+            c.state = state
             yield c
     finally:
-        app.dependency_overrides.pop(real_get_db, None)
-        # Clean up any rows this test created.
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user_required, None)
         try:
             db_session.query(WorkspaceSetting).delete()
             db_session.commit()
@@ -169,7 +182,8 @@ def client(db_session):
 
 def test_router_get_returns_default(client):
     """GET /api/workspace-settings returns the default flag values
-    (auto_bind_all_datasources=False) when no row exists yet.
+    (auto_bind_all_datasources=False) when no row exists yet — resolved
+    under the verified user's org.
     """
     resp = client.get("/api/workspace-settings")
     assert resp.status_code == 200
@@ -178,7 +192,7 @@ def test_router_get_returns_default(client):
 
 
 def test_router_put_round_trip(client):
-    """PUT flips the flag, GET reads it back."""
+    """PUT flips the flag (org admin), GET reads it back."""
     resp = client.put(
         "/api/workspace-settings",
         json={"auto_bind_all_datasources": True},
@@ -195,3 +209,27 @@ def test_router_put_round_trip(client):
     )
     assert resp.status_code == 200
     assert resp.json()["auto_bind_all_datasources"] is False
+
+
+def test_router_rejects_cross_org_request(client):
+    """Phase 7C (B2): a client-supplied org_id that differs from the
+    verified user's org is refused — no tenant may read or flip another
+    tenant's workspace settings."""
+    resp = client.get("/api/workspace-settings",
+                      params={"org_id": "org-evil"})
+    assert resp.status_code == 403
+    resp = client.put("/api/workspace-settings",
+                      params={"org_id": "org-evil"},
+                      json={"auto_bind_all_datasources": True})
+    assert resp.status_code == 403
+
+
+def test_router_put_requires_org_admin(client):
+    """Phase 7C (B2): a plain org member can READ but not WRITE the
+    workspace flag (org-wide blast radius)."""
+    client.state["role"] = "user"
+    resp = client.put("/api/workspace-settings",
+                      json={"auto_bind_all_datasources": True})
+    assert resp.status_code == 403
+    # reads stay available to org members
+    assert client.get("/api/workspace-settings").status_code == 200
