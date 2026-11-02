@@ -106,7 +106,9 @@ def discovery(monkeypatch):
 
 def _register_datasource(db, org=ORG):
     db.add(KnowledgeBase(id="kb-1", org_id=org, name="Sales DW"))
-    db.add(KBTableMeta(kb_id="kb-1", table_name="sales_order"))
+    # catalog rows are org-stamped in production (7C: the digest is
+    # org-scoped — see onboarding._resource_digest)
+    db.add(KBTableMeta(kb_id="kb-1", table_name="sales_order", org_id=org))
     db.commit()
 
 
@@ -260,7 +262,7 @@ def test_scenario_c_resource_drift_lifecycle(db, wired, discovery,
     _verified_process(db)
 
     # catalog change + verified evidence present
-    db.add(KBTableMeta(kb_id="kb-1", table_name="region_dim"))
+    db.add(KBTableMeta(kb_id="kb-1", table_name="region_dim", org_id=ORG))
     db.query(KBTableMeta).filter_by(kb_id="kb-1",
                                     table_name="sales_order") \
         .update({"is_deleted": True})
