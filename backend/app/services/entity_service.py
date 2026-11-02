@@ -686,6 +686,19 @@ def delete_many_records(model, query_data: dict, db: Session, owner_id: str | No
     delete — they are platform-managed and the count returned does not
     include them. (See soft_delete_record for the full rationale.)
     """
+    return len(soft_delete_many_records(model, query_data, db,
+                                        owner_id=owner_id, org_id=org_id,
+                                        app_id=app_id))
+
+
+def soft_delete_many_records(model, query_data: dict, db: Session,
+                             owner_id: str | None = None,
+                             org_id: str | None = None,
+                             app_id: str | None = None) -> list[str]:
+    """Phase 7C (D3): like ``delete_many_records`` but returns the ids of
+    the records actually soft-deleted, so callers can run post-delete
+    orphan cleanup per record. Same tenant/owner scoping and is_system
+    exclusion; commits once."""
     query = db.query(model).filter(model.is_deleted == False)
     query = _apply_tenant(model, query, org_id, app_id)
     query = _apply_owner(model, query, owner_id)
@@ -698,16 +711,16 @@ def delete_many_records(model, query_data: dict, db: Session, owner_id: str | No
             query = query.filter(cond)
 
     records = query.all()
-    count = 0
+    deleted_ids: list[str] = []
     for record in records:
         if getattr(record, "is_system", False) is True:
             continue
         record.is_deleted = True
         record.updated_date = datetime.now(timezone.utc)
-        count += 1
+        deleted_ids.append(record.id)
 
     db.commit()
-    return count
+    return deleted_ids
 
 
 def bulk_create_records(model, data_list: list, db: Session, created_by_id: str | None = None,

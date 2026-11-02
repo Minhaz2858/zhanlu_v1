@@ -35,7 +35,8 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import settings
 from app.database import SessionLocal
-from app.services.enterprise.onboarding import on_resource_changed
+from app.services.enterprise.onboarding import (
+    _resource_exists, on_resource_changed)
 
 logger = logging.getLogger(__name__)
 if logger.level == logging.NOTSET or logger.level > logging.INFO:
@@ -87,6 +88,11 @@ def _clear_failure(key: tuple) -> None:
     _FAILURES.pop(key, None)
 
 
+def clear_failure_state_for_tests() -> None:
+    """Test isolation helper: reset the in-process failure/backoff map."""
+    _FAILURES.clear()
+
+
 def scan_once(db=None) -> dict:
     """One bounded scan cycle. Returns a summary; never raises (errors are
     per-resource and recorded in the summary/backoff map)."""
@@ -102,7 +108,7 @@ def scan_once(db=None) -> dict:
     now = time.monotonic()
     summary = {"scanned": 0, "drifted": 0, "unchanged": 0, "failed": 0,
                "skipped_in_flight": 0, "skipped_backoff": 0,
-               "skipped_no_digest": 0, "errors": []}
+               "skipped_no_digest": 0, "skipped_missing": 0, "errors": []}
     try:
         max_resources = int(getattr(
             settings, "ONTOLOGY_DRIFT_WATCHDOG_MAX_RESOURCES_PER_CYCLE", 20))
@@ -131,6 +137,33 @@ def scan_once(db=None) -> dict:
                 # never poison another candidate's transaction state
                 rdb = SessionLocal()
                 try:
+                    # Phase 7C (D1): existence FIRST. A deleted resource
+                    # must not produce a failed run row every cycle — the
+                    # candidate is tombstoned (run rows soft-deleted,
+                    # org-scoped) so it leaves the candidate set for good.
+                    if not _resource_exists(rdb, org_id, rtype, rid):
+                        summary["skipped_missing"] += 1
+                        from app.models.enterprise_onboarding import (
+                            EnterpriseOnboardingRun)
+                        tombstoned = (
+                            rdb.query(EnterpriseOnboardingRun)
+                            .filter(
+                                EnterpriseOnboardingRun.org_id == org_id,
+                                EnterpriseOnboardingRun.resource_type == rtype,
+                                EnterpriseOnboardingRun.resource_id == rid,
+                                EnterpriseOnboardingRun.is_deleted == False,  # noqa: E712
+                            )
+                            .all()
+                        )
+                        for run_row in tombstoned:
+                            run_row.is_deleted = True
+                        if tombstoned:
+                            rdb.commit()
+                            logger.info(
+                                "drift_watchdog: tombstoned %s:%s (org=%s) "
+                                "(%d run rows) — resource no longer exists",
+                                rtype, rid, org_id, len(tombstoned))
+                        continue
                     current = _resource_digest(rdb, org_id, rtype, rid)
                     if current is None:
                         # honest: this resource type has no digest

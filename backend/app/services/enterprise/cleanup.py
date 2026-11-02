@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_RESOURCE_TYPES = {
     "knowledge_base", "datasource", "mcp_server", "automation_task",
+    "agent_app",
 }
 
 # generic-entity name → cleanup resource type (entities.py hook)
@@ -46,6 +47,7 @@ ENTITY_TO_RESOURCE_TYPE = {
     "KnowledgeBase": "knowledge_base",
     "McpServer": "mcp_server",
     "AutomationTask": "automation_task",
+    "AgentApp": "agent_app",
 }
 
 
@@ -209,6 +211,23 @@ def _cleanup_agent_bindings(db: Session, resource_type: str, resource_id: str,
     from app.models.agent_data_binding import AgentDataBinding
 
     counts: dict[str, int] = {}
+
+    if resource_type == "agent_app":
+        # Phase 7C (D4): when the AGENT dies, its data bindings die with
+        # it (org-scoped) — before 7C a deleted AgentApp left live
+        # AgentDataBinding rows pointing at a ghost agent.
+        dead = (
+            db.query(AgentDataBinding)
+            .filter(AgentDataBinding.agent_app_id == resource_id,
+                    AgentDataBinding.org_id == org_id,
+                    AgentDataBinding.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        for b in dead:
+            b.is_deleted = True
+        counts["agent_data_bindings"] = len(dead)
+        counts["agent_apps_updated"] = 0
+        return counts
 
     bindings = (
         db.query(AgentDataBinding)

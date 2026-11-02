@@ -1339,7 +1339,24 @@ def delete_automation(
     task.status = "deleted"
     task.updated_date = datetime.now(timezone.utc)
     db.commit()
-    return {"success": True, "id": task_id}
+    # Phase 7C (D2): the dedicated path is the one the UI uses — it must
+    # run the same enterprise orphan cleanup as the generic entity DELETE.
+    # Fail-open with an honest cleanup_error (deletion is never undone).
+    cleanup_payload: dict | None = None
+    try:
+        from app.services.enterprise.cleanup import handle_resource_deleted
+        cleanup_payload = handle_resource_deleted(
+            db, resource_type="automation_task", resource_id=task_id,
+            org_id=task.org_id, actor_id=getattr(user, "id", None),
+        )
+    except LookupError:
+        cleanup_payload = None  # nothing registered to clean
+    except Exception as exc:  # noqa: BLE001 — surface, don't undo
+        logger.exception(
+            "post-delete cleanup failed for automation %s (org %s)",
+            task_id, task.org_id)
+        cleanup_payload = {"cleanup_error": str(exc)[:300]}
+    return {"success": True, "id": task_id, "cleanup": cleanup_payload}
 
 
 # ── Nightly forecast bootstrap ─────────────────────────────────────────

@@ -299,11 +299,13 @@ def _check_shareable_write(
 
 
 # Phase 0B (2026-11-01): entity types whose deletion triggers enterprise
-# orphan cleanup (app/services/enterprise/cleanup.py).
+# orphan cleanup (app/services/enterprise/cleanup.py). Phase 7C (D4):
+# AgentApp deletion now cleans its AgentDataBinding rows too.
 _ENTITY_RESOURCE_TYPES = {
     "KnowledgeBase": "knowledge_base",
     "McpServer": "mcp_server",
     "AutomationTask": "automation_task",
+    "AgentApp": "agent_app",
 }
 
 
@@ -408,6 +410,40 @@ def register_entity_router(
         user=Depends(get_current_user_required),
     ):
         org_id, app_id = _tenant_ids(user, app_id)
+        resource_type = _ENTITY_RESOURCE_TYPES.get(entity_name)
+        if resource_type:
+            # Phase 7C (D3): bulk delete of enterprise resources must run
+            # the same orphan cleanup as single delete — per record,
+            # fail-open, honestly surfaced.
+            from app.services.entity_service import soft_delete_many_records
+            deleted_ids = soft_delete_many_records(
+                model_class, query_data, db,
+                owner_id=_owner_id(entity_name, user),
+                org_id=org_id, app_id=app_id,
+            )
+            cleanup_results = []
+            for rid in deleted_ids:
+                try:
+                    from app.services.enterprise.cleanup import (
+                        handle_resource_deleted)
+                    cleanup_results.append({
+                        "id": rid,
+                        **(handle_resource_deleted(
+                            db, resource_type=resource_type,
+                            resource_id=rid, org_id=org_id,
+                            actor_id=getattr(user, "id", None),
+                        ) or {}),
+                    })
+                except LookupError:
+                    cleanup_results.append({"id": rid})
+                except Exception as exc:  # noqa: BLE001 — surface, don't undo
+                    logger.exception(
+                        "bulk-delete cleanup failed for %s %s (org %s)",
+                        entity_name, rid, org_id)
+                    cleanup_results.append(
+                        {"id": rid, "cleanup_error": str(exc)[:300]})
+            return {"deleted_count": len(deleted_ids),
+                    "cleanup_results": cleanup_results}
         count = entity_service.delete_many_records(
             model_class, query_data, db, owner_id=_owner_id(entity_name, user),
             org_id=org_id, app_id=app_id,

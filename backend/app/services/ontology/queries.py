@@ -112,7 +112,12 @@ def list_objects(db: Session, org_id: str, domain_id: str | None = None) -> list
 
 
 def list_links(db: Session, org_id: str, domain_id: str | None = None) -> list:
-    q = db.query(OntologyLink).filter(OntologyLink.org_id == org_id)
+    # Phase 7C (D5): retired links honor soft-delete on reads — before 7C
+    # this list returned explicitly retired links (the drilldown filtered
+    # them, this list did not).
+    q = db.query(OntologyLink).filter(
+        OntologyLink.org_id == org_id,
+        OntologyLink.is_deleted == False)  # noqa: E712
     if domain_id:
         ids = _domain_object_ids(db, org_id, domain_id)
         q = q.filter(OntologyLink.from_object_id.in_(ids)

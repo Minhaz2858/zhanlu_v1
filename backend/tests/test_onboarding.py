@@ -17,7 +17,8 @@ from app.models.audit_event import AuditEvent
 from app.models.enterprise_onboarding import EnterpriseOnboardingRun
 from app.models.enterprise_process import (
     BusinessProcess, EnterpriseResource, ProcessEvidence)
-from app.models.knowledge_catalog import KBTableMeta, KBTableRelation
+from app.models.knowledge_catalog import (
+    KBColumnMeta, KBTableMeta, KBTableRelation)
 from app.models.agent_app import AgentApp
 from app.models.agent_data_binding import AgentDataBinding
 from app.models.agent_run import AgentRun
@@ -55,6 +56,7 @@ def db():
         AuditEvent.__table__, Nl2sqlQueryLog.__table__,
         Terminology.__table__, AgentRun.__table__, BusinessRule.__table__,
         KnowledgeBase.__table__, KBTableRelation.__table__,
+        KBColumnMeta.__table__,
         AgentDataBinding.__table__, AgentApp.__table__,
         McpServer.__table__, AutomationTask.__table__])
     s = sessionmaker(bind=eng)()
@@ -89,7 +91,9 @@ def _tables(db, kb_id, names):
     if db.query(KnowledgeBase).filter_by(id=kb_id).first() is None:
         db.add(KnowledgeBase(id=kb_id, org_id=ORG, name=f"KB {kb_id}"))
     for t in names:
-        db.add(KBTableMeta(kb_id=kb_id, table_name=t))
+        # Phase 7C: catalog rows are org-stamped in production (the catalog
+        # indexer inherits the KB's org) — the digest is org-scoped now.
+        db.add(KBTableMeta(kb_id=kb_id, table_name=t, org_id=ORG))
     db.commit()
 
 

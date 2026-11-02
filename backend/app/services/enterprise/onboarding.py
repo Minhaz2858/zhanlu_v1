@@ -57,6 +57,7 @@ def _resource_digest(db: Session, org_id: str, resource_type: str,
         return None
     rows = db.query(KBTableMeta.table_name).filter(
         KBTableMeta.kb_id == resource_id,
+        KBTableMeta.org_id == org_id,
         KBTableMeta.is_deleted == False,  # noqa: E712
     ).all()
     return _digest(r[0] for r in rows)
