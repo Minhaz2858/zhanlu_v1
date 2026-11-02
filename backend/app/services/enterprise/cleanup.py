@@ -131,6 +131,7 @@ def handle_resource_deleted(
 # ---------------------------------------------------------------------------
 
 def _load_resource_row(db: Session, resource_type: str, resource_id: str):
+    from app.models.agent_app import AgentApp
     from app.models.automation_task import AutomationTask
     from app.models.datasource import Datasource
     from app.models.knowledge_base import KnowledgeBase
@@ -141,12 +142,14 @@ def _load_resource_row(db: Session, resource_type: str, resource_id: str):
         "datasource": Datasource,
         "mcp_server": McpServer,
         "automation_task": AutomationTask,
+        "agent_app": AgentApp,
     }[resource_type]
-    return (
-        db.query(model)
-        .filter(model.id == resource_id, model.is_deleted == False)  # noqa: E712
-        .first()
-    )
+    # Phase 7C (D0): load by id REGARDLESS of is_deleted. Production call
+    # sites soft-delete the resource FIRST and run cleanup AFTER; the old
+    # `is_deleted == False` filter made the load return None on every
+    # production path (LookupError → swallowed) so cleanup never ran.
+    # The load exists for org verification — the delete flag is irrelevant.
+    return db.query(model).filter(model.id == resource_id).first()
 
 
 def _cleanup_catalog(db: Session, resource_type: str, resource_id: str,
