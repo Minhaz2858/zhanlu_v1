@@ -86,3 +86,48 @@ All 13 roadmap tasks implemented TDD RED→GREEN; commits on
    heavily foreign-dirty — one-line insert when that WIP lands).
 2. Auto-bind flag removal after migration criteria are met (T8-12).
 3. MCP session-level auth mapping (beyond the allow-listed pass-through).
+
+---
+
+# Phase 8.1 — Final integration and production readiness (2026-11-03)
+
+Base: `f868574fd` · Commits: `94fcc9167` (Stage 1), `b0a197dea` (Stage 2), `fc052c7c6` (Stage 3), + this log.
+
+**Stage 1 — chat provenance end-to-end (`94fcc9167`):** `record_chat_turn_run`
+gives every completed v3 chat turn a real AgentRun (org/user from the
+VERIFIED session; executed tools as steps — blocked denials never recorded
+as executions; honest status; fail-open; flag-gated). run_id is attached to
+the final assistant message (v3 + v2) so it survives reload, and
+MessageBubble renders RunProvenancePanel for messages carrying run_id
+(historical messages without one render nothing — honest absence).
+
+**Stage 2 — MCP authorization hardening (`b0a197dea`):**
+`verify_mcp_context` validates every `_zhanlu_context` identity claim
+against the database (org exists; agent live + same-org; user same-org).
+Any unverifiable claim drops the WHOLE context to the no-context fallback —
+never partially trusted; claim-free contexts pass UNVERIFIED; verified
+contexts are stamped `verified: True`. The mount itself remains unauthenticated
+by design (external MCP clients) — session-token auth for /api/ext-mcp is
+the documented next step, and even a forged claim now cannot reference a
+cross-org agent/user.
+
+**Stage 3 — auto-bind compatibility (`fc052c7c6`):** effective bound set
+proven IDENTICAL pre/post migration; flag honored until migrated; stamp
+removal restores legacy behavior (rollback); codebase scan pins exactly
+four readers of the deprecated flag.
+
+**Stage 4 — integrated acceptance (2026-11-03):**
+- Backend: 39-test matrix → **302 passed / 0 failed** (46s).
+- Frontend (agent + chat + enterprise): **392 passed / 0 failed** (60 files).
+- Production build: **exit 0**.
+- Migrations: alembic history — single linear head
+  `123 → 124 → 125_agent_run_provenance`; up/down verified by revision
+  linkage + RLS idempotency blocks.
+
+**Remaining known-unrelated failures (foreign scope, untouched):** MCP
+multimodal-tools listing (handlers not on this branch), harness policy
+env-parse drift, vision-bridge shadow-primitive scan, 7 legacy Chat/Sidebar
+frontend failures.
+
+**Next:** session-token auth for /api/ext-mcp; auto-bind flag removal once
+all workspaces migrate (T8-12 criteria).
