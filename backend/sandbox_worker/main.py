@@ -169,7 +169,7 @@ def execute_job(job_id: str, skill_name: str):
             os.makedirs(input_dir, exist_ok=True)
             os.makedirs(output_dir, exist_ok=True)
             # Ensure the output dir is writable by the container's non-root user
-            os.chmod(output_dir, 0o777)
+            os.chmod(output_dir, 0o733)  # Phase 11 (S5): writable but not world-READ/listable
 
             # Host-side equivalents of input_dir/output_dir (DooD translation)
             host_workspace = host_root + workspace[len(tmp_root):]
@@ -179,7 +179,7 @@ def execute_job(job_id: str, skill_name: str):
             # daemon, so bind-mount permissions are evaluated on the host-side
             # paths, not just the worker container paths. Make both sides
             # traversable/writable so non-root sandbox users can write outputs.
-            for _path, _mode in ((workspace, 0o755), (input_dir, 0o755), (output_dir, 0o777), (host_workspace, 0o755), (host_input_dir, 0o755), (host_output_dir, 0o777)):
+            for _path, _mode in ((workspace, 0o755), (input_dir, 0o755), (output_dir, 0o733), (host_workspace, 0o755), (host_input_dir, 0o755), (host_output_dir, 0o733)):
                 try:
                     os.chmod(_path, _mode)
                 except OSError as chmod_err:

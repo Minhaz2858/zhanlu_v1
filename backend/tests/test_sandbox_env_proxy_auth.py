@@ -160,3 +160,27 @@ async def test_proxy_accepts_valid_job_token(proxy):
         assert "unauthorized" not in resp.get("error", "").lower()
     finally:
         await proxy.stop()
+
+
+# ── S5 (P2): tmp-root / output-dir hardening ─────────────────────────────
+
+def test_sandbox_output_dirs_not_world_readable():
+    """Sandbox output dirs must be writable-but-not-world-readable (0o733):
+    a sibling container or local process can no longer read/list another
+    job's output files. The worker process (owner) still collects them."""
+    from pathlib import Path
+    src = (Path("sandbox_worker/main.py")).read_text()
+    assert "0o777" not in src, "world-readable sandbox dirs remain"
+    assert "0o733" in src
+
+
+def test_sandbox_images_pinable_via_config():
+    """S5: image references must flow from Settings (SANDBOX_IMAGE_*) so a
+    deployment can pin digests (image@sha256:...) without code changes;
+    local :latest tags are documented as a deployment responsibility."""
+    from app.config import settings
+    assert settings.SANDBOX_IMAGE_PYTHON.startswith("zhanlu-sandbox")
+    # the config exposes all three runtime images for digest pinning
+    for attr in ("SANDBOX_IMAGE_PYTHON", "SANDBOX_IMAGE_OFFICE",
+                 "SANDBOX_IMAGE_WEBAPP"):
+        assert hasattr(settings, attr)
