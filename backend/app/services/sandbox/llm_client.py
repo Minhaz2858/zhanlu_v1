@@ -97,6 +97,14 @@ class SandboxLLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        # Phase 11 (S2): per-job proxy authentication — the worker injects
+        # LLM_PROXY_JOB_ID + LLM_PROXY_TOKEN into the container env; the
+        # proxy rejects requests without a valid token.
+        _job_id = os.environ.get("LLM_PROXY_JOB_ID")
+        _token = os.environ.get("LLM_PROXY_TOKEN")
+        if _job_id and _token:
+            request["job_id"] = _job_id
+            request["auth_token"] = _token
 
         response = self._round_trip(request)
         if not response.get("success"):

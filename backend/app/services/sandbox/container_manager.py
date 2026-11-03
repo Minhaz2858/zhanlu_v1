@@ -54,6 +54,37 @@ _FALLBACK_MIME_BY_EXT = {
 # Check if Docker is available
 _DOCKER_PATH = shutil.which("docker")
 
+# Phase 11 (S2): env-var allowlist for sandbox containers.
+_ENV_DENY_PATTERNS = (
+    "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
+    "AWS_", "AZURE_", "GCP_", "GOOGLE_",
+    "PATH", "LD_", "DYLD_", "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP",
+    "DOCKER", "CONTAINER", "PROXY", "BASH_ENV", "ENV", "GEM_HOME",
+    "NODE_OPTIONS", "ELECTRON_RUN_AS_NODE",
+)
+
+
+def filter_env_vars(env_vars: dict) -> tuple[dict, list]:
+    """Allowlist environment variables entering a sandbox container.
+
+    Returns (safe, refused). Refusals are (key, reason) pairs — values are
+    never included so secrets cannot reach logs.
+    """
+    safe, refused = {}, []
+    for key, value in (env_vars or {}).items():
+        key_u = str(key).upper()
+        if any(pat in key_u for pat in _ENV_DENY_PATTERNS):
+            refused.append((key, "credential or env-manipulation name"))
+            continue
+        if "\n" in str(value) or "\r" in str(value):
+            refused.append((key, "multi-line value"))
+            continue
+        if len(str(value)) > 4096:
+            refused.append((key, "value too large"))
+            continue
+        safe[key] = value
+    return safe, refused
+
 
 def filter_extra_mounts(mounts):
     """Phase 10 (audit S1.4): extra-mount allowlist.
@@ -207,9 +238,17 @@ def run_sandbox_container(
                 len(refused), [r[0] for r in refused])
 
     # Add environment variables
+    # Phase 11 (S2): env allowlist — credential-ish keys, environment-
+    # manipulation keys and newline-bearing values never enter a container.
     if env_vars:
-        for key, value in env_vars.items():
+        safe_env, refused_env = filter_env_vars(env_vars)
+        for key, value in safe_env.items():
             docker_cmd.extend(["-e", f"{key}={value}"])
+        if refused_env:
+            logger.warning(
+                "Refused %d env var(s) by the sandbox allowlist (keys only, "
+                "values withheld): %s",
+                len(refused_env), [k for k, _ in refused_env])
 
     docker_cmd.append(image_name)
     docker_cmd.extend(command)

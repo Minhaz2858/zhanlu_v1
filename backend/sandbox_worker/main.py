@@ -239,6 +239,13 @@ def execute_job(job_id: str, skill_name: str):
                         "LLM_PROXY_MODEL": settings.SANDBOX_LLM_PROXY_MODEL,
                         "PYTHONUNBUFFERED": "1",
                     }
+                    # Phase 11 (S2): per-job proxy authentication — the
+                    # container gets a token minted for THIS job; the proxy
+                    # rejects requests without a valid token, so an
+                    # unauthenticated local peer can never burn the real
+                    # LLM API key.
+                    skill_env["LLM_PROXY_JOB_ID"] = job.id
+                    skill_env["LLM_PROXY_TOKEN"] = mint_proxy_token(job.id)
                     # The proxy may be disabled but the job still wants
                     # to run — the runner will fall back to the
                     # deterministic generator when LLM_PROXY_SOCKET is

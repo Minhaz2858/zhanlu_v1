@@ -117,6 +117,51 @@ class _SlidingWindow:
         return True
 
 
+# --- Client authentication (Phase 11 / S2) -----------------------------------
+
+_EPHEMERAL_SECRET: str | None = None
+
+
+def _auth_secret() -> str:
+    """The HMAC secret shared by the worker (mints tokens) and the proxy
+    (verifies). Configured secret wins; otherwise an EPHEMERAL per-process
+    secret is generated once — the worker and proxy run in the same
+    process, so both sides agree. A proxy restart invalidates tokens
+    (fine: sockets die with the process)."""
+    global _EPHEMERAL_SECRET
+    configured = getattr(settings, "SANDBOX_LLM_PROXY_SECRET", "") or ""
+    if configured:
+        return configured
+    if _EPHEMERAL_SECRET is None:
+        import secrets as _secrets
+        _EPHEMERAL_SECRET = _secrets.token_hex(32)
+    return _EPHEMERAL_SECRET
+
+
+def mint_proxy_token(job_id: str) -> str:
+    """Per-job HMAC token — injected into the container as
+    ``LLM_PROXY_TOKEN`` (with ``LLM_PROXY_JOB_ID``) by the worker."""
+    import hashlib
+    import hmac as _hmac
+    return _hmac.new(
+        _auth_secret().encode(), f"llm-proxy:{job_id}".encode(),
+        hashlib.sha256).hexdigest()
+
+
+def verify_proxy_token(job_id: str, token: str) -> bool:
+    import hashlib
+    import hmac as _hmac
+    if not job_id or not token:
+        return False
+    return _hmac.compare_digest(
+        mint_proxy_token(job_id), str(token))
+
+
+def _verify_request_auth(req: dict) -> bool:
+    return verify_proxy_token(
+        str(req.get("job_id") or ""), str(req.get("auth_token") or ""))
+
+
 # --- The proxy itself -------------------------------------------------------
 
 class LLMProxy:
@@ -128,12 +173,20 @@ class LLMProxy:
         api_key: str = "",
         api_base: str = "",
         allowed_models: tuple[str, ...] = ALLOWED_MODELS,
+        auth_secret: str | None = None,
     ):
         self.socket_path = socket_path
         # Never log these — they may be the real API key
         self._api_key = api_key or settings.OPENAI_API_KEY
         self._api_base = (api_base or settings.OPENAI_BASE_URL).rstrip("/")
         self._allowed_models = allowed_models
+        # Phase 11 (S2): per-job HMAC client authentication. The secret is
+        # shared with the worker that MINTS tokens (same process by
+        # default; SANDBOX_LLM_PROXY_SECRET for split deployments).
+        _secret = auth_secret if auth_secret is not None else _auth_secret()
+        self._auth_secret = _secret
+        self._require_auth = bool(
+            getattr(settings, "SANDBOX_LLM_PROXY_AUTH", True) and _secret)
         self._limiter = _SlidingWindow(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
         self._server: Optional[asyncio.AbstractServer] = None
         # An httpx.AsyncClient per request is wasteful; share one.
@@ -217,6 +270,21 @@ class LLMProxy:
                     continue
 
                 req_id = str(req.get("id") or uuid.uuid4())
+
+                # --- client authentication (Phase 11 / S2) ---
+                # The socket is world-writable (container UID namespaces);
+                # without a token ANY local process could burn the real
+                # LLM API key. Each request must present the per-job HMAC
+                # token minted by the worker when it injected the env.
+                if self._require_auth:
+                    if not _verify_request_auth(req):
+                        logger.warning(
+                            "LLM proxy: unauthorized request (req_id=%s) — "
+                            "missing/invalid job token; NO upstream call",
+                            req_id,
+                        )
+                        await self._send_error(writer, req_id, "unauthorized")
+                        continue
 
                 # --- input validation ---
                 model = req.get("model")

@@ -2184,6 +2184,15 @@ class Settings(BaseSettings):
     # downgrade on container-runtime outage = backend-privilege RCE.
     SANDBOX_ALLOW_HOST_FALLBACK: bool = False
 
+    # Phase 11 (S2): LLM proxy client authentication. When enabled (default),
+    # every proxy request must carry a per-job HMAC token minted by the
+    # worker (which shares this process) — an unauthenticated peer on the
+    # socket can no longer burn the real LLM API key. The HMAC secret is
+    # SANDBOX_LLM_PROXY_SECRET, or an ephemeral per-process secret when
+    # unset (worker mints and proxy verify share the process).
+    SANDBOX_LLM_PROXY_AUTH: bool = True
+    SANDBOX_LLM_PROXY_SECRET: str = ""
+
     # ── Automation reliability (Phase 1) ────────────────────────────────
     # Wall-clock deadline for a single automation run. Executions whose
     # timeout_at passes while still queued/running are reaped by the
