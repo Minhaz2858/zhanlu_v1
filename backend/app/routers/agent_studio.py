@@ -40,6 +40,10 @@ class SkillBindingRequest(BaseModel):
     is_pinned: bool = False
 
 
+class DataBindingUpdateRequest(BaseModel):
+    is_enabled: bool
+
+
 @router.get("/agent-studio/{agent_id}/preflight")
 def run_preflight(
     agent_id: str,
@@ -65,29 +69,50 @@ def dry_run(
     return service.dry_run(agent_id, test_message)
 
 
+def _binding_dict(b) -> dict:
+    return {
+        "id": b.id, "agent_app_id": b.agent_app_id,
+        "datasource_id": b.datasource_id, "access_mode": b.access_mode,
+        "allowed_tables": b.allowed_tables,
+        "allowed_columns": b.allowed_columns,
+        "blocked_tables": b.blocked_tables, "row_filters": b.row_filters,
+        "nl2sql_enabled": bool(b.nl2sql_enabled),
+        "is_enabled": bool(b.is_enabled),
+        "is_deleted": bool(b.is_deleted),
+    }
+
+
+def _service_error(exc: Exception) -> HTTPException:
+    """Map binding-service domain errors onto HTTP statuses (fail-closed)."""
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=404, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
 @router.get("/agent-studio/{agent_id}/bindings")
 def get_bindings(
     agent_id: str,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_required),
 ):
-    """List data and skill bindings for an agent."""
-    from app.models.agent_data_binding import AgentDataBinding
+    """List data and skill bindings for an agent (org-scoped)."""
     from app.models.agent_skill_binding import AgentSkillBinding
+    from app.services.agent_binding_service import list_bindings
 
-    data_bindings = (
-        db.query(AgentDataBinding)
-        .filter(AgentDataBinding.agent_app_id == agent_id, AgentDataBinding.is_deleted == False)
-        .all()
-    )
+    try:
+        data_bindings = list_bindings(db, user.org_id, agent_id)
+    except (PermissionError, LookupError) as exc:
+        raise _service_error(exc)
     skill_bindings = (
         db.query(AgentSkillBinding)
-        .filter(AgentSkillBinding.agent_app_id == agent_id, AgentSkillBinding.is_deleted == False)
+        .filter(AgentSkillBinding.agent_app_id == agent_id, AgentSkillBinding.is_deleted == False)  # noqa: E712
         .all()
     )
 
     return {
-        "data_bindings": [b.to_dict() for b in data_bindings],
+        "data_bindings": [_binding_dict(b) for b in data_bindings],
         "skill_bindings": [b.to_dict() for b in skill_bindings],
     }
 
@@ -99,22 +124,23 @@ def add_data_binding(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_required),
 ):
-    """Add a data binding to an agent."""
-    from app.models.agent_data_binding import AgentDataBinding
-    from uuid import uuid4
+    """Add (or idempotently update) a data binding via the binding service.
 
-    binding = AgentDataBinding(
-        id=str(uuid4()),
-        agent_app_id=agent_id,
-        datasource_id=req.datasource_id,
-        access_mode=req.access_mode,
-        allowed_tables=req.allowed_tables,
-        allowed_columns=req.allowed_columns,
-        nl2sql_enabled=req.nl2sql_enabled,
-    )
-    db.add(binding)
-    db.commit()
-    db.refresh(binding)
+    Phase 8 (ADR-1): the service is the sole writer — org wall, duplicate
+    handling, and the AgentApp.knowledge_bases compatibility projection all
+    happen inside it."""
+    from app.services.agent_binding_service import upsert_binding
+
+    try:
+        binding = upsert_binding(
+            db, user.org_id, agent_id, req.datasource_id,
+            actor_id=user.id, access_mode=req.access_mode,
+            allowed_tables=req.allowed_tables,
+            allowed_columns=req.allowed_columns,
+            nl2sql_enabled=req.nl2sql_enabled,
+        )
+    except (PermissionError, LookupError) as exc:
+        raise _service_error(exc)
 
     # Project-scoped KB ingestion trigger (flag-gated; the default BI
     # agent that used it was removed 2026-08-27 — PROJECT_KNOWLEDGE_AGENT_NAMES
@@ -162,7 +188,92 @@ def add_data_binding(
     except Exception as _trig_err:
         logger.warning("project_knowledge trigger skipped (non-fatal): %s", _trig_err)
 
-    return binding.to_dict()
+    return _binding_dict(binding)
+
+
+@router.patch("/agent-studio/{agent_id}/bindings/data/{binding_id}")
+def update_data_binding(
+    agent_id: str,
+    binding_id: str,
+    req: DataBindingUpdateRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Enable/disable a binding (revocation-lite; the row survives)."""
+    from app.services.agent_binding_service import set_binding_enabled
+
+    try:
+        set_binding_enabled(db, user.org_id, binding_id,
+                            bool(req.is_enabled), actor_id=user.id)
+    except (PermissionError, LookupError) as exc:
+        raise _service_error(exc)
+    from app.models.agent_data_binding import AgentDataBinding
+    return _binding_dict(db.get(AgentDataBinding, binding_id))
+
+
+@router.delete("/agent-studio/{agent_id}/bindings/data/{binding_id}")
+def remove_data_binding(
+    agent_id: str,
+    binding_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Revoke a binding (soft delete; effective on the agent's next turn)."""
+    from app.services.agent_binding_service import revoke_binding
+
+    try:
+        revoke_binding(db, user.org_id, binding_id, actor_id=user.id)
+    except (PermissionError, LookupError) as exc:
+        raise _service_error(exc)
+    from app.models.agent_data_binding import AgentDataBinding
+    return _binding_dict(db.get(AgentDataBinding, binding_id))
+
+
+@router.get("/agent-studio/{agent_id}/source-descriptors")
+def get_source_descriptors(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Structured runtime source descriptors (Phase 8 ADR-3).
+
+    One contract for the UI: what this agent MAY access, its binding state,
+    type, and readiness. Org-scoped and fail-closed; a foreign-org agent
+    yields an empty list, never foreign rows."""
+    from app.models.knowledge_base import KnowledgeBase
+    from app.services.agent_binding_service import list_bindings
+
+    try:
+        bindings = list_bindings(db, user.org_id, agent_id)
+    except (PermissionError, LookupError) as exc:
+        raise _service_error(exc)
+
+    descriptors = []
+    for b in bindings:
+        ds = db.get(KnowledgeBase, b.datasource_id)
+        if ds is None or ds.is_deleted:
+            descriptors.append({
+                "id": b.datasource_id, "name": b.datasource_id,
+                "resource_type": "unknown", "source_kind": "unknown",
+                "db_type": None, "binding_id": b.id,
+                "access_mode": b.access_mode,
+                "is_enabled": bool(b.is_enabled),
+                "readiness": "unavailable (resource deleted)",
+                "queryable": False,
+            })
+            continue
+        is_db = (ds.source_kind or "database") == "database"
+        descriptors.append({
+            "id": ds.id, "name": ds.name,
+            "resource_type": "database" if is_db else "knowledge_base",
+            "source_kind": ds.source_kind or "database",
+            "db_type": getattr(ds, "db_type", None),
+            "binding_id": b.id, "access_mode": b.access_mode,
+            "is_enabled": bool(b.is_enabled),
+            "readiness": getattr(ds, "readiness_note", None) or "ready",
+            "queryable": bool(is_db and b.nl2sql_enabled and b.is_enabled),
+        })
+    return {"descriptors": descriptors}
 
 
 @router.post("/agent-studio/{agent_id}/bindings/skill")
