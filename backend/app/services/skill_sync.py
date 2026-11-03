@@ -15,6 +15,7 @@ content; the DB ``tools`` table is the read side for catalog/metadata.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,31 @@ def _sanitize(name: str) -> str:
     return cleaned or "unnamed-skill"
 
 
+_ORG_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+
+def _validate_traversal_safe(value: str, kind: str) -> str:
+    """Phase 11 (S1): reject path-traversal attempts in filesystem path
+    components BEFORE sanitization — ``_sanitize`` would silently strip
+    them, turning ``../../escape`` into a legal name."""
+    if not isinstance(value, str) or (
+        (".." in value) or ("/" in value) or ("\\" in value)
+    ):
+        raise ValueError(f"invalid {kind}: path separators not allowed")
+    return value
+
+
+def _org_dir(org_id: str | None):
+    """Phase 11 (S1): tenant skills live under ``orgs/<org_id>/`` inside
+    USER_SKILLS_DIR; ``org_id=None`` is the legacy/system tier at the
+    root (bundled + pre-migration files, visible to everyone)."""
+    if org_id is None:
+        return USER_SKILLS_DIR
+    if not _ORG_ID_RE.match(org_id or ""):
+        raise ValueError(f"invalid org_id: {org_id!r}")
+    return USER_SKILLS_DIR / "orgs" / org_id
+
+
 def write_skill_md(
     name: str,
     description: str,
@@ -59,8 +85,14 @@ def write_skill_md(
     assets: dict[str, bytes] | None = None,
     *,
     overwrite: bool = True,
+    org_id: str | None = None,
 ) -> str:
     """Write a SKILL.md file to ``~/.zhanlu/skills/<category>/<name>/SKILL.md``.
+
+    Phase 11 (S1, tenancy): when ``org_id`` is provided the skill is
+    written to ``~/.zhanlu/skills/orgs/<org_id>/<category>/<name>/`` and is
+    only visible to that org (see SkillsRegistry.get). ``org_id=None``
+    keeps the legacy root — the SYSTEM/LEGACY tier.
 
     The YAML frontmatter follows the same schema used by bundled marketplace
     skills so the existing ``parse_skill_file`` loader picks them up.
@@ -72,9 +104,11 @@ def write_skill_md(
 
     Returns the absolute path of the written SKILL.md file.
     """
+    _validate_traversal_safe(name, "skill name")
+    _validate_traversal_safe(category or "custom", "category")
     safe_category = _sanitize(category) if category else "custom"
     safe_name = _sanitize(name)
-    skill_dir = USER_SKILLS_DIR / safe_category / safe_name
+    skill_dir = _org_dir(org_id) / safe_category / safe_name
     skill_dir.mkdir(parents=True, exist_ok=True)
     md_path = skill_dir / "SKILL.md"
 
@@ -136,14 +170,20 @@ def write_skill_md(
     return str(md_path)
 
 
-def delete_skill_md(name: str, category: str = "custom") -> bool:
+def delete_skill_md(name: str, category: str = "custom",
+                    org_id: str | None = None) -> bool:
     """Remove the .md file (and its parent dir if empty) for a skill.
+
+    Phase 11 (S1): with ``org_id`` the delete is confined to that org's
+    directory — another org's (or the legacy tier's) files are untouchable.
 
     Returns True if something was deleted.
     """
+    _validate_traversal_safe(name, "skill name")
+    _validate_traversal_safe(category or "custom", "category")
     safe_category = _sanitize(category) if category else "custom"
     safe_name = _sanitize(name)
-    skill_dir = USER_SKILLS_DIR / safe_category / safe_name
+    skill_dir = _org_dir(org_id) / safe_category / safe_name
     md_path = skill_dir / "SKILL.md"
 
     deleted = False

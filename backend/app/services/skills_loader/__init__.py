@@ -65,6 +65,10 @@ class SkillMetadata:
     user_invocable: bool = True
     prerequisites: dict[str, Any] = field(default_factory=dict)
     source: str = "bundled"
+    # Phase 11 (S1): tenant ownership for org-scoped skills. None = the
+    # system/legacy tier (bundled + pre-migration root files), visible to
+    # every org. A non-None value restricts visibility to that org.
+    org_id: str | None = None
     scan_findings: list[dict[str, Any]] = field(default_factory=list)
     # Output formats this skill is compatible with (e.g. ["pptx"], ["docx"]).
     # Empty/absent means "universal" — compatible with every output_format.
@@ -180,6 +184,25 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[bool, list[str]]:
 # defensive fallback only when a skill's manifest/frontmatter declares no
 # ``compatible_formats``. Universal skills (research, methodology, etc.) are
 # intentionally absent from this map.
+# ── Phase 11 (S1): tenant scoping for DB-backed skill lookups ───────────────
+# System sources are visible to every org; tenant sources are visible only
+# to their owning org. ``org_id=None`` (unresolvable caller — background
+# jobs, legacy callers) scopes to the legacy default tier + system sources.
+SKILL_SYSTEM_SOURCES = ("builtin", "marketplace")
+SKILL_TENANT_SOURCES = ("custom", "marketplace_user")
+
+
+def _skill_tenant_filters(Tool, name: str, org_id: str | None) -> list:
+    """Filter list for Tool-row skill lookups enforcing org tenancy."""
+    from sqlalchemy import or_
+
+    org = org_id or "default-org"
+    return [
+        Tool.name == name,
+        or_(Tool.org_id == org, Tool.source.in_(SKILL_SYSTEM_SOURCES)),
+    ]
+
+
 _FORMAT_BOUND_SKILL_NAMES: dict[str, list[str]] = {
     "pptx": ["pptx"],
     "ppt-deck-builder": ["pptx"],
@@ -510,22 +533,49 @@ class SkillsRegistry:
     def __init__(self, skills_dir: str = "skills"):
         self.skills_dir = Path(skills_dir)
         self._skills: dict[str, SkillMetadata] = {}
+        # Phase 11 (S1): tenant tier keyed by (name, org_id) so duplicate
+        # names can coexist across organizations.
+        self._org_skills: dict[tuple[str, str], SkillMetadata] = {}
         self._loaded = False
 
     def load(self) -> dict[str, SkillMetadata]:
-        """Load all skills from all sources."""
+        """Load all skills from all sources.
+
+        Phase 11 (S1): skills under ``<user_dir>/orgs/<org_id>/`` are
+        TENANT-OWNED (tagged with their org); the legacy root and the
+        bundled directory are the system/legacy tier (org_id=None)."""
         if self._loaded:
             return self._skills
         if self.skills_dir.exists():
             self._load_from_dir(self.skills_dir, source="bundled")
-        user_dir = Path.home() / ".zhanlu" / "skills"
+        try:
+            from app.services.skill_sync import USER_SKILLS_DIR as _user_dir
+            user_dir = Path(_user_dir)
+        except Exception:  # noqa: BLE001 — loader must work standalone
+            user_dir = Path.home() / ".zhanlu" / "skills"
         if user_dir.exists():
-            self._load_from_dir(user_dir, source="user")
+            # exclude the tenant tier — orgs/<org>/ are loaded separately
+            # below and tagged with their owning org
+            self._load_from_dir(user_dir, source="user",
+                                exclude_subdirs=("orgs",))
+            # Tenant tier: orgs/<org_id>/…
+            orgs_root = user_dir / "orgs"
+            if orgs_root.exists():
+                for org_dir in sorted(orgs_root.iterdir()):
+                    if not org_dir.is_dir():
+                        continue
+                    before = set(self._skills)
+                    self._load_from_dir(org_dir, source="user")
+                    for name in set(self._skills) - before:
+                        skill = self._skills.pop(name)
+                        skill.org_id = org_dir.name
+                        self._org_skills[(name, org_dir.name)] = skill
         self._loaded = True
         logger.info("Loaded %d skills from %s", len(self._skills), self.skills_dir)
         return self._skills
 
-    def _load_from_dir(self, directory: Path, source: str = "bundled") -> None:
+    def _load_from_dir(self, directory: Path, source: str = "bundled",
+                       exclude_subdirs: tuple[str, ...] = ()) -> None:
         """Load skills from a directory tree.
 
         **Compat shim** (zero-downtime): for each skill folder, checks
@@ -539,11 +589,16 @@ class SkillsRegistry:
         if not directory.exists():
             return
 
+        def _excluded(path: Path) -> bool:
+            return any(part in exclude_subdirs for part in path.parts)
+
         seen_dirs: set[Path] = set()
 
         # Pass 1: manifest.yaml → skill package (preferred)
         for manifest_path in sorted(directory.rglob("manifest.yaml")):
             pkg_dir = manifest_path.parent
+            if _excluded(pkg_dir):
+                continue
             # Skip if we already loaded this dir via SKILL.md scan
             if pkg_dir in seen_dirs:
                 continue
@@ -555,6 +610,8 @@ class SkillsRegistry:
         # Pass 2: SKILL.md → legacy fallback
         for md_file in sorted(directory.rglob("SKILL.md")):
             pkg_dir = md_file.parent
+            if _excluded(pkg_dir):
+                continue
             if pkg_dir in seen_dirs:
                 continue
             # Skip if any ancestor directory already has a manifest.yaml
@@ -570,15 +627,33 @@ class SkillsRegistry:
                     continue
                 self._skills[skill.name] = skill
 
-    def get(self, name: str) -> SkillMetadata | None:
+    def get(self, name: str, org_id: str | None = None) -> SkillMetadata | None:
+        """Resolve a skill with tenant visibility rules.
+
+        * ``org_id`` given: the org's OWN tenant skills first, then the
+          system/legacy tier. Another org's skills NEVER resolve (no
+          existence leak).
+        * ``org_id`` omitted (org-less context): only the system/legacy
+          tier — an org-scoped skill is invisible.
+        """
         if not self._loaded:
             self.load()
+        if org_id:
+            owned = self._org_skills.get((name, org_id))
+            if owned is not None:
+                return owned
         return self._skills.get(name)
 
-    def list_skills(self, category: str | None = None) -> list[SkillMetadata]:
+    def list_skills(self, category: str | None = None,
+                    org_id: str | None = None) -> list[SkillMetadata]:
+        """List skills visible to ``org_id`` (system tier + that org's own
+        tenant skills). ``org_id=None`` sees only the system tier."""
         if not self._loaded:
             self.load()
         skills = list(self._skills.values())
+        if org_id:
+            skills += [s for (n, o), s in self._org_skills.items()
+                       if o == org_id]
         if category:
             skills = [s for s in skills if s.category == category]
         return skills
@@ -588,14 +663,19 @@ class SkillsRegistry:
             self.load()
         return sorted(set(s.category for s in self._skills.values()))
 
-    def search(self, query: str, limit: int = 10) -> list[SkillMetadata]:
+    def search(self, query: str, limit: int = 10,
+               org_id: str | None = None) -> list[SkillMetadata]:
         if not self._loaded:
             self.load()
         tokens = _search_tokens(query)
         if not tokens:
             return []
         scored: list[tuple[float, SkillMetadata]] = []
-        for skill in self._skills.values():
+        candidates = list(self._skills.values())
+        if org_id:
+            candidates += [s for (n, o), s in self._org_skills.items()
+                           if o == org_id]
+        for skill in candidates:
             score = _score_skill(
                 query,
                 name=skill.name,
@@ -617,6 +697,7 @@ class SkillsRegistry:
 
     def reload(self) -> dict[str, SkillMetadata]:
         self._skills.clear()
+        self._org_skills.clear()
         self._loaded = False
         return self.load()
 
@@ -725,8 +806,11 @@ def get_skills_registry() -> SkillsRegistry:
     return _registry
 
 
-def get_skill(name: str) -> SkillMetadata | None:
-    return get_skills_registry().get(name)
+def get_skill(name: str, org_id: str | None = None) -> SkillMetadata | None:
+    """Resolve a skill with tenant visibility (Phase 11 S1): org-scoped
+    skills resolve only for their owning org; the system/legacy tier is
+    visible to everyone."""
+    return get_skills_registry().get(name, org_id=org_id)
 
 
 def get_skill_dir(name: str) -> str | None:
@@ -793,8 +877,12 @@ def search_skills(query: str, limit: int = 10) -> list[SkillMetadata]:
     return get_skills_registry().search(query, limit)
 
 
-def _lookup_skill_summary(name: str, db=None) -> str | None:
+def _lookup_skill_summary(name: str, db=None, org_id: str | None = None) -> str | None:
     """Look up the ``summary`` field for a skill (DB first, then FS fallback).
+
+    Phase 11 (S1): the DB lookup is org-scoped — a caller sees system
+    sources (builtin/marketplace) and its own org's rows, never another
+    org's. ``org_id=None`` scopes to the legacy default tier.
 
     Returns the summary string, or ``None`` if no summary is available.
     Falls back to the first 200 chars of the description if no explicit
@@ -807,7 +895,7 @@ def _lookup_skill_summary(name: str, db=None) -> str | None:
         try:
             from app.models.tool import Tool
             tool = db.query(Tool).filter(
-                Tool.name == name,
+                *_skill_tenant_filters(Tool, name, org_id),
                 Tool.is_deleted == False,
                 Tool.enabled == True,
             ).first()
@@ -819,7 +907,7 @@ def _lookup_skill_summary(name: str, db=None) -> str | None:
             logger.debug("DB summary lookup for '%s' failed (non-fatal): %s", name, e)
 
     # 2. Fallback to filesystem registry
-    skill = registry.get(name)
+    skill = registry.get(name, org_id=org_id)
     if skill:
         if skill.description:
             return skill.description[:200]
@@ -848,7 +936,7 @@ def _resolve_skill_compatible_formats(name: str, db=None) -> list[str]:
         try:
             from app.models.tool import Tool
             tool = db.query(Tool).filter(
-                Tool.name == name,
+                *_skill_tenant_filters(Tool, name, org_id),
                 Tool.is_deleted == False,
                 Tool.enabled == True,
             ).first()
@@ -958,8 +1046,13 @@ def get_skill_prompt_for_agent(skill_names: list[str], db=None) -> str:
     return "## Loaded Skills\n\n" + "\n\n---\n\n".join(sections)
 
 
-def unified_search(query: str, limit: int = 10, db=None) -> list[dict[str, Any]]:
+def unified_search(query: str, limit: int = 10, db=None,
+                   org_id: str | None = None) -> list[dict[str, Any]]:
     """Search skills across both the DB ``tools`` table and the filesystem registry.
+
+    Phase 11 (S1): the DB arm is org-scoped (system sources + the caller's
+    org); the FS arm lists only the caller's org tenant skills + the
+    system tier.
 
     Returns a list of dicts with keys: ``name``, ``description``, ``category``,
     ``trigger``, ``source`` ("db" or "filesystem"), and ``kind``.
@@ -968,6 +1061,7 @@ def unified_search(query: str, limit: int = 10, db=None) -> list[dict[str, Any]]
     seen: set[str] = set()
     results: list[dict[str, Any]] = []
     tokens = _search_tokens(query)
+    _org = org_id or "default-org"
 
     def _add(name: str, description: str, category: str, trigger: str, source: str, kind: str) -> None:
         if not name or name in seen:
@@ -993,13 +1087,15 @@ def unified_search(query: str, limit: int = 10, db=None) -> list[dict[str, Any]]
             "_score": score,
         })
 
-    # 1. Search DB tools table
+    # 1. Search DB tools table (Phase 11: org-scoped)
     if db is not None:
         try:
             from app.models.tool import Tool
             q = db.query(Tool).filter(
                 Tool.is_deleted == False,  # noqa: E712
                 Tool.enabled == True,  # noqa: E712
+                or_(Tool.org_id == _org,
+                    Tool.source.in_(SKILL_SYSTEM_SOURCES)),
             )
             if tokens:
                 import sqlalchemy as sa
@@ -1020,8 +1116,9 @@ def unified_search(query: str, limit: int = 10, db=None) -> list[dict[str, Any]]
         except Exception as e:
             logger.debug("DB skill search failed (non-fatal): %s", e)
 
-    # 2. Search filesystem registry
-    fs_skills = get_skills_registry().search(query, limit=limit * 2)
+    # 2. Search filesystem registry (Phase 11: org-scoped candidates)
+    fs_skills = get_skills_registry().search(query, limit=limit * 2,
+                                             org_id=org_id or None)
     for skill in fs_skills:
         _add(skill.name, skill.description, skill.category, skill.trigger or "", "filesystem", "system_skill")
 

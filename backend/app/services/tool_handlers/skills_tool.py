@@ -29,6 +29,35 @@ from app.services.tool_registry import registry
 logger = logging.getLogger(__name__)
 
 
+def _resolve_caller_org(db: Optional[Session], user_id: Optional[str],
+                        context: Optional[dict] = None) -> str | None:
+    """Phase 11 (S1): resolve the VERIFIED caller organization for skill
+    execution authorization.
+
+    Resolution order: the tenant middleware's JWT-pinned org (ContextVar),
+    then the authenticated user's DB row. Client-supplied ``org_id`` in
+    tool arguments or the context dict is NEVER trusted — it is not even
+    read. Returns None when the caller's org cannot be verified (callers
+    must fail closed for tenant-scoped skills).
+    """
+    try:
+        from app.services.tenant_context import get_tenant_org
+        org = get_tenant_org()
+        if org:
+            return org
+    except Exception:  # noqa: BLE001
+        pass
+    if user_id and db is not None:
+        try:
+            from app.models.user import User
+            _u = db.query(User).filter(User.id == user_id).first()
+            if _u is not None:
+                return getattr(_u, "org_id", None)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
 async def _skills_tool(
     args: dict,
     db: Optional[Session] = None,
@@ -36,6 +65,10 @@ async def _skills_tool(
     context: Optional[dict] = None,
 ) -> dict:
     action = (args.get("action") or "search").lower()
+
+    # Phase 11 (S1): VERIFIED caller organization for every action —
+    # resolved from tenant middleware / user row, never from args.
+    _caller_org = _resolve_caller_org(db, user_id, context)
 
     if action == "list_categories":
         try:
@@ -50,7 +83,8 @@ async def _skills_tool(
         limit = min(int(args.get("limit", 20)), 100)
         try:
             from app.services.skills_loader import unified_search
-            results = unified_search(query, limit=limit, db=db)
+            results = unified_search(query, limit=limit, db=db,
+                                     org_id=_caller_org)
             return {"success": True, "query": query, "count": len(results), "results": results}
         except Exception as exc:
             return {"success": False, "error": f"Search failed: {exc}"}
@@ -71,7 +105,9 @@ async def _skills_tool(
             # loading skills that all "don't exist" instead of calling
             # create_agent to actually build the agent.
             from app.services.skills_loader import get_skill, list_skill_scripts
-            meta = get_skill(name)
+            # Phase 11 (S1): org-scoped resolution — another org's tenant
+            # skill resolves to None (no existence leak)
+            meta = get_skill(name, org_id=_caller_org)
             if meta is None:
                 SkillExecutionRecorder.record_from_context(name, "load", "failed", context, int((time.monotonic()-_start)*1000), f"Skill not found: {name}")
                 return {"success": False, "error": f"Skill not found: {name}"}
@@ -103,7 +139,7 @@ async def _skills_tool(
         _start = time.monotonic()
         try:
             from app.services.skills_loader import get_skill
-            meta = get_skill(name)
+            meta = get_skill(name, org_id=_caller_org)
             if meta is None:
                 SkillExecutionRecorder.record_from_context(name, "execute", "failed", context, int((time.monotonic()-_start)*1000), f"Skill not found: {name}")
                 return {"success": False, "error": f"Skill not found: {name}"}
@@ -148,6 +184,12 @@ async def _skills_tool(
         # The skill must exist in the curated registry (guard: unknown
         # skills are never raw-exec'd). See _run_skill_script for the
         # bundle + runner construction.
+        # Phase 11 (S1): the caller may only run skills visible to their
+        # org — get_skill resolves None for another org's tenant skill.
+        _run_name = (args.get("name") or "").strip()
+        from app.services.skills_loader import get_skill as _gs
+        if _run_name and _gs(_run_name, org_id=_caller_org) is None:
+            return {"success": False, "error": f"Skill not found: {_run_name}"}
         name = (args.get("name") or "").strip()
         entry_point = (args.get("entry_point") or "").strip()
         if not name:

@@ -339,6 +339,10 @@ def install_skill(skill_id: str, db: Session = Depends(get_db), user=Depends(get
     if existing:
         return {"success": True, "already_installed": True, "tool_id": existing.id, "skill_name": sk.name}
 
+    # Phase 11 (S1): the installed skill belongs to the INSTALLER's org —
+    # written to that org's skills directory and stamped on the Tool row
+    # so other tenants can never see it.
+    _install_org = getattr(user, "org_id", None) or "default-org"
     write_skill_md(
         name=sk.name,
         description=sk.description,
@@ -347,6 +351,7 @@ def install_skill(skill_id: str, db: Session = Depends(get_db), user=Depends(get
         version=sk.version,
         author=sk.author or "external",
         tags=sk.tags or [],
+        org_id=_install_org,
     )
     tool = Tool(
         name=sk.name,
@@ -361,6 +366,7 @@ def install_skill(skill_id: str, db: Session = Depends(get_db), user=Depends(get
         enabled=True,
         status="active",
         created_by_id=user_id,
+        org_id=_install_org,
     )
     db.add(tool)
     sk.install_count = (sk.install_count or 0) + 1
