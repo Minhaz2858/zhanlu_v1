@@ -52,6 +52,9 @@ AUDIT_EVENT_TYPES = [
     # Automation control plane (written by automation/control_plane.py +
     # routers/automation_api.py — reconciled 2026-11-03, Phase 9)
     "automation_confirmed", "automation_run_forced",
+    # Authentication lifecycle (Phase 11 S6 — routers/auth.py; no tokens
+    # or credentials in details, ids/outcomes only)
+    "auth_login_success", "auth_login_failed",
 ]
 AUDIT_EVENT_SOURCES = [
     "nl2sql", "studio", "agent", "governance", "system", "user",
@@ -63,6 +66,8 @@ AUDIT_EVENT_SOURCES = [
     "mcp",
     # automation control plane (Phase 9 reconciliation)
     "automation",
+    # authentication lifecycle (Phase 11 S6)
+    "auth",
 ]
 # "completed" (onboarding runs), "error" (outcome_verified failures) and
 # "positive" (escalation CSAT) are written in production — registered.

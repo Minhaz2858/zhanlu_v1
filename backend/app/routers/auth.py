@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.deps import get_db, get_current_user_required
 from app.middleware.rate_limit import rate_limit
+from app.models.audit_event import AuditEvent
 from app.models.user import User
 from app.services.auth_service import auth_service
 from app.services.mail_service import send_otp_email
@@ -54,10 +55,31 @@ async def login(
     ).first()
 
     if not user or not auth_service.verify_password(password, user.password_hash):
+        # Phase 11 (S6): failed logins are security-relevant — audit them
+        # (email recorded for correlation; never the password).
+        try:
+            db.add(AuditEvent(
+                event_type="auth_login_failed", event_source="auth",
+                actor_type="user", actor_id=None, actor_name=str(email)[:100],
+                org_id=None,
+                details={"reason": "invalid_credentials"}))
+            db.commit()
+        except Exception:  # noqa: BLE001 — audit must never block authn
+            db.rollback()
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     access_token = auth_service.create_access_token(user.id, db)
     refresh_token = auth_service.create_refresh_token(user.id, db)
+    # Phase 11 (S6): successful logins audited (who, which org — no
+    # tokens or credentials in audit rows).
+    try:
+        db.add(AuditEvent(
+            event_type="auth_login_success", event_source="auth",
+            actor_type="user", actor_id=user.id, actor_name=None,
+            org_id=user.org_id, details={"app_id": str(app_id)[:64]}))
+        db.commit()
+    except Exception:  # noqa: BLE001 — audit must never block authn
+        db.rollback()
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
