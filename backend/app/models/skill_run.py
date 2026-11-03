@@ -8,7 +8,7 @@ cost, and error if any.  Supports retry via attempt_number.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Float, DateTime, Text, JSON
+from sqlalchemy import String, Integer, Float, DateTime, Text, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -20,6 +20,14 @@ class SkillRun(TimestampedBase):
     """A single skill execution — input, output, timing, cost, retries."""
 
     __tablename__ = "skill_runs"
+    # Phase 11 (S3): index parity with migration 014 — the indexes
+    # below were created by the migration but never declared on the model,
+    # so metadata-built (create_all) DBs diverged from alembic DBs.
+    __table_args__ = (
+        Index("ix_skill_runs_skill_profile_id", 'skill_profile_id'),
+        Index("ix_skill_runs_execution_id", 'execution_id'),
+        Index("ix_skill_runs_status", 'status'),
+    )
 
     # References
     skill_profile_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)

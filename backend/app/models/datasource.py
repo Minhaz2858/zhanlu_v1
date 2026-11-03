@@ -8,7 +8,7 @@ field determines which adapter (SQLite, Postgres) is used at runtime.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Boolean, DateTime, Text, JSON
+from sqlalchemy import Index, String, Integer, Boolean, DateTime, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -21,6 +21,11 @@ class Datasource(TimestampedBase):
     """A datasource connection — engine + config + schema snapshot."""
 
     __tablename__ = "datasources"
+    # Phase 11 (S3): index parity with migration 014.
+    __table_args__ = (
+        Index("ix_datasources_engine", "engine"),
+        Index("ix_datasources_name", "name"),
+    )
 
     # Identity
     name: Mapped[str] = mapped_column(String(200), nullable=False)

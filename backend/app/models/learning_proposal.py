@@ -8,7 +8,7 @@ approved → applied or rejected) and track the resulting impact.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Float, DateTime, Text, JSON
+from sqlalchemy import Index, String, Float, DateTime, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -24,6 +24,11 @@ class LearningProposal(TimestampedBase):
     """A proposed improvement from experience-based learning."""
 
     __tablename__ = "learning_proposals"
+    # Phase 11 (S3): index parity with migration 014.
+    __table_args__ = (
+        Index("ix_learning_proposals_agent_app_id", "agent_app_id"),
+        Index("ix_learning_proposals_status", "status"),
+    )
 
     # References
     experience_entry_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)

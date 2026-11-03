@@ -7,7 +7,7 @@ how long it took, what tokens were consumed, and the result.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Float, DateTime, Text, JSON
+from sqlalchemy import String, Integer, Float, DateTime, Text, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -20,6 +20,15 @@ class AgentInvocation(TimestampedBase):
     """A single agent invocation — full request/response trace record."""
 
     __tablename__ = "agent_invocations"
+    # Phase 11 (S3): index parity with migration 014 — the indexes
+    # below were created by the migration but never declared on the model,
+    # so metadata-built (create_all) DBs diverged from alembic DBs.
+    __table_args__ = (
+        Index("ix_agent_invocations_agent_app_id", 'agent_app_id'),
+        Index("ix_agent_invocations_execution_id", 'execution_id'),
+        Index("ix_agent_invocations_status", 'status'),
+        Index("ix_agent_invocations_trace_id", 'trace_id'),
+    )
 
     # References
     agent_app_id: Mapped[str] = mapped_column(String(36), nullable=False)

@@ -7,7 +7,7 @@ display name, data type hint, and a list of synonyms.  Relationship hints
 
 from typing import Optional
 
-from sqlalchemy import String, Boolean, Text, JSON
+from sqlalchemy import Index, String, Boolean, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -17,6 +17,11 @@ class SemanticMapping(TimestampedBase):
     """Semantic layer — maps raw (table, column) to human-readable metadata."""
 
     __tablename__ = "semantic_mappings"
+    # Phase 11 (S3): index parity with migration 014.
+    __table_args__ = (
+        Index("ix_semantic_mappings_table_column", "table_name"),
+        Index("ix_semantic_mappings_datasource_id", "datasource_id"),
+    )
 
     # References
     datasource_id: Mapped[str] = mapped_column(String(36), nullable=False)

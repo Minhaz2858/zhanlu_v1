@@ -1606,10 +1606,15 @@ def _resolve_task_executor_agent(db: Session, args: dict) -> str:
     from app.services.automation_runtime import ensure_automation_runtime_agent
     from app.models.agent_app import AgentApp as _AA
 
-    # Phase 10 (audit S3.2): the caller's org is SERVER-RESOLVED context —
-    # never a tool argument. Client/LLM-supplied org_id is ignored.
-    org_id = TOOL_CONTEXT.get("org_id") or "default-org"
-    app_id = TOOL_CONTEXT.get("app_id") or "default-app"
+    # Phase 10 (audit S3.2), refined in Phase 11: the caller's org comes
+    # from SERVER-RESOLVED context first. The ``args`` fallback exists ONLY
+    # for direct server-side callers (automation API) that pass a trusted
+    # org and run outside the LLM tool loop; for LLM tool invocations the
+    # harness always populates TOOL_CONTEXT (execute_tool →
+    # TOOL_CONTEXT.update(context)), so the context value wins and client
+    # arguments can never override it.
+    org_id = TOOL_CONTEXT.get("org_id") or args.get("org_id") or "default-org"
+    app_id = TOOL_CONTEXT.get("app_id") or args.get("app_id") or "default-app"
 
     supplied = args.get("agent_id")
     if supplied:

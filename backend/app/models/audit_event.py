@@ -8,7 +8,7 @@ decisions, and row/cost metrics for NL2SQL calls.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, Text, JSON
+from sqlalchemy import Index, String, Integer, DateTime, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -76,6 +76,12 @@ class AuditEvent(TimestampedBase):
     """Structured audit event with NL2SQL-specific fields and policy tracking."""
 
     __tablename__ = "audit_events"
+    # Phase 11 (S3): index parity with migration 014.
+    __table_args__ = (
+        Index("ix_audit_events_event_type", "event_type"),
+        Index("ix_audit_events_occurred_at", "occurred_at"),
+        Index("ix_audit_events_trace_id", "trace_id"),
+    )
 
     # Event identity
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)

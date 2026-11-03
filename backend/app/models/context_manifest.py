@@ -8,7 +8,7 @@ relevant domain knowledge, policies, or facts into the LLM prompt.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Boolean, DateTime, Text, JSON
+from sqlalchemy import Index, String, Integer, Boolean, DateTime, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -18,6 +18,11 @@ class ContextManifest(TimestampedBase):
     """A standalone, versioned context record for prompt injection."""
 
     __tablename__ = "context_manifests"
+    # Phase 11 (S3): index parity with migration 014.
+    __table_args__ = (
+        Index("ix_context_manifests_is_active", "is_active"),
+        Index("ix_context_manifests_context_type", "context_type"),
+    )
 
     # Identity
     name: Mapped[str] = mapped_column(String(200), nullable=False)

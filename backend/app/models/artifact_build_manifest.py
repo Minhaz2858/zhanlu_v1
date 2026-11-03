@@ -8,7 +8,7 @@ output file size, timing, and error messages.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, Text, JSON
+from sqlalchemy import Index, String, Integer, DateTime, Text, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -20,6 +20,13 @@ class ArtifactBuildManifest(TimestampedBase):
     """Build manifest — template ref + params → artifact version."""
 
     __tablename__ = "artifact_build_manifests"
+    # Phase 11 (S3): index parity with migration 014 — the indexes
+    # below were created by the migration but never declared on the model,
+    # so metadata-built (create_all) DBs diverged from alembic DBs.
+    __table_args__ = (
+        Index("ix_artifact_build_manifests_artifact_id", "artifact_id"),
+        Index("ix_artifact_build_manifests_status", "status"),
+    )
 
     # References
     artifact_id: Mapped[str] = mapped_column(String(36), nullable=False)

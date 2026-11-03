@@ -20,6 +20,12 @@ class AgentApp(TimestampedBase):
     project_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("projects.id"), nullable=True, index=True
     )
+    # Phase 11 (S3): migration 020 adds this column (+ index) to the DB but
+    # the model never declared it — metadata-built test DBs (T1 create_all)
+    # diverged from alembic-migrated DBs. Declared here for parity.
+    source_market_agent_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
 
     # Capabilities and model config
     capabilities: Mapped[list | None] = mapped_column(JSON, nullable=True)

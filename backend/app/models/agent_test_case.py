@@ -8,7 +8,7 @@ run counts.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, DateTime, Text, JSON
+from sqlalchemy import String, Integer, DateTime, Text, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -21,6 +21,13 @@ class AgentTestCase(TimestampedBase):
     """A test case that verifies agent behavior with known inputs/outputs."""
 
     __tablename__ = "agent_test_cases"
+    # Phase 11 (S3): index parity with migration 014 — the indexes
+    # below were created by the migration but never declared on the model,
+    # so metadata-built (create_all) DBs diverged from alembic DBs.
+    __table_args__ = (
+        Index("ix_agent_test_cases_agent_app_id", 'agent_app_id'),
+        Index("ix_agent_test_cases_status", 'status'),
+    )
 
     # References
     agent_app_id: Mapped[str] = mapped_column(String(36), nullable=False)

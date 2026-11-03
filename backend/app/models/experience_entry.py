@@ -7,7 +7,7 @@ pipeline that surfaces patterns and proposes improvements.
 
 from typing import Optional
 
-from sqlalchemy import String, Integer, Float, Text, JSON
+from sqlalchemy import Index, String, Integer, Float, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -20,6 +20,12 @@ class ExperienceEntry(TimestampedBase):
     """A learning feedback entry — outcome, rating, feedback, metadata."""
 
     __tablename__ = "experience_entries"
+    # Phase 11 (S3): index parity with migration 014.
+    __table_args__ = (
+        Index("ix_experience_entries_outcome", "outcome"),
+        Index("ix_experience_entries_execution_id", "execution_id"),
+        Index("ix_experience_entries_entry_type", "entry_type"),
+    )
 
     # References
     execution_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)

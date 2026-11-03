@@ -7,7 +7,7 @@ resolver to map natural language queries to metric references.
 
 from typing import Optional
 
-from sqlalchemy import String, Boolean, Text, JSON, Integer
+from sqlalchemy import Index, String, Boolean, Text, JSON, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -20,6 +20,11 @@ class MetricDefinition(TimestampedBase):
     """A business metric with SQL definition, synonyms, and display metadata."""
 
     __tablename__ = "metric_definitions"
+    # Phase 11 (S3): index parity with migration 014.
+    __table_args__ = (
+        Index("ix_metric_definitions_datasource_id", "datasource_id"),
+        Index("ix_metric_definitions_name", "name"),
+    )
 
     # Identity
     name: Mapped[str] = mapped_column(String(200), nullable=False)

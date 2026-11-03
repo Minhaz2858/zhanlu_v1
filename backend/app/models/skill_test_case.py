@@ -8,7 +8,7 @@ Tracks pass/fail history and run counts.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Boolean, DateTime, Text, JSON
+from sqlalchemy import String, Integer, Boolean, DateTime, Text, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -21,6 +21,13 @@ class SkillTestCase(TimestampedBase):
     """A test case that verifies skill behavior with known inputs/outputs."""
 
     __tablename__ = "skill_test_cases"
+    # Phase 11 (S3): index parity with migration 014 — the indexes
+    # below were created by the migration but never declared on the model,
+    # so metadata-built (create_all) DBs diverged from alembic DBs.
+    __table_args__ = (
+        Index("ix_skill_test_cases_skill_profile_id", 'skill_profile_id'),
+        Index("ix_skill_test_cases_status", 'status'),
+    )
 
     # References
     skill_profile_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
