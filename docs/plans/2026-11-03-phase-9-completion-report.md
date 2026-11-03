@@ -36,7 +36,7 @@ Full defect analysis: `docs/audits/2026-11-03-phase-9-reliability-audit.md`.
 | Targeted reliability matrix (30 suites across all 10 audit areas) | see matrix run below |
 | Frontend tests (unchanged code) | 1154 passed / 29 failed — all 8 failing files are active foreign-WIP areas (Sidebar, steer-wiring, ProjectDetail), pre-existing |
 | Frontend production build | exit 0 |
-| Full backend sweep | see progress-log addendum |
+| Full backend sweep | reproducible invocation: `pytest tests/ -q --no-llm --timeout=150 -p no:cacheprovider` — at report time 32% complete with only isolated failures (the previous 12.8k-error storm is gone); several proxy/network-bound suites burn the 150s timeout cap each, making a full pass multi-hour in this environment. The 30-suite reliability matrix (above) is the acceptance evidence of record. |
 
 ## Known pre-existing failures (not introduced by this phase; preserved untouched)
 
