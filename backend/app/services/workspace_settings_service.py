@@ -27,6 +27,15 @@ logger = logging.getLogger(__name__)
 
 
 # Key constants — keep them in one place so callers don't drift.
+# DEPRECATED (Phase 8 T8-12, 2026-11-03): auto-bind silently unions every
+# workspace KB into every agent — replaced by explicit AgentDataBinding
+# rows (agent_binding_service). The flag remains honored UNTIL a workspace
+# migrates via POST /api/workspace-settings/migrate-auto-bind, which
+# materializes the effective set into explicit bindings and stamps
+# ``auto_bind_migrated_at`` (the runtime then stops widening scope).
+# REMOVAL CRITERIA: all workspaces migrated (no missing auto_bind_migrated_at)
+# AND one full release cycle with zero non-deprecated readers. Do not add
+# new consumers of this key.
 KEY_AUTO_BIND_ALL_DATASOURCES = "auto_bind_all_datasources"
 
 # Default values for known flags. Used when no row exists.

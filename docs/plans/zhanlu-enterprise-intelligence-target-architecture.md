@@ -981,3 +981,23 @@ final integration slice **314 passed / 0 failed** across 35 suites
 datasource pinning, BCS, planning, 7B, 6E/6F, p7, ontology, document
 review, phase-5 e2e). No migrations; no frontend changes; no new
 feature flags (existing flags untouched).
+
+## Phase 8 — Agent Harness source selection, explicit bindings & AgentRun provenance (2026-11-03, IN PROGRESS → core complete)
+
+Spec: `docs/superpowers/specs/2026-11-02-phase-8-agent-harness-source-selection-provenance.md`; roadmap: `2026-11-02-phase-8-implementation-roadmap.md`; ADRs: `2026-11-02-phase-8-architecture-decisions.md`.
+
+Shipped (T8-1..T8-12):
+- **T8-1** `92132973c`: AgentDataBinding `is_enabled` + partial unique index `(agent_app_id, datasource_id) WHERE is_deleted=false` + missing tenant RLS (migration 124).
+- **T8-2** `aecc44d64`: `agent_binding_service` — sole writer (upsert idempotent + resurrect-on-rebind, enable/disable, revoke, list; fail-closed org walls on agent AND datasource); every write rebuilds the `AgentApp.knowledge_bases` projection in the same transaction; runtime `_agent_bound_ids_binding_aware` — bindings authoritative when present, JSON fallback otherwise; revocation effective NEXT turn (per-turn resolution, no cache).
+- **T8-3** `a42a78881`: studio binding endpoints routed through the service (they previously inserted rows with NO org validation and called a nonexistent `to_dict`); PATCH/DELETE added; `GET /agent-studio/{id}/source-descriptors` structured contract (403 cross-org / empty for foreign agents).
+- **T8-4** `12030dd55`: DataSourcesSection binding editor (descriptor mode w/ readiness, enable toggle, revoke; legacy JSON picker preserved verbatim on API failure; foreign chip-crash fix untouched via surgical staging); AgentConfig passes agentId.
+- **T8-5** `1d11029f0`: auto-bind widening stops once `auto_bind_migrated_at` is set (D8 gate; lookup failure fails toward current behavior).
+- **T8-6** `687b1176c`: delegation provenance linkage — `provenance_parent_refs` copies ONLY parent agent_name/agent_app_id/run_id into the child context; bindings/permissions never transfer.
+- **T8-7** `d2b748842`: MCP verified-context pass-through — allow-listed `_zhanlu_context` keys only; anonymous calls keep the no-context fallback; permission flags can never ride along.
+- **T8-8** `284ec3566`: migration 125 (`agent_runs.provenance_json` + tenant RLS); `build_run_provenance` — prov-v1 envelope at the `finalize_run` choke point, post-commit fail-open; status verbatim; tool entries retrieved-only (influenced/supports_answer never claimed); refs only (no CoT/raw inputs); **fixed latent append_step bug** (kwargs didn't match model columns — every call failed).
+- **T8-9** `d452bef91`: `GET /agent-runs/{id}/provenance` — org from persisted caller_context; cross-org 404; honest absence.
+- **T8-10** `6614c9bd1`: RunProvenancePanel (tools, failed-step honesty, verbatim status, parent linkage; "not recorded" honesty).
+- **T8-11** `acd4d7ee6`: `POST /workspace-settings/migrate-auto-bind` — materializes the effective set preserving manual bindings, stamps migration state; idempotent; org-admin only.
+- **T8-12**: flag deprecation documented in `workspace_settings_service` (removal criteria: all workspaces migrated + one release cycle, zero non-deprecated readers).
+
+Deferred (documented): Chat.jsx footer wiring of RunProvenancePanel (Chat.jsx is heavily foreign-dirty — one-line insert when the WIP lands); per-agent binding permissions UI polish; auto-bind flag removal (gated per T8-12 criteria); MCP session-level auth mapping.
