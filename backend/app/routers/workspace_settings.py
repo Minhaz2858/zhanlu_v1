@@ -88,3 +88,73 @@ def update_settings(
         )
         db.commit()
     return get_settings(org_id=org, app_id=app_id, db=db, user=admin)
+
+
+@router.post("/migrate-auto-bind")
+def migrate_auto_bind(
+    org_id: str = "",
+    app_id: str = "default-app",
+    db: Session = Depends(get_db),
+    admin=Depends(require_org_admin),
+) -> dict:
+    """Phase 8 (T8-11/D8): materialize the auto-bind effective KB set into
+    explicit AgentDataBinding rows for every agent in the (org, app), then
+    stamp ``auto_bind_migrated_at`` — after which the runtime stops
+    widening scope (see data_source_runtime._maybe_extend_with_workspace_auto_bind).
+
+    Idempotent: existing bindings (manual or previously materialized) are
+    preserved via the binding service's upsert; a re-run creates nothing.
+    Org-admin only; org resolved from the verified user."""
+    from datetime import datetime, timezone
+
+    from app.models.agent_app import AgentApp
+    from app.models.agent_data_binding import AgentDataBinding
+    from app.models.knowledge_base import KnowledgeBase
+    from app.services.agent_binding_service import upsert_binding
+
+    org = _resolve_org(admin, org_id)
+
+    kbs = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.is_deleted == False,  # noqa: E712
+                KnowledgeBase.org_id == org,
+                KnowledgeBase.app_id == app_id)
+        .order_by(KnowledgeBase.name.asc())
+        .all()
+    )
+    agents = (
+        db.query(AgentApp)
+        .filter(AgentApp.is_deleted == False,  # noqa: E712
+                AgentApp.org_id == org,
+                AgentApp.app_id == app_id)
+        .all()
+    )
+
+    created = 0
+    before = db.query(AgentDataBinding).filter_by(
+        is_deleted=False).count()
+    for agent in agents:
+        existing = {
+            b.datasource_id for b in db.query(AgentDataBinding)
+            .filter(AgentDataBinding.agent_app_id == agent.id,
+                    AgentDataBinding.is_deleted == False)  # noqa: E712
+            .all()
+        }
+        for kb in kbs:
+            if kb.id in existing:
+                continue  # preserve manual/previously materialized bindings
+            upsert_binding(db, org, agent.id, kb.id, actor_id=admin.id)
+    after = db.query(AgentDataBinding).filter_by(is_deleted=False).count()
+    created = max(0, after - before)
+
+    stamp = datetime.now(timezone.utc).isoformat()
+    workspace_settings_service.set_value(
+        db, "auto_bind_migrated_at", stamp, org_id=org, app_id=app_id)
+    db.commit()
+
+    return {
+        "migrated_at": stamp,
+        "agents_materialized": len(agents),
+        "bindings_created": created,
+        "kb_count": len(kbs),
+    }
