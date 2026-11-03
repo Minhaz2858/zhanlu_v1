@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user_optional
+from app.deps import get_db, get_current_user_optional, get_current_user_required
 from app.services.harness.run_service import AgentRunService
 from app.models.user import User
 
@@ -151,6 +151,44 @@ def get_run(
         AgentRunStep.run_id == run_id, AgentRunStep.is_deleted == False
     ).order_by(AgentRunStep.step_index.asc()).all()
     return _to_run_out(run, steps)
+
+
+@router.get("/{run_id}/provenance")
+def get_run_provenance(
+    run_id: str,
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_current_user_required),
+):
+    """Return the run's canonical prov-v1 envelope (Phase 8 T8-9).
+
+    Org-scoped: the run's org comes from its persisted ``caller_context``;
+    a mismatched requester gets 404 (existence not disclosed cross-org).
+    A run without an envelope yet returns one honestly (null envelope)."""
+    import json as _json
+    from app.models.agent_run import AgentRun
+
+    run = db.query(AgentRun).filter(
+        AgentRun.run_id == run_id, AgentRun.is_deleted == False
+    ).first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+    try:
+        ctx = _json.loads(run.caller_context) if run.caller_context else {}
+    except Exception:
+        ctx = {}
+    run_org = ctx.get("org_id") or getattr(run, "org_id", None)
+    if user is not None and run_org and user.org_id != run_org:
+        raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+    envelope = None
+    if run.provenance_json:
+        try:
+            envelope = _json.loads(run.provenance_json)
+        except Exception:
+            envelope = None  # unreadable envelope reported honestly
+    if envelope:
+        return {"run_id": run_id, **envelope}
+    return {"run_id": run_id, "version": "prov-v1", "run": None,
+            "entries": []}  # honest: envelope not yet written
 
 
 @router.post("/{run_id}/resume", response_model=ResumeResponse)
