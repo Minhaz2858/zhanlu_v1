@@ -71,3 +71,46 @@ Full defect analysis: `docs/audits/2026-11-03-phase-9-reliability-audit.md`.
 - Re-run the full sweep to completion once the environment's proxy-dependent
   tests are marked/skipped — the `--no-llm` + `--timeout=150` invocation is the
   documented reproducible form.
+
+---
+
+# Closure addendum (2026-11-03, same day)
+
+**Phase 9 is CLOSED.** Verification evidence current as of HEAD `2acd748fb`:
+
+| Acceptance criterion | Disposition |
+|---|---|
+| No new regression attributable to Phase 9 | **VERIFIED** — reliability matrix 299/307 with all 8 failures stash-verified pre-existing at HEAD; the 22 Phase 9 tests (4 A1 + 13 D3-gate + 5 acceptance) re-run green; `app/models/audit_event.py` + all committed test files byte-identical to HEAD; the two surgically-staged app files retain only their foreign hunks uncommitted |
+| Both P0 fixes verified | **VERIFIED** — `test_tool_dispatch_session_isolation` + `test_automation_ungrounded_report_gate` + `test_e2e_enterprise_acceptance`: 22 passed (re-run at closure) |
+| Test-infrastructure baseline documented | **DONE** — audit §3.3 + reproducible invocation `pytest tests/ -q --no-llm --timeout=150 -p no:cacheprovider`; conftest fixes ride on uncommitted T1 WIP by design |
+| Remaining risks have explicit owners/dispositions | **DONE** — see disposition table below |
+| Full-sweep status honestly reported | **REPORTED** — see below |
+
+## Full-sweep status (honest report)
+
+The background sweep launched after the infra fixes reached ~35% and is
+still in flight (it slowed when the local proxy on :7897 died mid-run;
+each hung network test burned the 150s timeout). Two findings from it:
+
+1. **Order-dependent failure clusters at ~31-35%** (the document-family
+   region). All 15+ suites in that region **pass standalone on Phase 9 HEAD**
+   (`162 passed` when run directly; chat→document pairings also pass) —
+   cross-module contamination in full-sweep order, i.e. in-process global
+   state leaking across modules despite the T1 per-module DB truncation.
+   Classification: **infrastructure / unresolved** — owner: test-infra (T1)
+   track. Not attributable to Phase 9: the A1/D3 changes add no global
+   caches, and the region passes standalone both with and without the
+   Phase 9 app changes.
+2. The sweep cannot produce reproducible final numbers while the parallel
+   Phase 8.3 workstream mutates foreign files mid-run. The **30-suite
+   reliability matrix remains the acceptance evidence of record**.
+
+## Remaining-risk disposition table
+
+| Risk | Class | Owner | Disposition |
+|------|-------|-------|-------------|
+| Migration-020 `project`-column drift (models still declare dropped column; foreign-WIP `project_kb_membership.py` queries `KnowledgeBase.project`) | DEFERRED | model-migration track | 31F+12E in `tests/migrations/` (stable, re-confirmed); blocked on foreign WIP (`models/agent_app.py` modified, service untracked) — must be reconciled by/with the WIP owner |
+| Full-sweep order dependence (document region) | infrastructure | test-infra (T1) track | recorded with minimal repro data; requires global-state leak hunt, out of Phase 9 scope |
+| 8 matrix failures (2 scope-inheritance hint drift, 2 query_database_tool, 4 artifact_export render) | pre-existing | respective feature tracks | stash-verified at HEAD; untouched |
+| 29 frontend failures | pre-existing / foreign WIP | frontend WIP owners | all in actively-edited foreign files |
+| `--no-llm` flag & sweep hangs | FIXED this phase | — | registered via `pytest_addoption`; proxy death no longer silently converts to hour-long hangs |

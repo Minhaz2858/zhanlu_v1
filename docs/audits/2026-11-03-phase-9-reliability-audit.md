@@ -113,3 +113,14 @@ regression baseline:
 
 Filled in the completion report after the Stage-5 sweep (see
 `docs/plans/2026-11-03-phase-9-completion-report.md`).
+
+## 7. Closure (2026-11-03, same day)
+
+Phase 9 CLOSED at HEAD `2acd748fb`. The full disposition table (including
+the full-sweep order-dependence finding and the migration-020 drift status)
+lives in the closure addendum of
+`docs/plans/2026-11-03-phase-9-completion-report.md`. Summary: both P0
+fixes re-verified green (22 tests), zero Phase 9 regressions (matrix
+299/307, all 8 failures stash-verified pre-existing; document-family
+cluster suites pass standalone), full sweep honestly reported as in-flight
+with an order-dependence limitation deferred to the test-infra track.

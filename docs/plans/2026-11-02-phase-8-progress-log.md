@@ -214,3 +214,11 @@ P1, owner coordination required; documented precisely by
 
 Full details: `docs/audits/2026-11-03-phase-9-reliability-audit.md` and
 `docs/plans/2026-11-03-phase-9-completion-report.md`.
+
+**Phase 9 CLOSED (2026-11-03 closure addendum):** both P0 fixes re-verified
+(22 tests green at HEAD `2acd748fb`); zero Phase 9 regressions (all 8 matrix
+failures stash-verified pre-existing; document-family sweep clusters pass
+standalone → order-dependence deferred to the test-infra track); migration-020
+drift re-confirmed (31F+12E) and dispositioned to the model-migration track
+pending foreign-WIP coordination; full sweep honestly reported as in-flight
+with the reproducible invocation documented.
