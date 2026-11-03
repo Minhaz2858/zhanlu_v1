@@ -9,14 +9,22 @@ from sqlalchemy import inspect as sa_inspect
 
 
 def test_agent_conversation_has_dashboard_id_column(tmp_path):
-    # Fresh sqlite DB to inspect the column set.
+    # Fresh sqlite DB to inspect the column set. Restore the env var —
+    # a leaked DATABASE_URL trips the T1 guard in tests/conftest.py.
     db_file = tmp_path / "t.db"
+    _saved_url = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
-    from app.database import Base, engine
-    import app.models  # noqa: registers all mappers
-    Base.metadata.create_all(engine)
-    cols = {c["name"] for c in sa_inspect(engine).get_columns("agent_conversations")}
-    assert "dashboard_id" in cols
+    try:
+        from app.database import Base, engine
+        import app.models  # noqa: registers all mappers
+        Base.metadata.create_all(engine)
+        cols = {c["name"] for c in sa_inspect(engine).get_columns("agent_conversations")}
+        assert "dashboard_id" in cols
+    finally:
+        if _saved_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = _saved_url
 
 
 def test_create_dashboard_binds_to_conversation(tmp_path):

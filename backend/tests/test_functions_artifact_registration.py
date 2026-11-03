@@ -17,7 +17,6 @@ generated file as a governed Artifact, return an ``artifact_id`` and a
 # IMPORTANT: env vars must be set BEFORE importing the app.
 import os
 import sys
-import tempfile
 import atexit
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,12 +25,16 @@ if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 os.chdir(_BACKEND_ROOT)
 
-# Per-module file-backed SQLite so that TestClient and the test's own db
-# session see the same data (in-memory SQLite would create a new DB per
-# connection, hiding TestClient's writes from the test's reads).
-_DB_FILE = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_DB_FILE.close()
-os.environ["DATABASE_URL"] = f"sqlite:///{_DB_FILE.name}"
+# NOTE (Phase 9 reliability): this module previously overwrote
+# DATABASE_URL with a per-module temp SQLite file at import time and
+# never restored it. Pytest collects ALL test modules before any test
+# runs, so the overwrite poisoned os.environ for the whole sweep and
+# tripped the T1 isolation guard in tests/conftest.py (12k+ collection
+# errors). The T1 contract already provides a real file-backed SQLite
+# via the app's normal pooled engine — the "in-memory hides
+# TestClient's writes" rationale is obsolete. Feature flags stay set
+# here (call-time readers honor them); settings-cached flags are
+# covered by the flags' own dedicated suites.
 os.environ["MD_ARTIFACT_ENABLED"] = "true"
 os.environ["ARTIFACT_STORAGE_BACKEND"] = "postgres_bytea"
 
@@ -64,13 +67,9 @@ def db():
 
 
 def _cleanup_db():
-    """Best-effort cleanup; the tempfile is removed by the OS anyway."""
+    """Best-effort cleanup (runs at interpreter exit, after the sweep)."""
     try:
         Base.metadata.drop_all(bind=engine)
-    except Exception:
-        pass
-    try:
-        os.unlink(_DB_FILE.name)
     except Exception:
         pass
 

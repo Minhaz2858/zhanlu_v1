@@ -15,6 +15,13 @@ from sqlalchemy import inspect
 TABLES = ["agent_apps", "automation_tasks", "chat_sessions", "user_files", "knowledge_bases"]
 
 
+@pytest.fixture(scope="module")
+def engine():
+    """The app's pooled test engine (T1 temp-file SQLite)."""
+    from app.database import engine as _engine
+    return _engine
+
+
 def _get_columns(engine, table: str) -> set[str]:
     return {c["name"] for c in inspect(engine).get_columns(table)}
 
