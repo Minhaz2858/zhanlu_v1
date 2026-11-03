@@ -34,7 +34,7 @@ documented accepted-risk, owner: platform security.
 | # | Sev | Class | Finding |
 |---|-----|-------|---------|
 | S2.1 | P0 | CONFIRMED | `tools`/`skill_profiles` tables have **no org column at all** (`models/tool.py:9-68`); `SkillsRegistry` is a global name-keyed singleton over `skills/` + `~/.zhanlu/skills/` ("single-tenant data" comment, `skills_loader/__init__.py:535`); all tenants share one physical dir (`skill_sync.py:27`). |
-| S2.2 | P1 | CONFIRMED | IDOR: `marketplace.py:391-395` `remove_my_skill` deletes `Tool` by bare id — no owner/org filter; also deletes the shared SKILL.md file. |
+| S2.2 | P1→CORRECTED | PARTIAL | Re-verification during implementation: `marketplace.py:391-400` DOES enforce an owner check (403 "Not your skill") — the original IDOR reading was wrong. Pinned by `test_marketplace_skill_ownership.py`. Residual: `delete_skill_md` deletes by NAME in the shared directory, so same-named skills of different users collide — that residual is part of the S2.1 file-layer problem (per-org dirs), same blocked item. |
 | S2.3 | P1 | CONFIRMED | Execution has no ownership to check against (`skills_tool.py:74,106,371-444`); zero tenant tests across ~50 skill test files. |
 
 **Plan:** fix S2.2 now (owner check, fail closed). **S2.1/S2.3 = BLOCKED with
