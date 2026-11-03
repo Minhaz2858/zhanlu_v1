@@ -115,26 +115,66 @@ def _bound_child_toolset(
 _RESTRICTED_TOOLS = {"delegate_task", "memory", "send_message"}
 
 
-def _resolve_agent_app(db: Session, agent_name: str | None):
+def _resolve_caller_org(db: Session, user_id: str | None,
+                        context: dict | None) -> str | None:
+    """Resolve the caller's organization (user → org_id, else the
+    conversation's org). Returns None when unresolvable."""
+    if user_id:
+        try:
+            from app.models.user import User
+
+            _u = db.query(User).filter(User.id == user_id).first()
+            if _u is not None:
+                return getattr(_u, "org_id", None)
+        except Exception:  # noqa: BLE001
+            return None
+    if context and context.get("conversation_id"):
+        try:
+            from app.models.agent_conversation import AgentConversation
+
+            _conv = (
+                db.query(AgentConversation)
+                .filter(AgentConversation.id == context["conversation_id"])
+                .first()
+            )
+            if _conv is not None:
+                return getattr(_conv, "org_id", None)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _resolve_agent_app(db: Session, agent_name: str | None,
+                       caller_org_id: str | None = None):
     """P0-1 (2026-10-31): resolve a PUBLISHED AgentApp by exact name.
 
-    Returns None (never raises) when the name is not a published AgentApp —
-    builtin definitions keep their existing resolution path. Only
-    ``status == "published"`` apps are delegable: this is the same gate
-    ``list_available_agents`` advertises to the LLM (see _list_available_agents).
+    Phase 10 (audit S5.1): the resolution is ORG-SCOPED — a published
+    AgentApp of ANOTHER organization never resolves (its prompt and
+    tool_config are tenant data). ``caller_org_id`` comes from
+    ``_resolve_caller_org``; callers that cannot pass a verified org must
+    not use this function to execute foreign definitions.
+
+    Returns None (never raises) when the name does not resolve to a
+    published AgentApp of the caller's org — builtin definitions keep
+    their existing resolution path. Only ``status == "published"`` apps
+    are delegable: this is the same gate ``list_available_agents``
+    advertises to the LLM (see _list_available_agents).
     """
     if not agent_name:
         return None
     try:
         from app.models.agent_app import AgentApp
 
+        filters = [
+            AgentApp.name == agent_name,
+            AgentApp.is_deleted == False,  # noqa: E712
+            AgentApp.status == "published",
+        ]
+        if caller_org_id:
+            filters.append(AgentApp.org_id == caller_org_id)
         return (
             db.query(AgentApp)
-            .filter(
-                AgentApp.name == agent_name,
-                AgentApp.is_deleted == False,  # noqa: E712
-                AgentApp.status == "published",
-            )
+            .filter(*filters)
             .first()
         )
     except Exception as exc:  # noqa: BLE001 — resolution is best-effort
@@ -371,34 +411,303 @@ async def _run_sub_agent(
     """Run a sub-agent conversation with restricted tools (recorded)."""
     from datetime import datetime, timezone
 
-    from app.services.agent_invocations import record_invocation
+    from app.services.agent_invocations import (
+        record_invocation, update_invocation_terminal,
+    )
 
     _started = datetime.now(timezone.utc)
+    # P1/P2 (2026-10-31): Collaboration Broker governance for Pattern A/B/C.
+    # Evaluate BEFORE spawning the child. On block, return a structured
+    # "blocked" result — the finally-block records it as an observable
+    # (blocked) invocation row. No silent swallow, no crash.
+    from app.services.agent_collaboration import broker
+
+    _allowed, _reason, _child_context = broker.evaluate_delegation(
+        target_agent_id=agent_name, objective=task, context=context, db=db,
+        parent_invocation_id=(context or {}).get("parent_invocation_id"),
+    )
+    if not _allowed:
+        # The broker already recorded an auditable "blocked" invocation via
+        # _audit_block — do not double-record here.
+        return {
+            "success": False,
+            "status": "blocked",
+            "error": _reason or "delegation blocked by collaboration policy",
+            "task": task,
+            "agent_name": agent_name,
+        }
+    # P0-1: resolve the child AgentApp ONCE here so both the inner loop
+    # (prompt + toolset) and the invocation record use the same object.
+    # Phase 10 (audit S5.1): org-scoped — when AgentApp-aware delegation is
+    # enabled but the caller's org CANNOT be verified, the delegation is
+    # BLOCKED (fail closed): an unscoped resolution could execute another
+    # org's published agent definition.
+    _agent_app = None
+    if getattr(settings, "DELEGATE_AGENTAPP_AWARE", False):
+        _caller_org = _resolve_caller_org(db, user_id, context)
+        if not _caller_org:
+            logger.warning(
+                "delegate: caller org unresolvable (user_id=%r) — blocking "
+                "AgentApp delegation (fail closed)", user_id)
+            return {
+                "success": False,
+                "status": "blocked",
+                "error": (
+                    "Delegation refused: the caller's organization could "
+                    "not be verified for agent-scoped delegation."
+                ),
+                "task": task,
+                "agent_name": agent_name,
+            }
+        _agent_app = _resolve_agent_app(db, agent_name, _caller_org)
+    # Part 1.2: single effective deadline shared by the inner wall-check AND the
+    # real coroutine-level cancellation below.
+    _wall_s = float(getattr(settings, "DELEGATE_WALL_SECONDS", 600))
+    if getattr(settings, "COLLAB_POLICY_ENFORCED", True):
+        _wall_s = float(getattr(settings, "COLLAB_TIMEOUT_SECONDS", _wall_s))
+    # P1/P2: global top-level concurrency gate (COLLAB_MAX_CONCURRENT). Nested
+    # Pattern-C delegations are excluded inside the broker (deadlock-free); this
+    # bounds the entry-point fan-out across all conversations/parents. A blocked
+    # attempt is returned as status="blocked" and recorded by the finally block.
+    _acquired = False
+    result = None
     try:
-        result = await _run_sub_agent_inner(
-            task, agent_name, db, user_id, max_iterations, endpoint, context=context,
-        )
-        # MAS supervision gate (opt-in): attach an LLM-judge verdict to the
-        # sub-agent's answer before the parent consumes it.
-        if result.get("success") and result.get("response"):
-            verification = await _verify_sub_agent_output(task, result["response"])
-            if verification:
-                result.update(verification)
+        _acq, _acq_reason = broker.acquire_concurrency(context)
+        if not _acq:
+            return {
+                "success": False,
+                "status": "blocked",
+                "error": _acq_reason or "concurrent task limit exceeded",
+                "task": task,
+                "agent_name": agent_name,
+            }
+        _acquired = True
+        # Mission §23 / Hybrid H1 (2026-10-31): record the child invocation
+        # AT START as "running" so in-flight specialists are visible in the
+        # authoritative execution tree (reconnection mid-flight shows real
+        # state, not an empty tree). The SAME row is finalized in the finally
+        # block — no duplicate, no fabricated completion. If the start row
+        # cannot be created (e.g. no resolvable agent app, same rule as the
+        # legacy terminal insert), the finally block falls back to the legacy
+        # terminal-only insert, so behavior is never worse than before.
+        _req0 = _child_context.get("requesting_agent_id")
+        _inv_row_id = None
+        try:
+            _inv_row_id = record_invocation(
+                db,
+                conversation_id=_child_context.get("conversation_id"),
+                agent_app_id=(_agent_app.id if _agent_app else None),
+                user_id=user_id,
+                invocation_type="sub_agent",
+                trigger="agent" if _req0 and _req0 != "general_assistant" else "supervisor",
+                input_message=task[:2000],
+                status="running",
+                open_invocation=True,
+                started_at=_started,
+                model_name=endpoint.model_id if endpoint else None,
+                parent_invocation_id=_child_context.get("parent_invocation_id"),
+                trace_id=_child_context.get("trace_id"),
+                delegation_mode="peer" if _req0 and _req0 != "general_assistant" else "supervisor",
+            )
+        except Exception as _inv_start_err:  # noqa: BLE001 — non-fatal
+            logger.warning("delegate: invocation start record failed (non-fatal): %s",
+                           _inv_start_err)
+            _inv_row_id = None
+        # ── Multi-agent milestone (2026-11-01): the specialist now runs with
+        # a LIVE execution identity — structured agent-execution events are
+        # appended to the parent's progress channel (drained in real time by
+        # the router heartbeat) so the Agent Execution panel renders the
+        # specialist BEFORE the final answer. ``_agent_execution_id`` is the
+        # invocation-row id (same id the persisted tree uses) — live cards
+        # and the post-turn tree dedupe on it.
+        _agent_execution_id = _inv_row_id or str(uuid.uuid4())
+        _child_context = dict(_child_context or {})
+        _child_context["_agent_execution_id"] = _agent_execution_id
+        try:
+            from app.services.agent_loop.sse_builders import (
+                append_agent_execution_event,
+            )
+
+            append_agent_execution_event(
+                (context or {}).get("progress_emitter"), "agent_started",
+                {
+                    "agent_execution_id": _agent_execution_id,
+                    "parent_agent_execution_id": _child_context.get("parent_invocation_id"),
+                    "agent_id": (_agent_app.id if _agent_app else None),
+                    "agent_name": agent_name,
+                    "agent_label": (_agent_app.name if _agent_app else agent_name),
+                    "task_id": _child_context.get("turn_id"),
+                    "conversation_id": _child_context.get("conversation_id"),
+                    "status": "running",
+                    "delegation_mode": (
+                        "peer" if _req0 and _req0 != "general_assistant" else "supervisor"
+                    ),
+                    "task": task[:200],
+                    # 2026-11-02 (dynamic orchestration timeline): link the
+                    # agent to the plan task it serves, when the caller's
+                    # context carries one — the frontend nests the agent row
+                    # under that plan task instead of guessing by timestamp.
+                    "plan_task_id": (context or {}).get("plan_task_id"),
+                },
+            )
+            # Peer-to-peer collaboration is a distinct orchestration fact
+            # (2026-11-02): announce it on the timeline. The event type was
+            # whitelisted since Phase 2.8 but never emitted.
+            if _req0 and _req0 != "general_assistant":
+                append_agent_execution_event(
+                    (context or {}).get("progress_emitter"),
+                    "peer_collaboration_started",
+                    {
+                        "agent_execution_id": _agent_execution_id,
+                        "agent_label": (_agent_app.name if _agent_app else agent_name),
+                        "conversation_id": _child_context.get("conversation_id"),
+                    },
+                )
+        except Exception:  # noqa: BLE001 — observability never breaks delegation
+            pass
+        # P1 contract: force a machine-readable status on EVERY sub-agent result
+        # (single-task path — the batch path does the same). The parent LLM and
+        # the evidence card both key off it; never ship a bare success dict.
+        # Part 1.2: asyncio.wait_for CANCELS the child coroutine on timeout
+        # (interrupting an in-flight LLM/HTTP await) — not merely truncating the
+        # parent's view. The inner wall-check remains defense-in-depth.
+        try:
+            _child = await asyncio.wait_for(
+                _run_sub_agent_inner(
+                    task, agent_name, db, user_id, max_iterations, endpoint,
+                    context=_child_context, agent_app=_agent_app,
+                    wall_seconds=_wall_s,
+                ),
+                timeout=_wall_s,
+            )
+        except asyncio.TimeoutError:
+            _child = {
+                "success": False, "status": "timeout",
+                "error": f"sub-agent exceeded deadline ({_wall_s}s)",
+                "task": task, "agent_name": agent_name,
+            }
+        if _child.get("success"):
+            _child.setdefault("status", "partial" if _child.get("truncated") else "completed")
+            # MAS supervision gate (opt-in): attach an LLM-judge verdict to the
+            # sub-agent's answer before the parent consumes it.
+            if _child.get("response"):
+                verification = await _verify_sub_agent_output(task, _child["response"])
+                if verification:
+                    _child.update(verification)
+        else:
+            _child["status"] = _child.get("status") or "failed"
+        result = _child
+        # P2 (Part 1): selective fact-safe review + bounded targeted
+        # re-investigation. Only when the caller opted in (review=True).
+        if result.get("success") and (context or {}).get("_enable_review"):
+            result = await _maybe_review_and_refine(
+                task, agent_name, db, user_id, endpoint, context, result,
+            )
+    except asyncio.CancelledError:
+        # Parent cancellation propagated into this child. Record it honestly,
+        # then re-raise so the cancellation continues after cleanup (do NOT
+        # swallow a shutdown as a success).
+        result = {
+            "success": False, "status": "cancelled",
+            "error": "delegation cancelled by parent",
+            "task": task, "agent_name": agent_name,
+        }
+        raise
     except Exception as exc:  # noqa: BLE001
         result = {"success": False, "error": str(exc), "task": task}
     finally:
+        if _acquired:
+            broker.release_concurrency()
         # Per-sub-agent invocation row (P1, 2026-08-29): duration + status so
         # delegation is observable and costed like the main loop.
         try:
+            if result is None:
+                result = {"success": False, "status": "cancelled",
+                          "task": task, "agent_name": agent_name}
             _it = result.get("iterations")
-            record_invocation(
+            _requesting = _child_context.get("requesting_agent_id") or _child_context.get("agent_name")
+            _tu = result.get("token_usage") or None
+            _terminal_status = "completed" if result.get("success") else (result.get("status") or "failed")
+            _terminal_at = datetime.now(timezone.utc)
+            _terminal_out = {
+                "task": task[:200],
+                "iterations": _it,
+                "agent_name": agent_name,
+                "requesting_agent_id": _requesting,
+                "truncated": bool(result.get("truncated")),
+                "delegation_path": _child_context.get("delegation_path"),
+                # P1/P2: persist the negotiated Agent Task Contract on the
+                # invocation so the parent-child link is auditable/observable
+                # (not just carried in the in-memory context).
+                "task_contract": _child_context.get("agent_task_contract"),
+                # P2 Phase 3: persist the reviewer verdict (if this
+                # delegation was reviewed) and the evidence ids it produced /
+                # consumed so the execution-tree visualization can render the
+                # critic/reviewer panel and evidence references historically.
+                "review": result.get("review"),
+                "evidence_ids": result.get("evidence_ids"),
+            }
+            # Mission §23 / Hybrid H1: finalize the SAME row created at
+            # delegation start (single row, truthful terminal state). If the
+            # start row never materialized, fall back to the legacy
+            # terminal-only insert so the record is never lost. Chat-experience
+            # repair (2026-10-31): a REFUSED update (row already terminal, or
+            # transient failure) must NOT insert a second row — that produced
+            # a stale "running" row PLUS a terminal duplicate in the
+            # execution tree. Fall back only when the start row genuinely
+            # does not exist.
+            if _inv_row_id and update_invocation_terminal(
                 db,
-                conversation_id=None,
+                _inv_row_id,
+                status=_terminal_status,
+                output_json=_terminal_out,
+                error_message=result.get("error"),
+                completed_at=_terminal_at,
+                duration_ms=max(0, int((_terminal_at - _started).total_seconds() * 1000)),
+                token_usage=_tu,
+                cost_amount=_compute_child_cost(_tu),
+                assistant_content=(result.get("response") or "")[:10000],
+                tool_call_count=_it if isinstance(_it, int) else None,
+                model_name=endpoint.model_id if endpoint else None,
+            ):
+                pass
+            elif _inv_row_id and _invocation_row_exists(db, _inv_row_id):
+                # Row exists but the terminal update was refused (already
+                # terminal — first-terminal-wins). Nothing to write.
+                logger.warning(
+                    "delegate: terminal update refused for invocation %s "
+                    "(already terminal?) — no fallback insert", _inv_row_id)
+            else:
+                record_invocation(
+                db,
+                # P0-5 (2026-10-31): link the delegation to the parent
+                # conversation (was hardcoded None — sub-agent runs were
+                # invisible in the observability drawer's conversation view).
+                conversation_id=_child_context.get("conversation_id"),
+                agent_app_id=(result.pop("_agent_app_id", None) or None),
                 user_id=user_id,
                 invocation_type="sub_agent",
+                trigger="agent" if _requesting and _requesting != "general_assistant" else "supervisor",
                 input_message=task[:2000],
-                status="completed" if result.get("success") else "failed",
-                output_json={"task": task[:200], "iterations": _it},
+                status="completed" if result.get("success") else (result.get("status") or "failed"),
+                output_json={
+                    "task": task[:200],
+                    "iterations": _it,
+                    "agent_name": agent_name,
+                    "requesting_agent_id": _requesting,
+                    "truncated": bool(result.get("truncated")),
+                    "delegation_path": _child_context.get("delegation_path"),
+                    # P1/P2: persist the negotiated Agent Task Contract on the
+                    # invocation so the parent-child link is auditable/observable
+                    # (not just carried in the in-memory context).
+                    "task_contract": _child_context.get("agent_task_contract"),
+                    # P2 Phase 3: persist the reviewer verdict (if this
+                    # delegation was reviewed) and the evidence ids it produced /
+                    # consumed so the execution-tree visualization can render the
+                    # critic/reviewer panel and evidence references historically.
+                    "review": result.get("review"),
+                    "evidence_ids": result.get("evidence_ids"),
+                },
                 assistant_content=(result.get("response") or "")[:10000],
                 error_message=result.get("error"),
                 started_at=_started,
@@ -809,28 +1118,136 @@ async def _list_available_agents(
             "source": d.source,
         })
 
+    # P0 tenant-isolation fix (enterprise reliability milestone, 2026-11-01):
+    # the discovery directory must never span organizations — published
+    # agent names/descriptions are tenant data. Resolve the caller's org
+    # (user → org_id, else the conversation's org) and scope the published
+    # query to it. When the caller's org CANNOT be resolved (legacy test
+    # harnesses pass user_id=None, context=None) the historical unscoped
+    # behavior is kept with a loud warning — real tool invocations always
+    # carry a user, so the wall holds on every production path. Discovery
+    # never grants data access either way (children run under their own
+    # fail-closed bindings).
+    caller_org_id = None
+    if user_id:
+        try:
+            from app.models.user import User
+
+            _u = db.query(User).filter(User.id == user_id).first()
+            if _u is not None:
+                caller_org_id = getattr(_u, "org_id", None)
+        except Exception:  # noqa: BLE001 — discovery must not crash on lookup issues
+            caller_org_id = None
+    if not caller_org_id and context and context.get("conversation_id"):
+        try:
+            _conv = (
+                db.query(AgentConversation)
+                .filter(AgentConversation.id == context["conversation_id"])
+                .first()
+            )
+            if _conv is not None:
+                caller_org_id = getattr(_conv, "org_id", None)
+        except Exception:  # noqa: BLE001
+            caller_org_id = None
+
+    _pub_filters = [
+        AgentApp.status == "published",
+        AgentApp.is_deleted == False,  # noqa: E712
+    ]
+    if caller_org_id:
+        _pub_filters.append(AgentApp.org_id == caller_org_id)
+    else:
+        logger.warning(
+            "list_available_agents: caller org unresolvable (user_id=%r, "
+            "no conversation org) — returning the UNSCOPED legacy directory; "
+            "production callers must always carry a user",
+            user_id,
+        )
     published = (
         db.query(AgentApp)
-        .filter(AgentApp.status == "published", AgentApp.is_deleted == False)  # noqa: E712
+        .filter(*_pub_filters)
         .order_by(AgentApp.name)
         .all()
     )
+
+    # Batch-resolve department/home-project, KB domains and portfolio rows
+    project_ids = {a.project_id for a in published if a.project_id}
+    projects = {
+        p.id: p
+        for p in (
+            db.query(Project).filter(Project.id.in_(project_ids)).all()
+            if project_ids
+            else []
+        )
+    }
+    kb_map: dict[str, list[str]] = {}
+    if project_ids:
+        # Home membership OR explicit share link (multi-project sharing,
+        # 2026-10-31). Linked KBs appear under every project that links them.
+        from app.services.project_kb_membership import project_kb_link_subquery
+        from sqlalchemy import or_ as _or
+
+        for pid in project_ids:
+            for kb in (
+                db.query(KnowledgeBase)
+                .filter(
+                    _or(
+                        KnowledgeBase.project_id == pid,
+                        KnowledgeBase.id.in_(project_kb_link_subquery(pid)),
+                    ),
+                    KnowledgeBase.is_deleted == False,  # noqa: E712
+                )
+                .all()
+            ):
+                kb_map.setdefault(pid, []).append(kb.name)
+    agent_ids = [a.id for a in published]
+    portfolio = {
+        row.agent_id: row
+        for row in (
+            db.query(AgentPortfolioEntry)
+            .filter(AgentPortfolioEntry.agent_id.in_(agent_ids))
+            .all()
+            if agent_ids
+            else []
+        )
+    }
+
     for a in published:
-        agents.append({
+        proj = projects.get(a.project_id)
+        department = (proj.department if proj else None) or None
+        if dept_filter and (department or "").lower() != dept_filter.lower():
+            continue
+        capabilities = a.capabilities or []
+        if cap_filter and not any(
+            cap_filter in str(c).lower() for c in capabilities
+        ) and cap_filter not in (a.description or "").lower():
+            continue
+        entry = {
             "name": a.name,
             "kind": "user_agent",
             "agent_id": a.id,
             "description": (a.description or "")[:200],
-            "capabilities": a.capabilities or [],
-        })
+            "capabilities": capabilities,
+            "department": department,
+            "home_project": proj.name if proj else None,
+            "data_domains": (kb_map.get(a.project_id) or [])[:5],
+        }
+        pf = portfolio.get(a.id)
+        if pf is not None:
+            entry["lifecycle_stage"] = getattr(pf, "lifecycle_stage", None)
+            entry["business_owner"] = getattr(pf, "business_owner", None)
+        agents.append(entry)
 
     return {
         "success": True,
+        "department_filter": dept_filter,
         "agents": agents,
         "hint": (
-            "Pass one of these names as agent_name to delegate_task "
-            "(builtin names) or to swarm_spawn_agent. Pick the agent whose "
-            "specialization matches the subtask."
+            "Pick the agent whose CAPABILITY and DATA DOMAINS match the "
+            "subtask. Pass the name as agent_name to delegate_task (batch "
+            "tasks accept {task, agent_name} objects for multi-specialist "
+            "fan-out). Discovery never grants data access — children run "
+            "under their own authorized bindings."
         ),
     }
 

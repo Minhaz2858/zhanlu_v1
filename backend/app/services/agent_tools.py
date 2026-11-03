@@ -536,6 +536,39 @@ async def execute_tool(
     except Exception:
         pass
 
+    # Milestone acceptance (2026-11-01): enforce the caller AgentApp's OWN
+    # tool policy AT THE INVOCATION BOUNDARY. Toolset assembly alone is not
+    # a security boundary — a model can guess a tool name it was never
+    # shown. strict_tools = exact allowlist; disabled_tools = hard deny
+    # (wins over everything, incl. always-on evidence tools). Discovery ≠
+    # authorization: this gate re-checks on EVERY invocation, for both
+    # advertised and guessed names. Phase 10 (audit S5.2): gate errors now
+    # FAIL CLOSED — an unloadable policy must never silently widen what an
+    # agent may execute (the previous fail-open turned any policy-layer
+    # fault into "all tools allowed").
+    try:
+        from app.services.agent_tool_policy import load_tool_policy, policy_denies
+        _policy = load_tool_policy(db, (context or {}).get("agent_app_id"))
+        _deny_reason = policy_denies(_policy, tool_name)
+        if _deny_reason:
+            logger.warning(
+                "Tool '%s' denied by agent tool policy (app=%s): %s",
+                tool_name, (context or {}).get("agent_app_id"), _deny_reason,
+            )
+            return {"success": False, "error": f"Permission denied: {_deny_reason}"}
+    except Exception as _pol_exc:  # noqa: BLE001 — security gate: fail CLOSED
+        logger.error(
+            "agent tool-policy gate error — denying tool '%s' (fail closed): %s",
+            tool_name, _pol_exc,
+        )
+        return {
+            "success": False,
+            "error": (
+                "Permission denied: the agent tool policy could not be "
+                "verified for this invocation."
+            ),
+        }
+
     # 0. Permission check — block tools that are not allowed, or pause for
     #    confirmation when requires_confirmation=True (default mode write tools).
     agent_name = context.get("agent_name") if context else None
@@ -1573,8 +1606,10 @@ def _resolve_task_executor_agent(db: Session, args: dict) -> str:
     from app.services.automation_runtime import ensure_automation_runtime_agent
     from app.models.agent_app import AgentApp as _AA
 
-    org_id = args.get("org_id") or TOOL_CONTEXT.get("org_id") or "default-org"
-    app_id = args.get("app_id") or TOOL_CONTEXT.get("app_id") or "default-app"
+    # Phase 10 (audit S3.2): the caller's org is SERVER-RESOLVED context —
+    # never a tool argument. Client/LLM-supplied org_id is ignored.
+    org_id = TOOL_CONTEXT.get("org_id") or "default-org"
+    app_id = TOOL_CONTEXT.get("app_id") or "default-app"
 
     supplied = args.get("agent_id")
     if supplied:
@@ -1731,7 +1766,8 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
             )
             _legacy_name = _normalize_project_name(args.get("project"))
             if _legacy_name:
-                _org = args.get("org_id") or TOOL_CONTEXT.get("org_id") or "default-org"
+                # Phase 10 (audit S3.2): org from server context only.
+                _org = TOOL_CONTEXT.get("org_id") or "default-org"
                 _app = args.get("app_id") or TOOL_CONTEXT.get("app_id") or "default-app"
                 _adopted = (
                     db.query(Project)
@@ -1913,7 +1949,8 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
         data_source_id=args.get("data_source_id"),
         skills=skills or None,
         agent_id=_resolve_task_executor_agent(db, args),
-        org_id=args.get("org_id") or TOOL_CONTEXT.get("org_id") or "default-org",
+        # Phase 10 (audit S3.2): org from server context only.
+        org_id=TOOL_CONTEXT.get("org_id") or "default-org",
         app_id=args.get("app_id") or TOOL_CONTEXT.get("app_id") or "default-app",
         output_format=output_format,
         notify_chat=str(args.get("notify_chat", True)).lower() in ("1", "true", "yes"),
