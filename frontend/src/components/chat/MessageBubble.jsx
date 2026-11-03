@@ -9,13 +9,16 @@ import ClarifyBatchForm from './ClarifyBatchForm';
 import LiveActivityStream from './LiveActivityStream';
 import ResultCard from './ResultCard';
 import DataTableCard from './DataTableCard';
-import ReportCard from './ReportCard';
+import DelegateBatchCard from './DelegateBatchCard';
+import AgentExecutionTree from './AgentExecutionTree';
+import TaskExecutionTimeline from './TaskExecutionTimeline';
 import ArtifactPreviewCard from './ArtifactPreviewCard';
 import ArtifactCardList from './ArtifactCardList';
 import InlineArtifactPreview from './InlineArtifactPreview';
 import { partitionArtifacts } from './partitionArtifacts';
 import DashboardCard from '@/components/dashboard/DashboardCard';
 import MessageActions from './MessageActions';
+import RunProvenancePanel from './RunProvenancePanel';
 
 /**
  * Pre-process markdown content to fix common LLM formatting issues.
@@ -504,6 +507,12 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
             {/* ReportCard and ArtifactPreviewCard removed — inline markdown
                 report is the primary deliverable; the preview card was
                 redundant and cluttered the chat. */}
+            {/* Phase 8.1 Stage 1: run provenance (sources, tools, honest
+                failure states) for turns that have a real AgentRun. Historical
+                messages without run_id render nothing here — honest absence. */}
+            {!isStreaming && message.run_id && (
+              <RunProvenancePanel runId={message.run_id} />
+            )}
             {/* Suppress raw DataTableCard while the message is still streaming
                 AND when the message already carries a substantive synthesized
                 answer (markdown section headers signal a real inline report).

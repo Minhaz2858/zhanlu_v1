@@ -8580,6 +8580,14 @@ async def add_message(
                         artifact_ids.append(_art["artifact_id"])
                 assistant_msg["tool_calls"] = tool_calls_for_frontend
                 assistant_msg["artifact_ids"] = artifact_ids
+                # Phase 8.1 Stage 1: AgentRun-to-message linkage (v2 path —
+                # the recorder already exists for this turn). Fail-open.
+                try:
+                    _v2_run_id = getattr(_turn_rec, "run_id", None)
+                    if _v2_run_id:
+                        assistant_msg["run_id"] = _v2_run_id
+                except Exception:  # noqa: BLE001 — linkage is best-effort
+                    pass
                 _all_artifacts = _collect_artifact_results(
                     tool_calls_for_frontend, assistant_msg_id, conversation_id, db,
                 )
@@ -19851,6 +19859,30 @@ async def add_message_stream(
             "content": accumulated_content,
             "created_date": datetime.now(timezone.utc).isoformat(),
         }
+        # Phase 8.1 Stage 1: every completed v3 turn gets a real AgentRun —
+        # the provenance choke point. Org/user come from the VERIFIED session
+        # (conversation + authenticated user), never from the client.
+        # Fail-open: recording must never break the stream; a turn without a
+        # run is honest (the panel reports "not recorded").
+        try:
+            from app.services.harness.turn_recorder import record_chat_turn_run
+            _turn_run_id = record_chat_turn_run(
+                db,
+                org_id=getattr(conv, "org_id", None) or "default-org",
+                user_id=str(user.id) if user is not None else None,
+                conversation_id=conversation_id,
+                agent_name=getattr(conv, "agent_name", None)
+                or "general_assistant",
+                task=user_content,
+                tool_calls=tool_calls_for_frontend,
+                status="completed",
+            )
+            if _turn_run_id:
+                assistant_msg["run_id"] = _turn_run_id
+        except Exception as _run_rec_err:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "add_message_stream: chat turn run recording failed "
+                "(non-fatal): %s", _run_rec_err)
         # Kimi/GPT-style citations: collect the data sources the tool loop
         # actually queried this turn (source_id/source_name from tool
         # results). Attached so the frontend can render source chips.

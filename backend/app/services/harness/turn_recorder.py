@@ -343,3 +343,76 @@ __all__ = [
     "now_ms",
     "utc_stamp",
 ]
+
+
+# ── Phase 8.1 Stage 1: AgentRun-to-message linkage for the v3 stream ───────
+
+def record_chat_turn_run(
+    db,
+    *,
+    org_id: str,
+    user_id: str | None,
+    conversation_id: str,
+    agent_name: str,
+    task: str,
+    tool_calls: list[dict] | None,
+    status: str,
+) -> str | None:
+    """Give a v3 chat turn a real AgentRun WITHOUT changing stream behavior.
+
+    Creates the run (org from the VERIFIED conversation/user context — never
+    caller-supplied), appends one ``tool_call`` step per EXECUTED tool call
+    (``blocked`` entries are authorization DENIALS, not executions — they are
+    never recorded as such), and finalizes with the honest terminal status.
+    The provenance envelope (T8-8) is then written by ``finalize_run``.
+
+    Fail-open: any failure returns None and never raises into the stream.
+    Flag-gated by the same ``HARNESS_CHAT_RUNS_ENABLED`` switch.
+    """
+    if not chat_runs_enabled():
+        return None
+    try:
+        from app.services.harness.run_service import AgentRunService
+
+        svc = AgentRunService()
+        run_id = svc.create_run_record(
+            agent_name=agent_name or "general_assistant",
+            task=task or "",
+            mode="chat",
+            caller_context={
+                "org_id": org_id,
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+            },
+            db=db,
+        )
+        executed = [
+            tc for tc in (tool_calls or [])
+            if isinstance(tc, dict)
+            and tc.get("status") not in (None, "blocked", "awaiting_approval",
+                                         "awaiting_decision_summary")
+        ]
+        for index, tc in enumerate(executed, start=1):
+            step_status = "error" if tc.get("status") == "error" else "ok"
+            svc.append_step(
+                run_id, "tool_call", step_index=index,
+                tool_name=tc.get("name"), db=db,
+            )
+            # status correction: append_step writes the model default; the
+            # honest per-call status is set explicitly below
+            try:
+                from app.models.agent_run_step import AgentRunStep
+                step = db.query(AgentRunStep).filter_by(
+                    run_id=run_id, step_index=index).first()
+                if step is not None:
+                    step.status = step_status
+                    db.commit()
+            except Exception:  # noqa: BLE001 — status refinement is best-effort
+                pass
+        svc.finalize_run(
+            run_id, status=status,
+            tool_call_count=len(executed), db=db,
+        )
+        return run_id
+    except Exception:  # noqa: BLE001 — fail-open by contract
+        return None
