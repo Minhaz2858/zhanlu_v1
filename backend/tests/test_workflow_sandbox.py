@@ -144,6 +144,13 @@ def test_run_code_sandboxed_failed_job_prefers_runner_error_event(monkeypatch):
 
 
 def test_run_code_sandboxed_falls_back_when_docker_unavailable(monkeypatch):
+    # Phase 10: the in-process fallback now requires an explicit opt-in
+    # (SANDBOX_ALLOW_HOST_FALLBACK) — see test_sandbox_fail_closed.py for
+    # the refusal contract. This test exercises the fallback MACHINERY,
+    # so it opts in.
+    from app.config import settings as _settings
+    monkeypatch.setattr(_settings, "SANDBOX_ALLOW_HOST_FALLBACK", True,
+                        raising=False)
     svc = _FakeSandboxService(None, fail_create=True)
     monkeypatch.setattr(ws, "SandboxService", lambda db: svc)
     out = ws.run_code_sandboxed(db=object(), code="output = {'n': input.get('n', 0) + 1}", input_item={"n": 41}, timeout=5)

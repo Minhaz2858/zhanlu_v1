@@ -94,6 +94,16 @@ class TestResourceLimits:
 class TestSandboxRunner:
     """Test runner.py execution modes."""
 
+    @pytest.fixture(autouse=True)
+    def _allow_host_fallback(self, monkeypatch):
+        # Phase 10: host-subprocess fallback requires an explicit opt-in
+        # (SANDBOX_ALLOW_HOST_FALLBACK); the refusal contract is pinned in
+        # test_sandbox_fail_closed.py. These tests exercise the fallback
+        # machinery itself, so they opt in.
+        from app.config import settings as _settings
+        monkeypatch.setattr(_settings, "SANDBOX_ALLOW_HOST_FALLBACK", True,
+                            raising=False)
+
     @patch("app.services.sandbox.runner.is_docker_available", return_value=False)
     async def test_fallback_python_execution(self, mock_docker_avail):
         """When Docker is unavailable, fallback to subprocess."""

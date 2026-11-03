@@ -130,6 +130,25 @@ def _restricted_exec(code: str, item: dict, timeout: int) -> dict:
     return {"success": True, "text": str(out), "items": [{"value": out}]}
 
 
+def _host_fallback_allowed() -> bool:
+    """Phase 10 (audit S1.2): in-process restricted exec of user-authored
+    code is NOT a security boundary (restricted __builtins__ is escapable
+    in CPython). It is permitted only when a deployment explicitly sets
+    SANDBOX_ALLOW_HOST_FALLBACK=true (dev/test convenience)."""
+    from app.config import settings as _s
+    return bool(getattr(_s, "SANDBOX_ALLOW_HOST_FALLBACK", False))
+
+
+_REFUSAL = {
+    "success": False,
+    "text": (
+        "Code execution refused: the sandbox is unavailable and "
+        "in-process host execution is disabled for security "
+        "(SANDBOX_ALLOW_HOST_FALLBACK is not enabled)."
+    ),
+}
+
+
 def _normalize_runner_result(result: dict) -> dict:
     """Convert the runner's raw result.json into the runtime's output shape.
 
@@ -161,9 +180,15 @@ def run_code_sandboxed(db, code: str, input_item: dict, timeout: int = 10) -> di
     ``{"success", "text", "items"?}``.
     """
     # Without a DB session the job row cannot persist — the sandbox path is
-    # impossible; use the in-process restricted exec directly (also what the
-    # old semantics-only tests exercise, no db on the context).
+    # impossible. Phase 10 (audit S1.2): refuse in-process exec unless the
+    # deployment explicitly allows host fallback (semantics-only tests set
+    # the flag); never silently run user code in the backend process.
     if db is None:
+        if not _host_fallback_allowed():
+            logger.warning(
+                "workflow code: no DB session and host fallback disabled — "
+                "refusing in-process execution")
+            return {**_REFUSAL, "text": _REFUSAL["text"] + " (no db session)"}
         return _restricted_exec(code, input_item, timeout)
     try:
         input_package = {
@@ -215,6 +240,11 @@ def run_code_sandboxed(db, code: str, input_item: dict, timeout: int = 10) -> di
                 }
             time.sleep(1.0)
         return {"success": False, "text": f"Code timed out in sandbox after {timeout}s"}
-    except Exception as exc:  # noqa: BLE001 — fallback, never crash the node
+    except Exception as exc:  # noqa: BLE001 — fail closed, never crash the node
+        if not _host_fallback_allowed():
+            logger.warning(
+                "workflow code: sandbox unavailable (%s) — refusing "
+                "in-process fallback (SANDBOX_ALLOW_HOST_FALLBACK off)", exc)
+            return dict(_REFUSAL)
         logger.warning("workflow code: sandbox unavailable (%s) — in-process fallback", exc)
         return _restricted_exec(code, input_item, timeout)

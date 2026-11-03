@@ -147,10 +147,13 @@ def execute_job(job_id: str, skill_name: str):
         service.record_event(job_id, "job_started", f"Starting sandbox container with image '{image}'")
 
         if not is_docker_available():
-            # Fallback: in-process execution (dev mode)
-            logger.warning("Docker not available — using in-process fallback for job %s", job_id)
-            service.record_event(job_id, "job_failed", "Docker not available — in-process fallback")
-            _execute_in_process(service, job)
+            # Phase 10 (audit S1.1): in-process execution runs the job's
+            # skill inside the WORKER process — which holds the host
+            # Docker socket — with full host privileges. That fallback now
+            # requires an explicit SANDBOX_ALLOW_HOST_FALLBACK=true
+            # deployment decision; by default the job FAILS instead of
+            # silently downgrading isolation.
+            _execute_in_process_guarded(service, job)
             return
 
         # Create temp directories under the shared tmp root.  That root is
@@ -312,6 +315,45 @@ def execute_job(job_id: str, skill_name: str):
 
     finally:
         db.close()
+
+
+_LAST_HOST_FALLBACK_REFUSAL: dict = {"job_id": None}
+
+
+def _execute_in_process_guarded(service: SandboxService, job: SandboxJob):
+    """Phase 10 (audit S1.1): gate the dev-only in-process fallback.
+
+    Without an explicit SANDBOX_ALLOW_HOST_FALLBACK=true the job fails
+    honestly — the worker process has host privileges (it is the ONLY
+    service with Docker socket access), so executing arbitrary skill code
+    in-process on Docker outage is a privilege-escalation fallback, not a
+    convenience.
+    """
+    from app.config import settings as _settings
+    if getattr(_settings, "SANDBOX_ALLOW_HOST_FALLBACK", False):
+        logger.warning(
+            "Docker not available — SANDBOX_ALLOW_HOST_FALLBACK is enabled; "
+            "running job %s in-process (NO isolation)", job.id)
+        service.record_event(
+            job.id, "job_started",
+            "Docker unavailable — explicit host-fallback in-process execution")
+        _execute_in_process(service, job)
+        return
+    logger.error(
+        "Docker not available — refusing in-process execution of job %s "
+        "(host-privilege RCE risk; set SANDBOX_ALLOW_HOST_FALLBACK=true "
+        "to override for local dev)", job.id)
+    _LAST_HOST_FALLBACK_REFUSAL["job_id"] = job.id
+    service.record_event(
+        job.id, "job_failed",
+        "Docker unavailable — host-side in-process execution refused "
+        "(sandbox isolation cannot be guaranteed)")
+    service.update_job_status(
+        job.id, "failed",
+        error_message=(
+            "Sandbox refused to run: the container runtime is unavailable "
+            "and host-side execution is disabled for security "
+            "(SANDBOX_ALLOW_HOST_FALLBACK is not enabled)."))
 
 
 def _execute_in_process(service: SandboxService, job: SandboxJob):

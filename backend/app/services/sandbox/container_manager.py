@@ -15,6 +15,7 @@ After execution, outputs are collected and the container is destroyed.
 """
 
 import logging
+import os
 import shutil
 from typing import Optional
 
@@ -52,6 +53,47 @@ _FALLBACK_MIME_BY_EXT = {
 
 # Check if Docker is available
 _DOCKER_PATH = shutil.which("docker")
+
+
+def filter_extra_mounts(mounts):
+    """Phase 10 (audit S1.4): extra-mount allowlist.
+
+    Only two source families may be bind-mounted into a sandbox container:
+      * paths under SANDBOX_TMP_ROOT (the per-job workspace the worker
+        materializes inputs/outputs in), and
+      * the configured LLM proxy Unix socket (SANDBOX_LLM_PROXY_SOCKET) —
+        a socket FILE, mounted read-only.
+    Everything else (/, /etc, the docker socket, the repo, arbitrary host
+    paths) is refused and reported. Fail closed.
+
+    Returns (kept, refused) where kept is a list of
+    (source, target, read_only) tuples and refused a list of
+    (source, reason).
+    """
+    from app.config import settings as _settings
+
+    tmp_root = os.path.realpath(getattr(_settings, "SANDBOX_TMP_ROOT",
+                                        "/tmp/zhanlu_sandbox"))
+    proxy_socket = os.path.realpath(getattr(
+        _settings, "SANDBOX_LLM_PROXY_SOCKET",
+        "/var/run/zhanlu-llm-proxy.sock"))
+
+    kept, refused = [], []
+    for m in mounts or []:
+        src = (m.get("source") or "").strip()
+        tgt = m.get("target")
+        ro = bool(m.get("read_only", True))
+        if not src or not tgt:
+            refused.append((src or "<missing>", "malformed mount"))
+            continue
+        real = os.path.realpath(src)
+        under_tmp = real == tmp_root or real.startswith(tmp_root + os.sep)
+        is_proxy_socket = real == proxy_socket
+        if under_tmp or is_proxy_socket:
+            kept.append((src, tgt, ro))
+        else:
+            refused.append((src, "outside the sandbox mount allowlist"))
+    return kept, refused
 
 
 def is_docker_available() -> bool:
@@ -147,16 +189,22 @@ def run_sandbox_container(
     ]
 
     # Add any extra bind mounts (e.g. LLM proxy Unix socket).
+    # Phase 10 (audit S1.4): extra_mounts previously accepted ARBITRARY
+    # host paths (/, the docker socket, the repo). Only allowlist-approved
+    # sources may enter the container.
     if extra_mounts:
-        for m in extra_mounts:
-            src = m.get("source")
-            tgt = m.get("target")
-            ro = bool(m.get("read_only", True))
-            if not src or not tgt:
-                logger.warning("Skipping malformed extra_mount: %r", m)
-                continue
+        kept, refused = filter_extra_mounts([
+            {"source": m.get("source"), "target": m.get("target"),
+             "read_only": m.get("read_only", True)}
+            for m in extra_mounts
+        ])
+        for src, tgt, ro in kept:
             ro_suffix = ":ro" if ro else ":rw"
             docker_cmd.extend(["-v", f"{src}:{tgt}{ro_suffix}"])
+        if refused:
+            logger.warning(
+                "Refused %d extra_mount(s) outside the sandbox allowlist: %s",
+                len(refused), [r[0] for r in refused])
 
     # Add environment variables
     if env_vars:

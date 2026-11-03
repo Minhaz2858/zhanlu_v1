@@ -847,6 +847,26 @@ class Settings(BaseSettings):
     # (0 = disable). One-shot by default to bound cost and latency.
     TOOL_REFORMULATE_MAX_ATTEMPTS: int = 1
 
+    # ── Phase 2.1: shared failure taxonomy + bounded healing policy ─────
+    # (app/services/execution_recovery.py). The per-call retry ceiling;
+    # per-turn TOTAL healing attempts are bounded by EXEC_RECOVERY_MAX_PER_TASK
+    # via the HealingBudget carried in the tool context.
+    EXEC_RECOVERY_MAX_ATTEMPTS_PER_CALL: int = 2
+    EXEC_RECOVERY_MAX_PER_TASK: int = 4
+    # C-1 (enterprise reliability audit, 2026-11-01): verdict captured
+    # evidence with the pure Phase-2.5 validators
+    # (app/services/evidence_validation.py) instead of storing every item as
+    # "unvalidated". Deterministic, no LLM; validation errors fail open to
+    # the previous "unvalidated" behavior. Rollback: set False in env.
+    EVIDENCE_VALIDATION_ENABLED: bool = True
+    # Consequential (mutating) tools are never retried without idempotency
+    # evidence — the first attempt may have landed.
+    EXEC_RECOVERY_WRITE_IDEMPOTENCY_REQUIRED: bool = True
+    # Destructive-tier tools require human confirmation even for system
+    # meta-agents (closes the unconditional SYSTEM_META_AGENTS bypass for the
+    # highest risk tier only; lower tiers keep existing behavior).
+    EXEC_APPROVAL_DESTRUCTIVE_ALWAYS: bool = True
+
     # ── Artifact quality gate (Phase B) ─────────────────────────────────
     # When the FSM ships artifacts, the deterministic confidence score must
     # meet this threshold or the artifacts are held back from the result
@@ -978,6 +998,31 @@ class Settings(BaseSettings):
     # Fix 3: NL2SQL JOIN fan-out guard — pre-aggregation-before-join rules
     # in the SQL prompt + structural warnings that trigger one self-correct.
     NL2SQL_FANOUT_GUARD_ENABLED: bool = False
+    # P0-6 (2026-10-30): catalog-based join fan-out check in the execution
+    # gate. Warning-only (never refuses); derives cardinality from declared
+    # FK direction, join-column key roles and indexed row counts — fully
+    # generic, no table-name knowledge. Ships off like every new gate.
+    NL2SQL_JOIN_FANOUT_CHECK_ENABLED: bool = False
+    # Stage 2B-2 (2026-10-30): confidence-aware retrieval ranking + scope-
+    # aware coverage rerouting, via effective_classification() facts (human
+    # override > inferred×confidence > unknown). Refinement only — nothing
+    # is filtered, and with the flag off retrieval is byte-identical.
+    SCHEMA_CLASSIFICATION_RETRIEVAL_ENABLED: bool = False
+    # Stage 2B-3 (2026-10-30): scope_authorization enforcement. Plan level
+    # (P-SV clarify/disclosure) and execution level (refuse final SQL that
+    # answers a company-wide question solely from confirmed partition tables
+    # while a global dataset exists, or a different partition than asked).
+    # Evidence-positive only: unknown scope is NEVER convicted, human
+    # overrides win via effective_classification, and a catalog hiccup
+    # degrades to not-applicable rather than refusing. Ships OFF.
+    SCHEMA_SCOPE_AUTHORIZATION_ENABLED: bool = False
+    # Stage 2B-4 (2026-10-30): corrective-planner scope awareness. When a
+    # plan node is refused by scope enforcement, the corrective re-plan
+    # receives the structured refusal (scope_check + scope_disclosure from
+    # the durable observation) and the replacement data step is nudged to
+    # prefer the verified company-wide dataset. Ships OFF; enforcement is
+    # unchanged and remains the final authority.
+    SCHEMA_CORRECTIVE_SCOPE_HINTS_ENABLED: bool = False
     # Fix 5: consonant-skeleton fuzzy match so "Dashbord"-class typos still
     # route to the dashboard machinery across all four intent detectors.
     DASHBOARD_FUZZY_MATCH_ENABLED: bool = False
@@ -1566,6 +1611,16 @@ class Settings(BaseSettings):
     # KG_METRIC_BOOTSTRAP_ENABLED: LLM-propose project_metric rows at index
     #   time (status='proposed'; human approval required before use).
     KG_COVERAGE_PROBE_ENABLED: bool = False
+    # B8 (2026-10-22): periodically re-probe table coverage (min/max of the
+    # temporal column) so the catalog's data-window annotations don't go stale as
+    # a warehouse's data grows. The refresh only does work when
+    # KG_COVERAGE_PROBE_ENABLED is also on (that flag is what populates
+    # coverage_json at index time). KG_COVERAGE_REFRESH_STALE_AFTER_S bounds the
+    # work to tables whose coverage is older than that — a daily refresh is the
+    # default.
+    KG_COVERAGE_REFRESH_ENABLED: bool = True
+    KG_COVERAGE_REFRESH_INTERVAL_S: int = 21600  # poll every 6h
+    KG_COVERAGE_REFRESH_STALE_AFTER_S: int = 86400  # refresh coverage older than 24h
     KG_FRESHNESS_SHORTCIRCUIT_ENABLED: bool = False
     KG_BUSINESS_CONTEXT_ENABLED: bool = False
     KG_METRIC_BOOTSTRAP_ENABLED: bool = False
@@ -1709,6 +1764,89 @@ class Settings(BaseSettings):
     #   per delegation — enable when sub-agent quality matters more than
     #   latency).
     DELEGATE_VERIFY_ENABLED: bool = False
+    # DELEGATE_AGENTAPP_AWARE (P0-1, 2026-10-31): when True, delegate_task
+    #   resolves a PUBLISHED AgentApp by agent_name and runs the child with
+    #   that app's own 5-layer prompt + tool_config.enabled_tools (audit
+    #   breakpoint 2: children used to get the generic fallback prompt and
+    #   the default toolset). Originally False per roadmap; flipped True
+    #   2026-11-01 (enterprise reliability milestone, audit A-2): the fix
+    #   is tested (test_multiagent_mas / delegate suites) and default-OFF
+    #   left cross-department discovery/routing advertising a capability
+    #   the default deployment could not honor. Rollback: set False in env.
+    DELEGATE_AGENTAPP_AWARE: bool = True
+    # AGENT_UNIVERSAL_TOOL_ACCESS (multi-agent orchestration milestone §4,
+    # 2026-11-01; unified contract same day): every delegated child —
+    # builtin or published AgentApp — can DISCOVER the shared tool
+    # registry. An AgentApp's enabled_tools are PREFERENCES (priority
+    # head), disabled_tools a hard deny, and tool_config.strict_tools=true
+    # is the explicit operator opt-in that restores an EXACT allowlist.
+    # Injection is bounded (priority head + task-relevant top-K +
+    # search_tools escape hatch) and role-RBAC-filtered; governance is
+    # unchanged (org/project boundaries, per-tool RBAC, data-source
+    # policies, credential isolation all enforced in the governed
+    # execute_tool layer). Rollback: set False in env to restore the
+    # legacy contract (AgentApp exact allowlist / builtin
+    # enabled_by_default).
+    AGENT_UNIVERSAL_TOOL_ACCESS: bool = True
+    # DELEGATE_INHERIT_BINDINGS (P0-2, 2026-10-31): when True, the child loop
+    #   receives the parent's conversation_id + bound_kb_ids in its tool
+    #   context (audit breakpoint 3: ask_data_agent inside a delegated child
+    #   could not see the parent's bound data sources). The child is ALWAYS
+    #   permission-checked as its own agent identity — the parent's
+    #   agent_name/agent_app_id are never inherited (meta-agent bypass leak).
+    #   Originally False; flipped True 2026-11-01 with P0-1 (audit A-2).
+    #   Rollback: set False in env.
+    DELEGATE_INHERIT_BINDINGS: bool = True
+    # ── P1/P2 Hybrid collaboration governance (2026-10-31) ──
+    # These bound the Collaboration Broker (backend/app/services/agent_
+    # collaboration/). They are additive, opt-OUT via a single master flag.
+    # The broker is a LOGICAL service inside the existing delegate_task
+    # runtime — it does NOT create a new orchestrator or agent registry.
+    # Master kill-switch: set False to disable ALL governance (pure legacy
+    # delegation). Rollback lever if any policy proves too strict in prod.
+    COLLAB_POLICY_ENFORCED: bool = True
+    # Max delegation-chain depth. Pattern C (peer-to-peer) can chain
+    # A→B→C but A→B→A is a cycle; depth also caps runaway recursion.
+    COLLAB_MAX_DEPTH: int = 4
+    # Max child tasks a single requesting agent may spawn per conversation
+    # (prevents an agent from spinning up an unbounded sub-team).
+    COLLAB_MAX_CHILDREN_PER_PARENT: int = 8
+    # Reuse the existing batch fan-out concurrency bound for nested peer
+    # delegation (no second semaphore needed).
+    COLLAB_MAX_CONCURRENT: int = 4  # mirrors DELEGATE_MAX_CONCURRENT
+    # Reuse the existing sub-agent wall-clock budget for peer delegation.
+    COLLAB_TIMEOUT_SECONDS: float = 600.0  # mirrors DELEGATE_WALL_SECONDS
+    # Soft token budget per delegation subtree (0 = unlimited). When a
+    # subtree would exceed it the broker warns but does not hard-fail
+    # (tokens are best-effort; the wall-clock + iteration budgets are the
+    # real safety net).
+    COLLAB_TOKEN_BUDGET: int = 0
+    # Duplicate task prevention: same (requesting, target, objective) within
+    # a conversation is a re-delegation — block it rather than re-running.
+    COLLAB_DEDUP_ENABLED: bool = True
+    # Cycle detection (A→B→A, A→B→C→A). When False, only depth limits apply.
+    COLLAB_CYCLE_DETECTION: bool = True
+    # Opt-in allowlist of agents permitted to INITIATE delegations. Empty =
+    # any agent (including specialists, for Pattern C) may delegate. Set to a
+    # comma-separated list to restrict (e.g. "general_assistant").
+    COLLAB_DELEGATORS_ALLOWLIST: str = ""
+    # ── P2 Phase 2 (Intelligent Collaboration, 2026-10-31) ──
+    # Conditional peer collaboration (Part 2): allow a specialist sub-agent to
+    # call delegate_task to request help from another specialist (Pattern C).
+    # The Collaboration Broker still governs every nested call (cycle/depth/
+    # child-count/dedup), so this only *enables the tool* for children — it does
+    # NOT relax governance. Set False to keep children delegation-free.
+    COLLAB_NESTED_DELEGATION_ENABLED: bool = True
+    # Critic/Reviewer workflow (Part 1): makes the reviewer path available.
+    # Invocation itself is SELECTIVE — the caller opts in per delegation
+    # (delegate_task review=True) or via a DAG "reviewer" node. Simple questions
+    # never auto-trigger a reviewer.
+    COLLAB_REVIEW_ENABLED: bool = True
+    # Bounded targeted re-investigation: when a reviewer reports missing
+    # evidence, the orchestrator may dispatch at most this many targeted
+    # follow-up delegations (per reviewed sub-agent) before accepting the
+    # partial result. Prevents review loops.
+    COLLAB_REVIEW_MAX_RETRIES: int = 1
     # ── IBM ReAct article fixes (2026-10-08) ──
     # REACT_SIGNAL_NUDGE_ENABLED: after a data-grounding tool returns usable
     #   data, append a system nudge telling the model it may close the loop
@@ -1864,6 +2002,26 @@ class Settings(BaseSettings):
     # behavior, grounded in the semantic store's VERIFIED vocabulary only.
     # Required for the clarify gate and multi-turn state below to function.
     NL2SQL_PLANNER_ENABLED: bool = True
+    # 2026-10-29 (dynamic-schema query contract): verified metric definitions
+    # (metric_definitions, per datasource_id) become BINDING constraints —
+    # injected into the SQL prompt AND enforced by the execution gate
+    # (execution_gate "metric_binding" check): an output alias claiming a
+    # verified concept but computed from a different column is refused before
+    # execution. Generic: bindings come from each datasource's own catalog.
+    METRIC_BINDING_ENFORCEMENT_ENABLED: bool = True
+    # 2026-10-29: bounded report planning — at most this many nl2sql nodes per
+    # turn (duplicate-intent nodes are merged first). The incident turn ran
+    # nine (483s); a weekly report needs totals + a few breakdowns.
+    NL2SQL_MAX_REPORT_NODES: int = 4
+    # 2026-10-29 verification gate: per-turn SQL execution budget enforced at
+    # the shared NLAnswerService.answer boundary — covers the ReAct tool-loop
+    # path that plan-node caps cannot see. The incident turn executed 9
+    # warehouse queries; a report needs totals + a few breakdowns. 0 = off.
+    NL2SQL_MAX_TURN_SQL_QUERIES: int = 6
+    # Window in which the per-turn budget counts executions (turn ids are
+    # unique per message; the window is only a safety net for conversation-
+    # scoped fallbacks and registry hygiene).
+    NL2SQL_TURN_BUDGET_WINDOW_S: int = 1800
     # 2026-10-09: activated (was False). The planner's structured
     # clarification (metric/time/slice options) is consumed at both call
     # sites (nl_answer_service + delegation_tools) and relayed to the user
@@ -2017,6 +2175,14 @@ class Settings(BaseSettings):
 
     # ── Sandbox (runbook §6) ────────────────────────────────────────────
     SANDBOX_ENABLED: bool = False
+
+    # Phase 10 (audit S1.1-S1.3): host-side execution of LLM-generated or
+    # user-authored code (worker in-process fallback, workflow Code-node
+    # restricted-exec fallback, sandbox runner subprocess fallback) is
+    # REFUSED unless a deployment EXPLICITLY sets this to true. Restricted
+    # __builtins__ is not a CPython security boundary; silent isolation
+    # downgrade on container-runtime outage = backend-privilege RCE.
+    SANDBOX_ALLOW_HOST_FALLBACK: bool = False
 
     # ── Automation reliability (Phase 1) ────────────────────────────────
     # Wall-clock deadline for a single automation run. Executions whose

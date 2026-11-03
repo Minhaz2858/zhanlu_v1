@@ -112,16 +112,19 @@ async def execute_in_sandbox(
         )
 
     # --- No Docker available ---
-    # 2026-10-21 SECURITY FIX (audit D2): in a PRODUCTION deployment
-    # (SANDBOX_ENABLED=True) a container-runtime outage must NOT silently
-    # degrade to running LLM-generated code on the backend host — that is
-    # remote code execution with backend privileges. Refuse instead. Only
-    # the dev path (SANDBOX_ENABLED=False) keeps the subprocess fallback.
+    # 2026-10-21 SECURITY FIX (audit D2), tightened by Phase 10 (audit
+    # S1.3): a container-runtime outage must NOT silently degrade to
+    # running LLM-generated code on the backend host — that is remote
+    # code execution with backend privileges. Host fallback now requires
+    # an EXPLICIT SANDBOX_ALLOW_HOST_FALLBACK=true deployment decision
+    # (the old SANDBOX_ENABLED gate defaulted to False, i.e. host exec
+    # was the default for every deployment that forgot the env var).
     from app.config import settings as _sb_settings
-    if getattr(_sb_settings, "SANDBOX_ENABLED", False):
+    if not getattr(_sb_settings, "SANDBOX_ALLOW_HOST_FALLBACK", False):
         logger.error(
-            "Sandbox: Docker unavailable but SANDBOX_ENABLED=True — "
-            "refusing host-fallback code execution (RCE risk)"
+            "Sandbox: Docker unavailable and SANDBOX_ALLOW_HOST_FALLBACK "
+            "is not enabled — refusing host-fallback code execution "
+            "(RCE risk)"
         )
         return {
             "success": False,
