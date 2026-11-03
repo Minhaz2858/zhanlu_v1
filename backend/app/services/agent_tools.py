@@ -18,6 +18,7 @@ import time as _time
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.database import SessionLocal
 from app.models.agent_app import AgentApp
 from app.models.automation_task import AutomationTask
 from app.models.knowledge_base import KnowledgeBase
@@ -200,6 +201,26 @@ async def _execute_with_reliability(
     ctx = context or {}
     last_failure: dict | None = None
 
+    def _run_sync_on_own_session(current_args: dict):
+        """Phase 9 (audit A1): run a SYNC handler on its OWN Session.
+
+        SQLAlchemy Sessions are not thread-safe. Parallel tool batches
+        dispatch several sync handlers via asyncio.to_thread at once —
+        handing every worker the caller's single Session corrupts its
+        connection/transaction state (intermittent InvalidRequestError,
+        then misclassified as retryable). Each call gets a fresh
+        SessionLocal, closed in finally (failure path included).
+        Handlers commit on their own session exactly as before; the only
+        observable difference is that uncommitted caller state is not
+        visible (tools run against committed data — the production
+        contract).
+        """
+        session = SessionLocal()
+        try:
+            return handler(current_args, session, user_id)
+        finally:
+            session.close()
+
     async def call_fn(current_args: dict) -> dict:
         """Invoke the handler directly (NO inner retry — the reliability
         layer owns retry). Convert failure dicts to exceptions so the
@@ -208,7 +229,7 @@ async def _execute_with_reliability(
         if asyncio.iscoroutinefunction(handler):
             raw = await handler(current_args, db, user_id, context=ctx)
         else:
-            raw = await asyncio.to_thread(handler, current_args, db, user_id)
+            raw = await asyncio.to_thread(_run_sync_on_own_session, current_args)
         if isinstance(raw, dict) and not raw.get("success") and not raw.get("requires_approval"):
             last_failure = raw
             raise _ToolResultFailure(raw)
@@ -259,7 +280,7 @@ async def _execute_with_reliability(
         try:
             if asyncio.iscoroutinefunction(handler):
                 return await handler(arguments, db, user_id, context=ctx)
-            return await asyncio.to_thread(handler, arguments, db, user_id)
+            return await asyncio.to_thread(_run_sync_on_own_session, arguments)
         except Exception as e2:
             return {
                 "success": False,

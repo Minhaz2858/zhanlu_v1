@@ -1389,6 +1389,34 @@ def execute_automation(execution_id: str) -> None:
                         f"scheduled."
                     )
                     return
+                # Phase 9 truthfulness gate (audit D3): a data-expected run
+                # that produced a report with ZERO successful datasource
+                # calls did not ground its figures — fail retryably, never
+                # ship fabricated numbers as a completed success.
+                if _should_fail_for_ungrounded_report(
+                    assistant_text, tool_outcome,
+                    data_expected=bool(getattr(task, "data_source_id", None)),
+                ):
+                    logger.warning(
+                        "execute_automation: %s failing run — report with no "
+                        "successful datasource call (data_calls=%d, "
+                        "data_failures=%d)",
+                        execution_id, tool_outcome.get("data_calls", 0),
+                        tool_outcome.get("data_failures", 0),
+                    )
+                    _mark_failed(
+                        db, execution,
+                        "Report produced without any successful datasource "
+                        "call — figures were not grounded in queried data "
+                        "(retryable)",
+                    )
+                    _persist_state["assistant_text"] = (
+                        "⚠ The report could not be grounded in data — no "
+                        "datasource query succeeded during this run, so it "
+                        "was held back rather than shipping unverified "
+                        "figures. A retry has been scheduled."
+                    )
+                    return
                 # Append a ledger entry to the per-project memory conversation.
                 try:
                     from app.services.automation_runtime import (
@@ -1553,6 +1581,15 @@ def execute_automation(execution_id: str) -> None:
             final_error = (
                 f"Execution produced no output and {tool_failures} of "
                 f"{tool_calls} tool call(s) failed"
+            )
+        elif _should_fail_for_ungrounded_report(
+            assistant_text, tool_outcome or {},
+            data_expected=bool(getattr(task, "data_source_id", None)),
+        ):
+            final_status = "failed"
+            final_error = (
+                "Report produced without any successful datasource call — "
+                "figures were not grounded in queried data"
             )
         rc = db.execute(
             update(AutomationExecution)
@@ -1953,16 +1990,29 @@ def _summarize_tool_outcomes(messages: list) -> dict:
     seen: set = set()
     calls = 0
     failures = 0
+    data_calls = 0
+    data_failures = 0
     errors: list = []
 
+    def _is_data_payload(payload: dict) -> bool:
+        """Executed-query evidence: a ``rows`` key or an explicit
+        ``executed`` flag. Schema/metadata results (describe_schema,
+        list_data_sources) carry neither — they describe capability,
+        they do not ground figures."""
+        return ("rows" in payload) or (payload.get("executed") is True)
+
     def _record(call_id: str, payload: dict) -> None:
-        nonlocal calls, failures
+        nonlocal calls, failures, data_calls, data_failures
         key = call_id or f"anon-{calls}"
         if key in seen:
             return
         seen.add(key)
         calls += 1
         ok = bool(payload.get("success", True)) or bool(payload.get("requires_approval"))
+        if _is_data_payload(payload):
+            data_calls += 1
+            if not ok:
+                data_failures += 1
         if not ok:
             failures += 1
             err = str(payload.get("error") or payload.get("message") or "").strip()
@@ -1985,7 +2035,9 @@ def _summarize_tool_outcomes(messages: list) -> dict:
                 if not isinstance(results, dict):
                     continue
                 _record(str(tc.get("id") or ""), results)
-    return {"calls": calls, "failures": failures, "errors": errors}
+    return {"calls": calls, "failures": failures,
+            "data_calls": data_calls, "data_failures": data_failures,
+            "errors": errors}
 
 
 def _is_canned_fallback_output(text: str) -> bool:
@@ -2013,6 +2065,48 @@ def _should_fail_for_total_tool_failure(output_text: str, outcome: dict) -> bool
         return False
     text = (output_text or "").strip()
     return not text or text == "(no response)" or _is_canned_fallback_output(text)
+
+
+_HONEST_FAILURE_MARKERS = (
+    # response-shape vocabulary (NOT datasource-specific): a run that is
+    # honestly explaining its own failure is not a fabricated report
+    "could not", "couldn't", "unable to", "failed to", "was unreachable",
+    "is unreachable", "no data", "no figures", "not available",
+    "could not be completed", "did not execute",
+    "无法", "未能", "查询失败", "没有数据", "暂无数据", "连接失败",
+)
+
+
+def _should_fail_for_ungrounded_report(output_text: str, outcome: dict,
+                                       *, data_expected: bool) -> bool:
+    """Truthfulness gate (Phase 9 / audit D3): a data-expected run that
+    produced a substantive report with ZERO successful datasource calls
+    did not ground its figures — it must be marked failed (retryable),
+    never shipped as a completed success.
+
+    Data-expected means the task pins a ``data_source_id``, the run
+    itself attempted data tools (every one of which failed — an attempt
+    is the agent's own statement that it needed data), or the caller
+    passes ``data_expected=True``. Honest failure explanations pass the
+    gate — they describe what happened instead of inventing figures.
+    Runs without data expectation (file / web / pure-text tasks) are
+    never gated.
+    """
+    data_calls = int(outcome.get("data_calls") or 0)
+    data_failures = int(outcome.get("data_failures") or 0)
+    if not data_expected and not data_calls:
+        return False
+    data_calls = int(outcome.get("data_calls") or 0)
+    data_failures = int(outcome.get("data_failures") or 0)
+    if data_calls and data_failures < data_calls:
+        return False  # at least one successful data call grounded the report
+    text = (output_text or "").strip()
+    if not text or text == "(no response)" or _is_canned_fallback_output(text):
+        return False  # empty output is the total-tool-failure gate's job
+    low = text.lower()
+    if any(marker in low for marker in _HONEST_FAILURE_MARKERS):
+        return False  # honest failure explanation, not fabricated figures
+    return True
 
 
 def _heal_conv_agent_name(conv, agent) -> bool:
