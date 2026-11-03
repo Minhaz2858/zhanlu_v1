@@ -76,3 +76,34 @@ def test_agent_without_bindings_falls_back_to_json_projection(db):
     agent.knowledge_bases = ["ds-1"]  # legacy-only agent
     db.commit()
     assert _resolve(db, agent) == ["ds-1"]
+
+
+# ── T8-5: auto-bind migration gate (D8) ─────────────────────────────────────
+
+def _set_flag(db, org, key, value):
+    from app.services import workspace_settings_service as wss
+    wss.set_value(db, key, value, org_id=org,
+                  app_id="default-app")
+    wss._cache.clear()
+
+
+def test_auto_bind_still_applies_when_not_migrated(db):
+    agent = db.get(AgentApp, "app-r")
+    _set_flag(db, ORG, "auto_bind_all_datasources", "true")
+    bound = _resolve(db, agent)
+    assert "ds-1" in bound  # compat: flag honored until migration
+
+
+def test_auto_bind_skipped_once_workspace_migrated(db):
+    agent = db.get(AgentApp, "app-r")
+    _set_flag(db, ORG, "auto_bind_all_datasources", "true")
+    _set_flag(db, ORG, "auto_bind_migrated_at", "2026-11-03T00:00:00")
+    assert _resolve(db, agent) == []  # no widening after migration
+
+
+def test_migrated_agent_with_explicit_binding_gets_exactly_bindings(db):
+    agent = db.get(AgentApp, "app-r")
+    _set_flag(db, ORG, "auto_bind_all_datasources", "true")
+    _set_flag(db, ORG, "auto_bind_migrated_at", "2026-11-03T00:00:00")
+    upsert_binding(db, ORG, "app-r", "ds-1", actor_id="u1")
+    assert _resolve(db, agent) == ["ds-1"]

@@ -1069,6 +1069,20 @@ def _maybe_extend_with_workspace_auto_bind(
     org_id = getattr(agent_app, "org_id", "default-org")
     app_id = getattr(agent_app, "app_id", "default-app")
 
+    # Phase 8 (D8/T8-5): once the workspace has migrated to explicit
+    # bindings, the flag STOPS widening scope — explicit AgentDataBinding
+    # rows are authoritative. Legacy auto-bind customers keep their access
+    # via the materialized bindings, never via this silent union.
+    try:
+        _migrated = workspace_settings_service.get_str(
+            db, "auto_bind_migrated_at",
+            org_id=org_id, app_id=app_id,
+        )
+        if _migrated:
+            return bound_ids
+    except Exception as e:  # fail toward CURRENT behavior (never widen less)
+        logger.debug("auto_bind_migrated_at lookup failed (non-fatal): %s", e)
+
     # Every connected KB (database or file) in the same workspace.
     rows = (
         db.query(KnowledgeBase)
