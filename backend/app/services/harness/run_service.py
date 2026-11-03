@@ -26,6 +26,66 @@ logger = logging.getLogger(__name__)
 AGENT_RUN_TASK_TYPE = "agent_run"
 
 
+# ── Phase 8 T8-8: canonical AgentRun provenance (prov-v1) ───────────────────
+
+def build_run_provenance(row, db) -> dict:
+    """Build the canonical prov-v1 envelope for a finalized AgentRun row.
+
+    Pure read-model over the run row + its AgentRunStep rows + the agent's
+    binding refs. Deterministic for unchanged underlying data. Trust:
+      * ``run.status`` is copied VERBATIM (failed/partial never look ok);
+      * tool-call steps become ``agent_tool_call`` entries with
+        retrieved=True (the tool really executed) — influence/supports_answer
+        are NEVER claimed at this layer;
+      * no chain-of-thought and no raw tool inputs — refs only;
+      * org attribution from the persisted ``caller_context`` (never a
+        caller-supplied override).
+    """
+    from app.models.agent_run_step import AgentRunStep
+
+    try:
+        ctx = json.loads(row.caller_context) if row.caller_context else {}
+    except Exception:
+        ctx = {}
+
+    run_block = {
+        "run_id": row.run_id,
+        "org_id": ctx.get("org_id") or getattr(row, "org_id", None),
+        "agent_name": row.agent_name,
+        "status": row.status,  # verbatim — failed stays failed
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "parent_run_id": row.parent_run_id,
+        "conversation_id": ctx.get("conversation_id"),
+        "user_id": ctx.get("user_id"),
+    }
+
+    entries: list[dict] = []
+    try:
+        steps = (
+            db.query(AgentRunStep)
+            .filter(AgentRunStep.run_id == row.run_id,
+                    AgentRunStep.step_type == "tool_call")
+            .order_by(AgentRunStep.step_index.asc())
+            .all()
+        )
+        for step in steps:
+            entries.append({
+                "source_type": "agent_tool_call",
+                "source_ref": f"agent_run:{row.run_id}:step:{step.step_id}",
+                "tool_name": step.tool_name,
+                "status": step.status or "ok",
+                "retrieved": True,
+                "org_id": run_block["org_id"],
+                "duration_ms": step.duration_ms,
+                "execution_ref": f"agent_run:{row.run_id}:step:{step.step_id}",
+            })
+    except Exception as step_err:
+        logger.warning("run provenance: step enumeration failed: %s", step_err)
+
+    return {"version": "prov-v1", "run": run_block, "entries": entries}
+
+
 def _record_agent_run_observation(run_id: str) -> None:
     """Phase 5B: observed-execution linkage for a COMPLETED agent run.
 
@@ -89,14 +149,17 @@ class AgentRunService:
         run_id: str | None = None,
         parent_run_id: str | None = None,
         caller_context: dict | None = None,
+        db=None,
     ) -> str:
-        """Create a persisted run record. Returns run_id."""
+        """Create a persisted run record. Returns run_id. Optional ``db``."""
         from app.models.agent_run import AgentRun
 
         run_id = run_id or uuid.uuid4().hex[:32]
         now = datetime.now(timezone.utc)
 
-        db = SessionLocal()
+        own = db is None
+        if own:
+            db = SessionLocal()
         try:
             record = AgentRun(
                 run_id=run_id,
@@ -122,7 +185,8 @@ class AgentRunService:
             logger.warning("AgentRunService: failed to create run record: %s", e)
             return run_id  # return run_id even if persistence failed (best-effort)
         finally:
-            db.close()
+            if own:
+                db.close()
 
     # ------------------------------------------------------------------
     # Inline execution (sync-to-caller)
@@ -299,8 +363,11 @@ class AgentRunService:
                 step_type=step_type,
                 step_index=step_index,
                 tool_name=tool_name,
-                tool_input=tool_input,
-                tool_output=tool_output,
+                # Phase 8 fix (latent bug exposed by T8-8 tests): the model
+                # columns are tool_args/result_preview — the old kwarg names
+                # made EVERY append_step call fail with TypeError.
+                tool_args=tool_input,
+                result_preview=tool_output,
                 iteration=iteration,
                 duration_ms=duration_ms,
                 checkpoint=checkpoint,
@@ -323,7 +390,10 @@ class AgentRunService:
         """Mark a run as terminated with ``status`` ('completed' or 'failed').
         Optional counters override the row's values.  Returns True on success.
         Optional ``db`` for tests.
-        """
+
+        Phase 8 T8-8: after committing the terminal status, a canonical
+        prov-v1 envelope is persisted onto the row (fail-open — an envelope
+        failure never breaks the finalize itself)."""
         from app.models.agent_run import AgentRun
         from datetime import datetime, timezone
         own = db is None
@@ -342,6 +412,19 @@ class AgentRunService:
             if tool_call_count is not None:
                 row.tool_call_count = tool_call_count
             db.commit()
+            # Provenance envelope AFTER the terminal commit (fail-open).
+            try:
+                envelope = build_run_provenance(row, db)
+                if envelope is not None:
+                    row.provenance_json = json.dumps(
+                        envelope, ensure_ascii=False, sort_keys=True,
+                        default=str)
+                    db.commit()
+            except Exception as env_err:
+                logger.warning(
+                    'AgentRunService: provenance envelope for %s failed '
+                    '(non-fatal): %s', run_id, env_err)
+                db.rollback()
             return True
         except Exception as e:
             logger.warning('AgentRunService: finalize_run(%s) failed: %s', run_id, e)

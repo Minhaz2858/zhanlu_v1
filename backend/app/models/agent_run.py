@@ -45,3 +45,7 @@ class AgentRun(TimestampedBase):
     activity_seq = Column(Integer, nullable=True)
     match_confidence = Column(Float, nullable=True)
     match_method = Column(String(40), nullable=True)
+
+    # --- Phase 8 T8-8: canonical prov-v1 envelope (additive, NULL =
+    # historical rows / envelope not yet written; never fabricated).
+    provenance_json = Column(Text, nullable=True)
