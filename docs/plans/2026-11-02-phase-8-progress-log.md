@@ -171,3 +171,46 @@ rows from an early debug run (audit_events/revoked_tokens for `u1`) cleaned.
 (this phase). Remaining: auto-bind flag removal once T8-12 criteria are met;
 deferred items in `docs/plans/2026-11-03-phase-8-2-completion-report.md`
 (per-session SSE binding residual, scoped tokens, rate limiting).
+
+---
+
+# Phase 9 — Enterprise reliability & E2E acceptance (2026-11-03)
+
+Base: `7865c9662` · Commits: `9e01e1a66` (reliability fixes), `a344cbb78`
+(acceptance + test-infra), `60c6fdcf0` (audit doc), + this report.
+
+**P0 re-verification:** 6 of 8 P0s from the 2026-10-20 audit were already
+fixed on HEAD (B1 honesty guard, A2 preflight probe, A3 delegate wall-clock,
+D4 FSM id-adoption, C1 frontend watchdog, E1 credential encryption). The two
+live ones are now fixed TDD:
+
+- **A1** `9e01e1a66` — sync tool handlers ran on the caller's SQLAlchemy
+  Session inside `asyncio.to_thread` workers while parallel batches
+  dispatched concurrently. Per-call `SessionLocal` (closed in `finally`);
+  4 isolation tests.
+- **D3** `9e01e1a66` — data-expected automations with zero successful
+  datasource calls could ship fabricated reports as `completed`. Data-call
+  tally (executed-query evidence only) + `_should_fail_for_ungrounded_report`
+  wired at both status points; honest failure explanations pass; 13 tests.
+
+**Reproducible baseline restored:** the full backend sweep produced ~12.8k
+errors from three stacked test-infra defects (DATABASE_URL pollution at
+collection time; lazy-registered models truncated before creation — 12,224
+setup errors; missing `engine` fixture) plus a broken `--no-llm` flag that
+let live-LLM tests hang on a dead proxy. All fixed; conftest fixes ride on
+the uncommitted T1 WIP by design (documented).
+
+**Acceptance:** `tests/test_e2e_enterprise_acceptance.py` — 5 deterministic
+enterprise scenarios (evidence survival, fabrication rejection, batch
+isolation, cross-org isolation, privileged split). Reliability matrix (30
+suites, all 10 audit areas): 299 passed / 8 failed — all 8 re-verified
+pre-existing at HEAD (stash-tested). Frontend: 1154/1183, all failures in
+active foreign-WIP files. Production build: exit 0.
+
+**Deferred (foreign-WIP collision):** model/migration-020 drift (legacy
+`project` column still on models while live foreign-WIP services query it) —
+P1, owner coordination required; documented precisely by
+`tests/migrations/test_020_*`.
+
+Full details: `docs/audits/2026-11-03-phase-9-reliability-audit.md` and
+`docs/plans/2026-11-03-phase-9-completion-report.md`.
