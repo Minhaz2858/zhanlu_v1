@@ -1229,22 +1229,29 @@ class BrandKitRequest(BaseModel):
 
 @router.get("/workspaces/brand-kit")
 def get_workspace_brand_kit(
-    org_id: str = Query("default-org"),
     app_id: str = Query("default-app"),
     db: Session = Depends(get_db),
+    user=Depends(get_current_user_required),
 ):
-    """Return the workspace's brand kit (or ``{"brand_kit": null}``)."""
+    """Return the workspace's brand kit (or ``{"brand_kit": null}``).
+
+    Phase 10 (audit S3.1): these endpoints were previously UNAUTHENTICATED
+    and trusted a client-supplied ``org_id`` query param — unauthenticated
+    cross-org read/write. The tenant key is now the authenticated
+    principal's org, never a query parameter.
+    """
     from app.services.artifacts.brand_kit import get_brand_kit
 
+    org_id = getattr(user, "org_id", None) or "default-org"
     return {"brand_kit": get_brand_kit(db, org_id=org_id, app_id=app_id)}
 
 
 @router.put("/workspaces/brand-kit")
 def put_workspace_brand_kit(
     req: BrandKitRequest,
-    org_id: str = Query("default-org"),
     app_id: str = Query("default-app"),
     db: Session = Depends(get_db),
+    user=Depends(get_current_user_required),
 ):
     """Create or replace the workspace's brand kit.
 
@@ -1255,6 +1262,7 @@ def put_workspace_brand_kit(
     """
     from app.services.artifacts.brand_kit import set_brand_kit
 
+    org_id = getattr(user, "org_id", None) or "default-org"
     try:
         kit = set_brand_kit(
             db,
@@ -1269,13 +1277,14 @@ def put_workspace_brand_kit(
 
 @router.delete("/workspaces/brand-kit")
 def delete_workspace_brand_kit(
-    org_id: str = Query("default-org"),
     app_id: str = Query("default-app"),
     db: Session = Depends(get_db),
+    user=Depends(get_current_user_required),
 ):
     """Remove the workspace's brand kit (exports revert to zhanlu-blue)."""
     from app.services.artifacts.brand_kit import clear_brand_kit
 
+    org_id = getattr(user, "org_id", None) or "default-org"
     removed = clear_brand_kit(db, org_id=org_id, app_id=app_id)
     return {"removed": removed}
 
