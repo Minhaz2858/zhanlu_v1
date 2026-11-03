@@ -141,6 +141,29 @@ def get_bound_data_source_ids(agent_app: AgentApp | None) -> list[str]:
     return []
 
 
+def _agent_bound_ids_binding_aware(
+    db: Session, agent_app: AgentApp | None,
+) -> list[str]:
+    """Phase 8 (ADR-1): AgentDataBinding rows are authoritative when they
+    exist; the legacy JSON projection is the fallback for agents without
+    bindings. Revocation/disable therefore takes effect on the NEXT
+    resolution — the runtime resolves per turn and no cache exists."""
+    if agent_app is None:
+        return []
+    try:
+        from app.services.agent_binding_service import (
+            get_bound_data_source_ids_via_bindings,
+        )
+
+        binding_ids = get_bound_data_source_ids_via_bindings(
+            db, agent_app.id)
+        if binding_ids:
+            return binding_ids
+    except Exception:  # fail-open to the projection (never widen scope)
+        pass
+    return get_bound_data_source_ids(agent_app)
+
+
 # ── Layer-2 provenance assertion (artifact pipeline backstop) ──────────────
 # Layer 1 (prepare_data_source_runtime) removes demo sources from the agent's
 # prompt. This layer catches citations that still leak into an artifact:
@@ -1467,7 +1490,7 @@ def _prepare_data_source_runtime_impl(
             project_name=selected_project_name,
         )
     else:
-        bound_ids = get_bound_data_source_ids(agent_app)
+        bound_ids = _agent_bound_ids_binding_aware(db, agent_app)
         bound_ids = _maybe_extend_with_workspace_auto_bind(db, agent_app, bound_ids)
         # Contextual project scoping: the agent only inherits a project's
         # data sources when the user explicitly selected that project for
