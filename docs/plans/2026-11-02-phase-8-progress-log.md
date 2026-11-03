@@ -131,3 +131,43 @@ frontend failures.
 
 **Next:** session-token auth for /api/ext-mcp; auto-bind flag removal once
 all workspaces migrate (T8-12 criteria).
+
+---
+
+# Phase 8.2 — External MCP authentication, authorization & security hardening (2026-11-03)
+
+Base: `4c370c34d` · Commits: `6c5fcc8d9` (Stages 0-1), `c25155023` (Stages 2-6).
+
+**Stage 0 — Security audit** (`docs/audits/2026-11-03-phase-8-2-external-mcp-security-audit.md`):
+F1 CONFIRMED/CRITICAL — /api/ext-mcp unauthenticated; F2 CONFIRMED/HIGH —
+context claims unanchored; F3 no audit; F4 exception leakage; F5/F6 not a
+defect; F7 suspected SSE session; F8 deferred.
+
+**Stages 2-4 — Auth + authorization boundary** (`6c5fcc8d9`...`c25155023`):
+`mcp_auth.py` reuses the existing JWT machinery (signature + expiry + JTI
+revocation + DB User row); `is_privileged_jsonrpc` separates public protocol
+negotiation (initialize/tools/list/notifications/ping) from privileged
+execution (tools/call, incl. batched); `McpAuthMiddleware` is pure-ASGI and
+wraps the transport, so every transport inherits protection; per-request
+principal in a ContextVar; `resolve_execution_context` is the single choke
+point — principal identity authoritative, mismatching claims drop the whole
+context, anonymous claims carry NO identity authority, cross-org agent claims
+never enter the context, scope from enabled AgentDataBinding only (no default,
+no query-all). `POST /api/mcp/tokens` issues 90-day (max 365) MCP tokens;
+revoke is self-only (cross-user → 403 + audited).
+
+**Stage 5 — Audit:** `mcp` event source + `mcp_auth_success` /
+`mcp_auth_failed` / `mcp_tool_invoked` / `mcp_token_issued` / `mcp_token_revoked`
+/ `mcp_token_revoke_denied`; ids and outcomes only — no secrets, no token
+material, no arguments in any audit row.
+
+**Stages 6-7 — TDD matrix + regression:** 41 new tests green
+(authentication 9, middleware 3, token issuance 3, authorization boundary 9 —
+plus context/audit suites, 62 together). Regression matrix: 102 passed, sole
+failure is the documented pre-existing multimodal listing case. Stray dev-DB
+rows from an early debug run (audit_events/revoked_tokens for `u1`) cleaned.
+
+**Resolved from 8.1's "Next":** session-token auth for /api/ext-mcp — DONE
+(this phase). Remaining: auto-bind flag removal once T8-12 criteria are met;
+deferred items in `docs/plans/2026-11-03-phase-8-2-completion-report.md`
+(per-session SSE binding residual, scoped tokens, rate limiting).
