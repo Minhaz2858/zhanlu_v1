@@ -3,9 +3,28 @@ import { Database, FileText, Plus, X, Search, Loader2 } from 'lucide-react';
 import { Section } from './AgentParts';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
+import { authFetch } from '@/api/authFetch';
+import DataBindingsPanel from './DataBindingsPanel';
 
-export default function DataSourcesSection({ form, update, onChange, t }) {
+export default function DataSourcesSection({ form, update, onChange, t, agentId }) {
   const { t: tr } = useLanguage();
+  // Phase 8 T8-4: when the agent id is known, try the structured binding
+  // descriptor API; on failure the legacy picker below renders unchanged.
+  const [bindingMode, setBindingMode] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (!agentId) return undefined;
+    (async () => {
+      try {
+        const res = await authFetch(
+          `/api/agent-studio/${agentId}/source-descriptors`);
+        if (!cancelled) setBindingMode(!!res.ok);
+      } catch {
+        if (!cancelled) setBindingMode(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [agentId]);
   const [available, setAvailable] = useState([]);
   const [allKbs, setAllKbs] = useState([]);
   const [showPicker, setShowPicker] = useState(false);
@@ -111,6 +130,9 @@ export default function DataSourcesSection({ form, update, onChange, t }) {
 
   return (
     <Section title={t.agentConfig.dataSources} desc={t.agentConfig.dataSourcesDesc} icon={Database}>
+      {bindingMode && agentId ? (
+        <DataBindingsPanel agentId={agentId} form={form} update={update} t={t} />
+      ) : (
       <div className="space-y-3">
         <div className="flex flex-wrap gap-2">
           {selected.map((id) => {
@@ -205,6 +227,7 @@ export default function DataSourcesSection({ form, update, onChange, t }) {
           </button>
         )}
       </div>
+      )}
     </Section>
   );
 }

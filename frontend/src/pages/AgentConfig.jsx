@@ -351,7 +351,7 @@ export default function AgentConfig() {
               <div id="agent-section-role" className="scroll-mt-2"><RoleSection form={selectedNode} update={update} t={t} isRoot={isRoot} /></div>
               <div id="agent-section-prompt" className="scroll-mt-2"><PromptSection form={selectedNode} update={update} t={t} /></div>
               <div id="agent-section-skills" className="scroll-mt-2"><SkillsSection form={selectedNode} update={update} t={t} /></div>
-              <div id="agent-section-data" className="scroll-mt-2"><DataSourcesSection form={selectedNode} update={update} onChange={saveField} t={t} /></div>
+              <div id="agent-section-data" className="scroll-mt-2"><DataSourcesSection form={selectedNode} update={update} onChange={saveField} t={t} agentId={id} /></div>
               <div id="agent-section-caps" className="scroll-mt-2"><CapabilitiesSection form={selectedNode} update={update} t={t} /></div>
               {isRoot && hasFusion360Tools(form.tool_config) && (
                 <div id="agent-section-fusion" className="scroll-mt-2"><FusionBridgeSection form={selectedNode} update={update} /></div>
