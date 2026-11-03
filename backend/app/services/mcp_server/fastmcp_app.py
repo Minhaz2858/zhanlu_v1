@@ -73,7 +73,32 @@ class McpAuthMiddleware:
         self.inner = inner
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("method") != "POST":
+        if scope["type"] != "http":
+            return await self.inner(scope, receive, send)
+
+        if scope.get("method") != "POST":
+            # Phase 10 (audit S4.1, F7 residual): non-POST requests that
+            # carry a session id (GET SSE event stream, DELETE session) can
+            # observe another principal's session events or terminate their
+            # session. A session id is NOT a credential — such requests
+            # require a valid Bearer token; requests without a session id
+            # (bare capability probe) pass through as public negotiation.
+            session_id = self._header(scope, "mcp-session-id")
+            if session_id:
+                from app.database import SessionLocal as _SL
+                from app.services.mcp_server.mcp_auth import (
+                    authenticate_mcp_request as _auth,
+                )
+
+                _db = _SL()
+                try:
+                    _a = _auth(_db, self._header(scope, "authorization"))
+                finally:
+                    _db.close()
+                if _a is None:
+                    request_id = None
+                    await self._send_401(send, request_id)
+                    return
             return await self.inner(scope, receive, send)
 
         # Buffer the request body so we can (a) inspect the JSON-RPC method
@@ -88,6 +113,7 @@ class McpAuthMiddleware:
         from app.services.mcp_server.mcp_auth import (
             authenticate_mcp_request,
             is_privileged_jsonrpc,
+            reset_principal,
             set_principal,
         )
 
@@ -119,7 +145,12 @@ class McpAuthMiddleware:
             db.close()
 
         replay = await self._replaying_receive(body)
-        return await self.inner(scope, replay, send)
+        try:
+            return await self.inner(scope, replay, send)
+        finally:
+            # Phase 10 (audit S4.2): never let one request's principal leak
+            # into another (defensive; uvicorn isolates contexts per task).
+            reset_principal()
 
     # -- helpers ----------------------------------------------------------
 

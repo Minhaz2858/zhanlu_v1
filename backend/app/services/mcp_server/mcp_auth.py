@@ -92,6 +92,14 @@ def set_principal(principal: dict[str, Any] | None) -> None:
     principal_var.set(principal)
 
 
+def reset_principal() -> None:
+    """Phase 10 (audit S4.2): defensive hygiene — clear the per-request
+    principal so a custom ASGI runtime that reuses tasks/contexts cannot
+    leak one request's identity into the next. The middleware calls this
+    in a finally block around privileged handling."""
+    principal_var.set(None)
+
+
 def is_privileged_jsonrpc(body: bytes) -> bool:
     """True when the JSON-RPC body performs a privileged operation.
 

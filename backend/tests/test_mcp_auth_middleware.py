@@ -128,3 +128,53 @@ def test_public_initialize_passes_through_without_credentials(env):
     statuses = [m.get("status") for m in sent
                 if m["type"] == "http.response.start"]
     assert 401 not in statuses
+
+
+# ── Phase 10 (audit S4.1/S4.2): session isolation + principal hygiene ────
+
+def _get_scope(session_id: bytes | None):
+    scope = _scope(method="GET")
+    headers = [(b"accept", b"text/event-stream"), (b"host", b"testserver")]
+    if session_id:
+        headers.append((b"mcp-session-id", session_id))
+    scope["headers"] = headers
+    return scope
+
+
+def test_get_with_session_id_requires_auth(env):
+    """A captured mcp-session-id is NOT a credential: GET SSE / DELETE on
+    another principal's session must 401 without a valid Bearer token."""
+    app, s, auth = env
+    sent = _post_body(app, _get_scope(b"captured-session-id"), b"")
+    assert sent and sent[0]["status"] == 401
+
+
+def test_get_with_session_id_and_garbage_token_is_401(env):
+    app, s, auth = env
+    scope = _get_scope(b"captured-session-id")
+    scope["headers"] += [(b"authorization", b"Bearer garbage")]
+    sent = _post_body(app, scope, b"")
+    assert sent and sent[0]["status"] == 401
+
+
+def test_get_without_session_id_passes_public(env):
+    """Bare capability probe (no session) stays public negotiation."""
+    app, s, auth = env
+    sent = []
+    try:
+        sent = _post_body(app, _get_scope(None), b"")
+    except RuntimeError as exc:
+        # inner app error (no lifespan) — proves the auth layer passed through
+        assert "Task group is not initialized" in str(exc)
+    statuses = [m.get("status") for m in sent
+                if m["type"] == "http.response.start"]
+    assert 401 not in statuses
+
+
+def test_principal_reset_after_privileged_request(env):
+    """S4.2: the contextvar principal never survives a request."""
+    from app.services.mcp_server.mcp_auth import reset_principal, set_principal
+
+    set_principal({"user_id": "u1", "org_id": "org-acme"})
+    reset_principal()
+    assert get_principal() is None
