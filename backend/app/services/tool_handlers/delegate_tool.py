@@ -31,8 +31,115 @@ from app.services.sub_agent_reliability import (
 
 logger = logging.getLogger(__name__)
 
+# Phase 8 T8-6: parent identity/trace keys copied into the child context for
+# PROVENANCE LINKAGE only. Authorization-relevant keys are deliberately
+# excluded — the child is permission-checked as itself (see the security
+# note at the _child_ctx construction site).
+_PARENT_REF_KEYS = ("agent_name", "agent_app_id", "run_id")
+_PARENT_REF_PREFIX = "parent_"
+
+
+def provenance_parent_refs(context: dict | None) -> dict:
+    """Extract parent identity/trace references (provenance-only).
+
+    Returns ``{parent_agent_name, parent_agent_app_id, parent_run_id}`` for
+    whichever keys the parent context actually carries — never bindings,
+    permissions, or tool configuration."""
+    if not isinstance(context, dict):
+        return {}
+    refs: dict = {}
+    for key in _PARENT_REF_KEYS:
+        value = context.get(key)
+        if value:
+            refs[f"{_PARENT_REF_PREFIX}{key}"] = value
+    return refs
+
+
+def _bound_child_toolset(
+    task: str,
+    tool_schemas: list[dict],
+    *,
+    protected: set[str],
+    budget: int | None = None,
+) -> list[dict]:
+    """Bound a delegate child's injected toolset (dynamic tool discovery).
+
+    Keeps every ``protected`` schema (operator priority head, always-on
+    evidence tools), fills the remaining budget with the TASK-RELEVANT
+    top-K of the remainder (same ranking mechanism as the supervisor
+    loop's ``select_relevant_tools``), and appends the ``search_tools``
+    escape hatch so the child can discover and invoke any other registered
+    tool on demand. No-op when TOOL_SEARCH_ENABLED is off or the list
+    already fits the budget. Never raises — returns the input unchanged
+    on any failure.
+    """
+    try:
+        if not getattr(settings, "TOOL_SEARCH_ENABLED", False):
+            return tool_schemas
+        k = int(budget or getattr(settings, "TOOL_SEARCH_TOP_K", 32))
+        if len(tool_schemas) <= k:
+            return tool_schemas
+
+        from app.services.tool_search import SEARCH_TOOLS_SCHEMA, rank_tools
+
+        def _name(s: dict) -> str:
+            fn = (s or {}).get("function", {}) or {}
+            return fn.get("name") or (s or {}).get("name") or ""
+
+        prot: list[dict] = []
+        rest: list[dict] = []
+        for s in tool_schemas:
+            (prot if _name(s) in protected else rest).append(s)
+        # Operator preference wins over the budget: the whole priority
+        # head is always kept even if it alone exceeds ``budget``.
+        slots = max(0, k - len(prot))
+        if len(rest) <= slots:
+            selected = rest
+        else:
+            scores = rank_tools(task or "", rest)
+            order = sorted(range(len(rest)), key=lambda i: -scores[i])[:slots]
+            selected = [rest[i] for i in order]
+        merged = prot + selected
+        if not any(_name(s) == "search_tools" for s in merged):
+            merged.append(dict(SEARCH_TOOLS_SCHEMA))
+        logger.info(
+            "delegate_tool: bounded child toolset %d -> %d schemas (task %r)",
+            len(tool_schemas), len(merged), (task or "")[:60],
+        )
+        return merged
+    except Exception as exc:  # noqa: BLE001 — never break tool assembly
+        logger.warning("delegate_tool: toolset bounding failed, keeping all (%s)", exc)
+        return tool_schemas
+
 # Tools that sub-agents CANNOT use (prevent infinite recursion and loops)
 _RESTRICTED_TOOLS = {"delegate_task", "memory", "send_message"}
+
+
+def _resolve_agent_app(db: Session, agent_name: str | None):
+    """P0-1 (2026-10-31): resolve a PUBLISHED AgentApp by exact name.
+
+    Returns None (never raises) when the name is not a published AgentApp —
+    builtin definitions keep their existing resolution path. Only
+    ``status == "published"`` apps are delegable: this is the same gate
+    ``list_available_agents`` advertises to the LLM (see _list_available_agents).
+    """
+    if not agent_name:
+        return None
+    try:
+        from app.models.agent_app import AgentApp
+
+        return (
+            db.query(AgentApp)
+            .filter(
+                AgentApp.name == agent_name,
+                AgentApp.is_deleted == False,  # noqa: E712
+                AgentApp.status == "published",
+            )
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001 — resolution is best-effort
+        logger.debug("delegate: AgentApp resolution failed for %r: %s", agent_name, exc)
+        return None
 
 
 def _normalize_subagent_schema(name: str, schema: dict, description: str = "") -> dict:
@@ -358,6 +465,50 @@ async def _run_sub_agent_inner(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task},
     ]
+
+    # P0-2 (2026-10-31, audit breakpoint 3): the child's tool calls run with
+    # a context that carries the PARENT's conversation_id + bound_kb_ids so
+    # ask_data_agent inside the child resolves the parent's bound data
+    # sources. SECURITY: the child is permission-checked AS ITSELF — the
+    # parent's agent_name / agent_app_id are deliberately NOT inherited
+    # (context["agent_name"] drives the system-meta-agent confirmation
+    # bypass and the tier policy; inheriting it would leak the parent's
+    # privileges into the child).
+    _child_ctx: dict = {"agent_name": agent_name}
+    if agent_app is not None:
+        _child_ctx["agent_app_id"] = agent_app.id
+    # Phase 8 T8-6: provenance linkage — the child's run can be traced to
+    # its parent. Identity/trace references only; no authority transfer.
+    _child_ctx.update(provenance_parent_refs(context))
+    if getattr(settings, "DELEGATE_INHERIT_BINDINGS", False) and context:
+        if context.get("conversation_id"):
+            _child_ctx["conversation_id"] = context["conversation_id"]
+        if context.get("bound_kb_ids"):
+            _child_ctx["bound_kb_ids"] = list(context["bound_kb_ids"])
+    # P1/P2 (2026-10-31): carry the collaboration governance lineage into the
+    # child's context so a specialist-initiated delegation (Pattern C) is
+    # itself governed — its own delegate_task call will see this path and be
+    # cycle/ depth/ child-count checked. SECURITY: we copy ONLY the lineage
+    # keys (path, ids, trace) — never permissions or agent identity override.
+    if context:
+        for _k in (
+            "delegation_path", "requesting_agent_id", "parent_invocation_id",
+            "trace_id", "conversation_id", "organization_id", "user_id",
+            "project_id", "department", "_collab_children", "_collab_seen",
+            "token_budget",
+            # Multi-agent milestone: the live execution identity + the
+            # parent's progress channel so the child's tool loop emits
+            # agent_tool_started/completed frames under ITS execution id —
+            # the panel renders tools under the specialist that ran them.
+            "_agent_execution_id", "progress_emitter", "step_counter",
+            "turn_id",
+            # P1/P2: carry the negotiated Agent Task Contract so a nested
+            # (Pattern-C) delegation sees the same governing contract and the
+            # contract survives to the child's own invocation record.
+            "agent_task_contract",
+        ):
+            if _k in context and _k not in _child_ctx:
+                _child_ctx[_k] = context[_k]
 
     # P0 reliability: per-turn guardrail controller + iteration budget
     guard_ctrl = ToolLoopGuardController()
