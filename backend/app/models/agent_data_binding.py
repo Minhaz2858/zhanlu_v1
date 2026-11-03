@@ -6,7 +6,7 @@ and whether read or read-write access is granted.  Defaults to read-only.
 
 from typing import Optional
 
-from sqlalchemy import String, Boolean, JSON, ForeignKey
+from sqlalchemy import String, Boolean, JSON, ForeignKey, Index, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -20,6 +20,19 @@ class AgentDataBinding(TimestampedBase):
     """
 
     __tablename__ = "agent_data_bindings"
+
+    # Phase 8 ADR-1: one LIVE binding per (agent, datasource). Soft-deleted
+    # rows are excluded via the partial predicate on both SQLite and Postgres.
+    __table_args__ = (
+        Index(
+            "uq_agent_data_bindings_agent_datasource",
+            "agent_app_id",
+            "datasource_id",
+            unique=True,
+            sqlite_where=text("is_deleted = false"),
+            postgresql_where=text("is_deleted = false"),
+        ),
+    )
 
     agent_app_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_apps.id"), nullable=False, index=True)
     datasource_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
@@ -35,3 +48,6 @@ class AgentDataBinding(TimestampedBase):
 
     # Whether NL2SQL is allowed for this binding
     nl2sql_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Phase 8: binding enable/disable switch (kill-switch without deletion).
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
