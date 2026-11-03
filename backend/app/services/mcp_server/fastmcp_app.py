@@ -49,6 +49,64 @@ def extract_zhanlu_context(arguments: dict | None) -> tuple[dict | None, dict]:
     return {k: v for k, v in raw.items() if k in _ALLOWED_CONTEXT_KEYS}, rest
 
 
+def verify_mcp_context(db, context: dict | None) -> dict | None:
+    """Server-side verification of caller-supplied MCP context claims.
+
+    ``_zhanlu_context`` is a CLAIM, not an identity. Before any claim may
+    influence authorization it is validated against the database:
+      * ``org_id`` must reference a real Organization;
+      * ``agent_app_id`` (when claimed) must be a live AgentApp of THAT org;
+      * ``user_id`` (when claimed) must be a User of THAT org.
+    Any unverifiable claim drops the WHOLE context to None (fail-honest
+    no-context fallback) — never a partially-trusted one. A context with
+    no identity claims at all passes through UNVERIFIED (marked
+    ``verified: False``) — tools treat it exactly like no context.
+    A fully verified context is stamped ``verified: True``.
+    """
+    if not isinstance(context, dict) or not context:
+        return None
+    org_id = context.get("org_id")
+    if org_id:
+        try:
+            from app.models.agent_app import AgentApp
+            from app.models.organization import Organization
+            from app.models.user import User
+
+            if not db.query(Organization).filter(
+                    Organization.id == org_id).first():
+                logger.warning(
+                    "mcp: context org claim unverifiable: %s", org_id)
+                return None
+            agent_app_id = context.get("agent_app_id")
+            if agent_app_id:
+                agent = db.query(AgentApp).filter(
+                    AgentApp.id == agent_app_id,
+                    AgentApp.is_deleted == False,  # noqa: E712
+                ).first()
+                if agent is None or getattr(agent, "org_id", None) != org_id:
+                    logger.warning(
+                        "mcp: context agent claim unverifiable: %s (org %s)",
+                        agent_app_id, org_id)
+                    return None
+            user_id = context.get("user_id")
+            if user_id:
+                user = db.query(User).filter(
+                    User.id == user_id,
+                    User.is_deleted == False,  # noqa: E712
+                ).first()
+                if user is None or getattr(user, "org_id", None) != org_id:
+                    logger.warning(
+                        "mcp: context user claim unverifiable: %s (org %s)",
+                        user_id, org_id)
+                    return None
+            return {**context, "verified": True}
+        except Exception as exc:  # noqa: BLE001 — verification must fail closed
+            logger.warning("mcp: context verification failed: %s", exc)
+            return None
+    # no org claim — nothing to verify; pass through UNVERIFIED
+    return {**context, "verified": False}
+
+
 def build_fastmcp_server() -> FastMCP:
     """Create a FastMCP server wrapping the ToolRegistry (idempotent)."""
     global _fastmcp
@@ -72,9 +130,19 @@ def build_fastmcp_server() -> FastMCP:
 
     def _make_tool(tool_name: str, entry) -> Callable:
         async def _tool(arguments: dict | None = None) -> str:
-            # Phase 8 T8-7: optional verified context pass-through for
-            # internal consumers; anonymous external calls stay context=None.
+            # Phase 8 T8-7/T8.1-S2: optional context pass-through for
+            # internal consumers — claims are VERIFIED server-side before
+            # use (org/agent/user existence + ownership); unverifiable
+            # claims drop the whole context. Anonymous external calls stay
+            # context=None (fail-honest fallback).
             context, tool_arguments = extract_zhanlu_context(arguments)
+            if context is not None:
+                from app.database import SessionLocal as _SessionLocal
+                _vdb = _SessionLocal()
+                try:
+                    context = verify_mcp_context(_vdb, context)
+                finally:
+                    _vdb.close()
             content = await zhanlu.call_tool(
                 tool_name, tool_arguments, context=context)
             texts = [
