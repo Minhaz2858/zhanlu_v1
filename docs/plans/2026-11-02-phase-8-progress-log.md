@@ -37,3 +37,52 @@ Phase 8A (T8-1/T8-2) gates everything binding-related; Phase 8F (T8-8/T8-9) is i
 
 - Phase 7C: **ACCEPTED WITH DEFERRED DEBT** (verdict in the audit report).
 - Phase 8: **SPECIFICATION COMPLETE** — 5 deliverables produced; implementation explicitly NOT started, per mission.
+
+---
+
+# Phase 8 implementation log (2026-11-03)
+
+All 13 roadmap tasks implemented TDD RED→GREEN; commits on
+`fix/automation-chat-artifacts-ordering` (base `26d426cd2`):
+
+| Task | Commit | Tests (RED first) |
+|---|---|---|
+| T8-1 binding model + migration 124 | `92132973c` | 4 (2 failed RED) + 22 regression |
+| T8-2 binding service + projection + runtime read | `aecc44d64` | 12 + 4 RED + 30 regression |
+| T8-3 binding CRUD + source-descriptors API | `a42a78881` | 7 RED + skills e2e 39 |
+| T8-4 DataSourcesSection binding editor | `12030dd55` | 4 RED → 6/6 + build |
+| T8-5 auto-bind migration gate | `1d11029f0` | 1 RED + 31 regression |
+| T8-6 delegation provenance refs | `687b1176c` | 3 RED + MAS 10 |
+| T8-7 MCP verified-context pass-through | `d2b748842` | 4 RED + MCP regression |
+| T8-8 AgentRun prov-v1 envelope + migration 125 | `284ec3566` | 8 RED + 176 harness regression |
+| T8-9 provenance read API | `d452bef91` | 1 RED (endpoint missing) + router 7 |
+| T8-10 RunProvenancePanel | `6614c9bd1` | 4 + build |
+| T8-11 auto-bind migration endpoint | `acd4d7ee6` | 3 RED + settings 10 |
+| T8-12 flag deprecation + record | `2fb7ee45b` | settings/runtime 17 green |
+
+**Bonus defect fixes found by the TDD suites:**
+- `append_step` kwargs never matched AgentRunStep columns → EVERY call failed (latent);
+- studio `add_data_binding` inserted rows with no org validation and no projection update;
+- `get_bindings` called a nonexistent `to_dict`;
+- `agent_data_bindings` and `agent_runs` predated the RLS rollout — tenant policies now applied (migrations 124/125).
+
+## Integrated acceptance (T8-13, 2026-11-03)
+
+- Backend matrix (9 new Phase 8 suites + the full 7C slice, 36 files):
+  **286 passed / 0 failed** (32.4s).
+- Frontend (agent + chat provenance + enterprise): **80 passed / 0 failed** (13 files).
+- Production build: **green** (vite, exit 0).
+- Migrations: alembic history verifies single linear head
+  `123 → 124_agent_binding_enable → 125_agent_run_provenance (head)`;
+  both migrations carry idempotent RLS blocks and full downgrades.
+- Pre-existing unrelated failures (untouched, foreign scope): MCP
+  `test_list_tools_includes_multimodal` (multimodal handlers not on this
+  branch), harness `test_agent_class_normalisation` (policy env-parse
+  drift), `test_every_observed_rule_...` (vision-bridge shadow primitive).
+
+## Outstanding (for Phase 8.1)
+
+1. Wire RunProvenancePanel into the Chat.jsx message footer (Chat.jsx is
+   heavily foreign-dirty — one-line insert when that WIP lands).
+2. Auto-bind flag removal after migration criteria are met (T8-12).
+3. MCP session-level auth mapping (beyond the allow-listed pass-through).
