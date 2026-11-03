@@ -47,6 +47,8 @@ AUDIT_EVENT_TYPES = [
     "business_rule_resubmitted",
     # ERP submission outcomes (erp_tools)
     "erp_submission_succeeded", "erp_submission_failed",
+    # External MCP transport security events (Phase 8.2)
+    "mcp_auth_success", "mcp_auth_failed", "mcp_tool_invoked",
 ]
 AUDIT_EVENT_SOURCES = [
     "nl2sql", "studio", "agent", "governance", "system", "user",
@@ -54,6 +56,8 @@ AUDIT_EVENT_SOURCES = [
     # written by enterprise/{cleanup,onboarding,business_rules}.py and
     # identity review since Phase 0B — reconciled 2026-11-02 (7C)
     "enterprise",
+    # external MCP transport auth/tool events (Phase 8.2)
+    "mcp",
 ]
 # "completed" (onboarding runs), "error" (outcome_verified failures) and
 # "positive" (escalation CSAT) are written in production — registered.

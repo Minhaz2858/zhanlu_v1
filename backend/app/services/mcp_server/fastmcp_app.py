@@ -15,11 +15,178 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app.services.mcp_server import get_zhanlu_mcp_server
+from app.services.mcp_server.mcp_auth import (  # noqa: F401 — re-exports
+    extract_zhanlu_context, verify_mcp_context)
 from app.services.tool_registry import registry
 
 logger = logging.getLogger(__name__)
 
 _fastmcp: FastMCP | None = None
+
+def _audit_tool_call(db, principal: dict, tool_name: str,
+                     agent_scoped: bool) -> None:
+    """Phase 8.2 Stage 5: audit a successful privileged tool invocation.
+    Org from the VERIFIED principal; ids only — never arguments/results
+    (no sensitive payloads), never credential material."""
+    try:
+        import uuid as _uuid
+        from datetime import datetime as _dt
+
+        from app.models.audit_event import AuditEvent
+
+        db.add(AuditEvent(
+            id=str(_uuid.uuid4()),
+            event_type="mcp_tool_invoked",
+            event_source="mcp",
+            actor_type="user",
+            actor_id=principal.get("user_id"),
+            org_id=principal.get("org_id"),
+            resource_type="mcp_tool",
+            resource_id=tool_name,
+            outcome="success",
+            detail_json={"agent_scoped": agent_scoped},
+            occurred_at=_dt.utcnow(),
+        ))
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 — audit is fail-open
+        logger.warning("mcp: tool audit write failed (non-fatal): %s", exc)
+
+
+class McpAuthMiddleware:
+    """Pure-ASGI auth for the external MCP transport.
+
+    * Public protocol negotiation (initialize / tools/list / notifications /
+      ping / GET SSE stream) passes through unauthenticated — it exposes
+      static tool metadata only.
+    * Privileged execution (tools/call) requires a valid Bearer JWT
+      (existing auth machinery: signature + expiry + JTI revocation + DB
+      User row). Failures short-circuit with a 401 static JSON-RPC error —
+      never anonymous privileged access.
+    * The authenticated principal is stored in a contextvar for the tool
+      layer; it is the ONLY source of identity — _zhanlu_context claims
+      can never override it (see mcp_auth.resolve_execution_context).
+    * Auth success/failure is audited (org attribution only when a valid
+      token resolved the user; NEVER any token/header material).
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            return await self.inner(scope, receive, send)
+
+        # Buffer the request body so we can (a) inspect the JSON-RPC method
+        # and (b) replay it to the inner app.
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"") or b""
+            if not message.get("more_body", False):
+                break
+
+        from app.services.mcp_server.mcp_auth import (
+            authenticate_mcp_request,
+            is_privileged_jsonrpc,
+            set_principal,
+        )
+
+        if not is_privileged_jsonrpc(body):
+            replay = await self._replaying_receive(body)
+            return await self.inner(scope, replay, send)
+
+        # Privileged: authenticate BEFORE any execution.
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            header = self._header(scope, "authorization")
+            auth = authenticate_mcp_request(db, header)
+            request_id = self._request_id(body)
+            if auth is None:
+                self._audit(db, None, "mcp_auth_failed",
+                            "missing, malformed, invalid, expired or "
+                            "revoked credentials")
+                db.commit()
+                await self._send_401(send, request_id)
+                return
+            user, claims = auth
+            set_principal({"user_id": user.id, "org_id": user.org_id,
+                           "role": user.role, "claims": claims})
+            self._audit(db, user, "mcp_auth_success", None)
+            db.commit()
+        finally:
+            db.close()
+
+        replay = await self._replaying_receive(body)
+        return await self.inner(scope, replay, send)
+
+    # -- helpers ----------------------------------------------------------
+
+    async def _replaying_receive(self, body: bytes):
+        """Receive() that replays the buffered body, then signals EOF."""
+        async def receive():
+            return {"type": "http.request", "body": body,
+                    "more_body": False}
+        return receive
+
+    @staticmethod
+    def _header(scope, name: str) -> str | None:
+        target = name.encode()
+        for key, value in scope.get("headers") or []:
+            if key.lower() == target:
+                return value.decode("latin-1")
+        return None
+
+    @staticmethod
+    def _request_id(body: bytes):
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                return parsed.get("id")
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    async def _send_401(send, request_id):
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": request_id,
+            "error": {"code": -32001,
+                      "message": "authentication required"},
+        }).encode()
+        await send({"type": "http.response.start", "status": 401,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": payload})
+
+    @staticmethod
+    def _audit(db, user, event_type: str, reason: str | None) -> None:
+        """Security audit with org attribution when a principal resolved.
+        NEVER records tokens, headers, or credential material."""
+        try:
+            import uuid as _uuid
+            from datetime import datetime as _dt
+
+            from app.models.audit_event import AuditEvent
+
+            kwargs = {
+                "id": str(_uuid.uuid4()),
+                "event_type": event_type,
+                "event_source": "mcp",
+                "actor_type": "user",
+                "actor_id": getattr(user, "id", None),
+                "resource_type": "mcp_transport",
+                "outcome": "success" if reason is None else "denied",
+                "detail_json": (
+                    {"reason": reason} if reason else None),
+                "occurred_at": _dt.utcnow(),
+            }
+            if user is not None:
+                kwargs["org_id"] = getattr(user, "org_id", None)
+            db.add(AuditEvent(**kwargs))
+        except Exception as exc:  # noqa: BLE001 — audit is fail-open here
+            logger.warning("mcp: audit write failed (non-fatal): %s", exc)
+
 
 # Phase 8 T8-7: the ONLY context keys an MCP caller may propagate. Identity
 # and trace references that the tool handlers' org/binding scoping already
@@ -130,21 +297,30 @@ def build_fastmcp_server() -> FastMCP:
 
     def _make_tool(tool_name: str, entry) -> Callable:
         async def _tool(arguments: dict | None = None) -> str:
-            # Phase 8 T8-7/T8.1-S2: optional context pass-through for
-            # internal consumers — claims are VERIFIED server-side before
-            # use (org/agent/user existence + ownership); unverifiable
-            # claims drop the whole context. Anonymous external calls stay
-            # context=None (fail-honest fallback).
-            context, tool_arguments = extract_zhanlu_context(arguments)
-            if context is not None:
-                from app.database import SessionLocal as _SessionLocal
-                _vdb = _SessionLocal()
-                try:
-                    context = verify_mcp_context(_vdb, context)
-                finally:
-                    _vdb.close()
-            content = await zhanlu.call_tool(
-                tool_name, tool_arguments, context=context)
+            # Phase 8.2 Stages 3+4: the authorization boundary lives in
+            # mcp_auth.resolve_execution_context (unit-tested): the
+            # AUTHENTICATED principal is the sole source of identity;
+            # claims must match it; datasource scope comes ONLY from the
+            # verified agent's enabled bindings. Anonymous callers keep
+            # the fail-honest no-context fallback.
+            from app.database import SessionLocal as _SessionLocal
+            from app.services.mcp_server.mcp_auth import (
+                get_principal,
+                resolve_execution_context,
+            )
+
+            principal = get_principal()
+            _vdb = _SessionLocal()
+            try:
+                context, tool_arguments = resolve_execution_context(
+                    _vdb, arguments, principal)
+                content = await zhanlu.call_tool(
+                    tool_name, tool_arguments, context=context)
+                if principal is not None:
+                    _audit_tool_call(_vdb, principal, tool_name,
+                                     bool((context or {}).get("agent_app_id")))
+            finally:
+                _vdb.close()
             texts = [
                 c.get("text", "") for c in content
                 if isinstance(c, dict) and c.get("type") == "text"
@@ -169,8 +345,13 @@ def build_fastmcp_server() -> FastMCP:
 
 
 def get_mcp_http_app() -> Any:
-    """ASGI app for streamable HTTP transport (mount at /api/ext-mcp)."""
-    return build_fastmcp_server().streamable_http_app()
+    """ASGI app for streamable HTTP transport (mount at /api/ext-mcp).
+
+    Phase 8.2: wrapped in the authentication middleware — privileged
+    JSON-RPC methods (tools/call) require valid credentials; public
+    negotiation passes through. All transports inherit the protection
+    because every transport path goes through this one ASGI app."""
+    return McpAuthMiddleware(build_fastmcp_server().streamable_http_app())
 
 
 def get_fastmcp_lifespan() -> Any:

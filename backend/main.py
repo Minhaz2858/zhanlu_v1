@@ -56,6 +56,7 @@ from app.routers.governance import router as governance_router
 from app.routers.workspace_settings import router as workspace_settings_router
 from app.routers.marketplace import router as marketplace_router
 from app.routers.mcp import router as mcp_router
+from app.routers.mcp_tokens import router as mcp_tokens_router
 from app.routers.nl2sql import router as nl2sql_router
 from app.routers.automation_api import router as automation_api_router
 from app.routers.knowledge_bases import router as knowledge_bases_router
@@ -1099,6 +1100,7 @@ def create_app() -> FastAPI:
     app.include_router(workspace_settings_router, prefix="/api")
     app.include_router(marketplace_router, prefix="/api")
     app.include_router(mcp_router, prefix="/api")
+    app.include_router(mcp_tokens_router, prefix="/api")  # external MCP credential issuance
     app.include_router(a2a_router)  # /a2a AgentCard + JSON-RPC
     app.include_router(a2a_wellknown_router)  # /.well-known/agent.json discovery
     app.include_router(acp_router)  # /acp REST adapter (IBM BeeAI-style)
