@@ -162,6 +162,24 @@ def _fusion360_sketch_create(args, db, user_id):
     return {"success": True, "sketch_index": _last_int(r["stdout"], "SKETCH_INDEX"), "stdout": r["stdout"]}
 
 
+def _sketch_guard_code(sketch_index: int) -> str:
+    """Pre-flight (2026-11-02): a caller-provided sketch_index that does not
+    exist — e.g. indexing into a just-cleared / brand-new document — crashed
+    with the cryptic Fusion RuntimeError `3 : invalid argument index`, which
+    the model could not self-correct from (it returned an empty completion
+    and the whole build was abandoned). Emit an ACTIONABLE error instead so
+    the model recovers by calling fusion360_sketch_create first.
+    """
+    return (
+        "if root.sketches.count == 0:\n"
+        "    print('NO_SKETCH_ERROR: the document has 0 sketches — call fusion360_sketch_create first, then use the returned sketch_index')\n"
+        "    raise SystemExit(1)\n"
+        f"if root.sketches.count <= {int(sketch_index)}:\n"
+        f"    print('NO_SKETCH_ERROR: sketch_index {int(sketch_index)} does not exist (count=%d) — valid indexes are 0..%d' % (root.sketches.count, root.sketches.count - 1))\n"
+        "    raise SystemExit(1)\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. sketch_circle
 # ---------------------------------------------------------------------------
@@ -174,6 +192,7 @@ def _fusion360_sketch_circle(args, db, user_id):
     r = float(args.get("radius_mm", 0) or 0) / 10.0
     code = (
         MM
+        + _sketch_guard_code(int(si))
         + f"sk = root.sketches.item({int(si)})\n"
         + f"sk.sketchCurves.sketchCircles.addByCenterRadius(adsk.core.Point3D.create({cx}, {cy}, 0), {r})\n"
         + _CLOSE_SKETCH + "\n"
@@ -195,6 +214,7 @@ def _fusion360_sketch_rectangle(args, db, user_id):
     y2 = float(args.get("y2_mm", 0) or 0) / 10.0
     code = (
         MM
+        + _sketch_guard_code(int(si))
         + f"sk = root.sketches.item({int(si)})\n"
         + f"sk.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create({x1}, {y1}, 0), adsk.core.Point3D.create({x2}, {y2}, 0))\n"
         + _CLOSE_SKETCH + "\n"
@@ -219,6 +239,7 @@ def _fusion360_sketch_polygon(args, db, user_id):
     code = (
         MM
         + "import math\n"
+        + _sketch_guard_code(int(si))
         + f"sk = root.sketches.item({int(si)})\n"
         + f"R, cx, cy, n = {r}, {cx}, {cy}, {sides}\n"
         + "lines = sk.sketchCurves.sketchLines\n"
@@ -237,7 +258,8 @@ def _fusion360_sketch_polygon(args, db, user_id):
 def _extrude_guard_code(sketch_index: int) -> str:
     """Pre-flight: bail with a clear error if the sketch has no closed profile."""
     return (
-        f"sk = root.sketches.item({int(sketch_index)})\n"
+        _sketch_guard_code(int(sketch_index))
+        + f"sk = root.sketches.item({int(sketch_index)})\n"
         + "if sk.profiles.count == 0:\n"
         + "    print('NO_PROFILE_ERROR')\n"
         + "    raise SystemExit(1)\n"

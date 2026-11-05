@@ -113,8 +113,17 @@ def _validate_policy_item(item: PolicyItem) -> None:
 def _resource_bound_kb_ids(db: Session, resource_type: str, resource_id: str) -> list[str]:
     """KB ids bound to a resource (project-scoped KBs or agent bindings)."""
     if resource_type == "project":
+        # Home project OR legacy name OR explicit share link
+        # (multi-project sharing, 2026-10-31).
+        from sqlalchemy import or_ as _or
+
+        from app.services.project_kb_membership import project_kb_link_subquery
+
         kbs = db.query(KnowledgeBase).filter(
-            KnowledgeBase.project_id == resource_id,
+            _or(
+                KnowledgeBase.project_id == resource_id,
+                KnowledgeBase.id.in_(project_kb_link_subquery(resource_id)),
+            ),
             KnowledgeBase.is_deleted == False,  # noqa: E712
         ).all()
         return [kb.id for kb in kbs]

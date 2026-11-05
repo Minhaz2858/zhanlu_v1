@@ -931,7 +931,7 @@ export const translations = {
       // feed matches the user's selected language. {placeholders} are filled
       // from structured params (never raw model text).
       liveEvent: {
-        summary: '{n} events · {m} completed · {s}s',
+        summary: '{n} steps · {m} done · {s}s',
         expand: 'Expand', collapse: 'Collapse', thinking: 'Thinking', running: 'In progress',
         phase_enter: {
           init: 'Preparing the run', goal: 'Fathoming your request', context: 'Gathering the right context', plan: 'Laying out the plan',

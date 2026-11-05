@@ -410,7 +410,16 @@ async def _comprehensive_data(
 
 registry.register(
     name="comprehensive_data",
-    schema=COMPREHENSIVE_DATA_SCHEMA,
+    # P0 (2026-10-31): wrap the flat schema in the OpenAI envelope at
+    # registration — entry.schema must be provider-valid (test_tool_registry_envelopes).
+    schema={
+        "type": "function",
+        "function": {
+            "name": "comprehensive_data",
+            "description": COMPREHENSIVE_DATA_SCHEMA["description"],
+            "parameters": COMPREHENSIVE_DATA_SCHEMA["parameters"],
+        },
+    },
     handler=_comprehensive_data,
     category="delegation",
     enabled_by_default=False,  # gated by per-profile flag (see _profile_enabled)

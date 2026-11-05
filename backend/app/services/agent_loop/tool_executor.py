@@ -234,6 +234,7 @@ async def emit_tool_progress_while_waiting(
     parsed_calls: list,
     interval: float = 5.0,
     display_names: dict | None = None,
+    extra_frames: list | None = None,
 ):
     """Yield ``tool_progress`` SSE frames while ``task`` is still running.
 
@@ -242,6 +243,14 @@ async def emit_tool_progress_while_waiting(
     in-flight tool calls as ``status: running``. This is additive — the
     frontend already renders ``tool_progress`` events and treats entries
     without a ``results`` key as in-flight.
+
+    ``extra_frames`` (multi-agent orchestration milestone, 2026-11-01): an
+    optional list that long-running tool handlers (delegate_task /
+    ask_data_agent) append structured agent-execution SSE frames onto while
+    they run. Each tick drains and yields everything accumulated so far so
+    the Agent Execution panel updates LIVE during the delegation instead of
+    only after the tool batch returns. Drained frames are removed from the
+    list so the post-batch drain in the router does not re-emit them.
     """
     display_names = display_names or {}
     running_calls = [
@@ -255,9 +264,16 @@ async def emit_tool_progress_while_waiting(
     ]
     while not task.done():
         done, _pending = await asyncio.wait({task}, timeout=interval)
+        if extra_frames:
+            while extra_frames:
+                yield extra_frames.pop(0)
         if done:
             break
         yield f'data: {json.dumps({"type": "tool_progress", "tool_calls": running_calls})}\n\n'
+    # Final drain: frames appended right before the task finished.
+    if extra_frames:
+        while extra_frames:
+            yield extra_frames.pop(0)
 
 
 def is_long_running_tool(tool_name: str, long_running_tools) -> bool:

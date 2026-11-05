@@ -416,6 +416,8 @@ def run_canonical(
     endpoint: Any = None,
     skip_narrate: bool = False,
     agent_name: str | None = None,
+    conversation_id: str | None = None,
+    turn_id: str | None = None,
 ) -> dict:
     """Run ``NLAnswerService.answer`` for a synchronous caller.
 
@@ -423,6 +425,10 @@ def run_canonical(
     node executor) while the canonical path is a coroutine. When a loop is
     already running, the coroutine is run on a worker thread rather than driving
     the running loop re-entrantly.
+
+    ``turn_id``/``conversation_id`` (P0-3, 2026-10-30 audit D4): threaded to
+    the answer so the per-turn SQL budget applies at its proper turn scope
+    instead of degrading to conversation scope.
     """
     from app.services.db.nl_answer_service import NLAnswerService
 
@@ -436,6 +442,8 @@ def run_canonical(
         endpoint=endpoint,
         skip_narrate=skip_narrate,
         agent_name=agent_name,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
     )
     try:
         asyncio.get_running_loop()

@@ -42,7 +42,7 @@
  */
 
 import { useState } from 'react';
-import { Loader2, CheckCircle2, XCircle, ChevronDown, ChevronRight, Sparkles, BookOpen } from 'lucide-react';
+import { Loader2, CheckCircle2, XCircle, ChevronDown, ChevronRight, Sparkles, BookOpen, ShieldAlert } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ReasoningPanel from './ReasoningPanel';
 
@@ -62,12 +62,20 @@ const STATUS_CONFIG = {
     iconClass: 'text-red-500',
     dotClass: 'bg-red-500',
   },
+  // A-6 (enterprise reliability audit, 2026-11-01): the backend closes a
+  // tool step as awaiting_approval when the turn pauses for human
+  // approval — without this entry the card spun forever after `paused`.
+  awaiting_approval: {
+    Icon: ShieldAlert,
+    iconClass: 'text-blue-500',
+    dotClass: 'bg-blue-500',
+  },
 };
 
 // Whitelist of terminal statuses. Anything else (running, unknown, missing)
 // is treated as "still in progress" so the section stays expanded — we
 // never auto-hide state we cannot recognize.
-const TERMINAL_STATUSES = new Set(['done', 'failed']);
+const TERMINAL_STATUSES = new Set(['done', 'failed', 'awaiting_approval']);
 
 /** A step is expandable when it carries any detail payload worth revealing. */
 function isExpandable(step) {

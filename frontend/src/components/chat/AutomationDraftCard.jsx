@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Pencil, X, Send, RotateCcw, Check, Clock, FolderOpen, Database, Tag, Type, ListChecks, ChevronDown, ChevronUp, ListOrdered, AlertCircle } from 'lucide-react';
+import { Pencil, X, Send, RotateCcw, Check, Clock, FolderOpen, Database, Tag, Type, ListChecks, ChevronDown, ChevronUp, ListOrdered, AlertCircle, ShieldCheck, Trash2, Loader2 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import SchedulePicker from '@/components/automation/SchedulePicker';
 import { Button } from '@/components/ui/button';
@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { nextRuns, formatRun } from '@/lib/nextRuns';
+import { authFetch } from '@/api/authFetch';
 
 /**
  * AutomationDraftCard — sticky, editable summary of an in-flight
@@ -20,12 +21,76 @@ import { nextRuns, formatRun } from '@/lib/nextRuns';
  * sees it. The card stays in the chat as a reference until the
  * user dismisses it.
  */
-export default function AutomationDraftCard({ prefill, lang: langProp, onAppendToInput, onDismiss, onRetry, error }) {
+export default function AutomationDraftCard({ prefill, lang: langProp, onAppendToInput, onDismiss, onRetry, error, draftId, refreshAt, onConfirmed }) {
   const { t, lang: langCtx } = useLanguage();
   const lang = langProp || langCtx;
   const isEn = lang === 'en';
   const c = t.createDialog.draftCard;
   const lbl = c.field;
+
+  // ── Server-draft mode (lifecycle separation, 2026-11-03) ──
+  // When the creation dialog created a SERVER draft, the card renders
+  // authoritative server state (id + validation) and hosts the ONLY
+  // activation path: Confirm & Activate → POST /automations/drafts/{id}/
+  // confirm?If-Match (exactly-once, audited, no execution side effects).
+  const [server, setServer] = useState(null); // {draft_id, version, status, validation}
+  const [serverErr, setServerErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!draftId) { setServer(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await authFetch(`/api/automations/drafts/${draftId}`);
+        if (cancelled) return;
+        if (resp?.ok) setServer(await resp.json());
+        else setServerErr(isEn ? 'Could not load the draft.' : '无法加载草稿。');
+      } catch {
+        if (!cancelled) setServerErr(isEn ? 'Could not load the draft.' : '无法加载草稿。');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [draftId, refreshAt, isEn]);
+
+  async function confirmActivate() {
+    if (!server) return;
+    setBusy(true);
+    setServerErr(null);
+    try {
+      const key = `ck-${(crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`)}`;
+      const resp = await authFetch(
+        `/api/automations/drafts/${server.draft_id}/confirm?If-Match=${server.version}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirmation_key: key, activate: true }),
+        });
+      if (resp?.ok || resp?.status === 200 || resp?.status === 201) {
+        if (typeof onConfirmed === 'function') onConfirmed();
+      } else {
+        const body = await resp.json().catch(() => ({}));
+        setServerErr(body?.detail?.code || (isEn ? 'Confirmation failed.' : '确认失败。'));
+      }
+    } catch {
+      setServerErr(isEn ? 'Confirmation failed.' : '确认失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function discardDraft() {
+    if (!server) return;
+    setBusy(true);
+    setServerErr(null);
+    try {
+      await authFetch(`/api/automations/drafts/${server.draft_id}/discard`, { method: 'POST' });
+      if (typeof onDismiss === 'function') onDismiss();
+    } catch {
+      setServerErr(isEn ? 'Discard failed.' : '放弃失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const parsed = useMemo(() => parsePrefill(prefill, t, isEn), [prefill, t, isEn]);
 
@@ -313,6 +378,55 @@ export default function AutomationDraftCard({ prefill, lang: langProp, onAppendT
           </Button>
         </div>
       </div>
+
+      {/* Server-draft action bar — the ONLY activation path (lifecycle
+          separation): explicit Confirm & Activate via the authoritative
+          confirm API, or Discard. No task exists until confirm succeeds. */}
+      {draftId && (
+        <div className="border-t border-border bg-background px-4 py-3">
+          {serverErr && (
+            <div className="mb-2 flex items-center gap-1.5 text-xs text-destructive">
+              <AlertCircle className="h-3.5 w-3.5" /> {serverErr}
+            </div>
+          )}
+          {server?.validation && server.validation.ok === false && Array.isArray(server.validation.errors) && server.validation.errors.length > 0 && (
+            <div className="mb-2 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-[11px] text-destructive">
+              {server.validation.errors.map((e, i) => (
+                <div key={i} className="truncate">
+                  {e.field ? `${e.field}: ` : ''}{e.message || e.code}
+                </div>
+              ))}
+            </div>
+          )}
+          {server?.validation && Array.isArray(server.validation.warnings) && server.validation.warnings.length > 0 && (
+            <div className="mb-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+              {server.validation.warnings.map((w, i) => (
+                <div key={i} className="truncate">{w.message || w.code}</div>
+              ))}
+            </div>
+          )}
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate text-[11px] text-muted-foreground">
+              {server?.status === 'confirmed'
+                ? (isEn ? 'Confirmed.' : '已确认。')
+                : (isEn
+                  ? 'Review the configuration, then confirm to activate. Nothing runs until the scheduled time.'
+                  : '检查配置后确认激活。到计划时间前不会执行。')}
+            </span>
+            <div className="flex items-center gap-2">
+              {server?.status !== 'confirmed' && (
+                <Button size="sm" variant="outline" onClick={discardDraft} disabled={busy} className="h-7 px-3 text-xs text-destructive hover:bg-destructive/10">
+                  <Trash2 className="h-3 w-3" /> {isEn ? 'Discard' : '放弃'}
+                </Button>
+              )}
+              <Button size="sm" onClick={confirmActivate} disabled={busy || !server || server.status === 'confirmed'} className="h-7 px-3 text-xs">
+                {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <ShieldCheck className="h-3 w-3" />}
+                {isEn ? 'Confirm & Activate' : '确认并激活'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

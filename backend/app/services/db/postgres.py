@@ -252,6 +252,59 @@ class PostgresConnector:
             for r in rows
         ]
 
+    def get_foreign_keys(self, table: str) -> list[dict]:
+        """FK constraints for one relation — the SAME contract as the MySQL
+        connector's ``get_foreign_keys``.
+
+        2C defect fix (D-1, 2026-10-30): this method did not exist on the
+        Postgres connector, so declared-FK discovery silently degraded to []
+        on PostgreSQL — Tier-A acceptance surfaced it.
+
+        2C Tier-B fix (2026-10-31): the first implementation read
+        ``information_schema.constraint_column_usage``, which PostgreSQL
+        exposes ONLY to the constraint's owner — a read-only customer
+        account (the typical customer connection) saw NO declared FKs at
+        all. The live Tier-B run measured exactly that. The catalog is now
+        read from ``pg_catalog`` (``pg_constraint``), which is readable by
+        any role that can SELECT the table.
+        """
+        assert self._engine is not None
+        sql = text(
+            "SELECT sa.attname AS column_name, "
+            "       rns.nspname AS ref_schema, "
+            "       rc.relname AS ref_table, "
+            "       ra.attname AS ref_column "
+            "FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace ns ON ns.oid = c.relnamespace "
+            "JOIN pg_class rc ON rc.oid = con.confrelid "
+            "JOIN pg_namespace rns ON rns.oid = rc.relnamespace "
+            "JOIN unnest(con.conkey) WITH ORDINALITY AS ck(attnum, ord) "
+            "  ON true "
+            "JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) "
+            "  ON fk.ord = ck.ord "
+            "JOIN pg_attribute sa "
+            "  ON sa.attrelid = con.conrelid AND sa.attnum = ck.attnum "
+            "JOIN pg_attribute ra "
+            "  ON ra.attrelid = con.confrelid AND ra.attnum = fk.attnum "
+            "WHERE con.contype = 'f' "
+            "  AND ns.nspname = :schema AND c.relname = :t "
+            "ORDER BY con.oid, ck.ord"
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                sql, {"schema": self._schema, "t": table}
+            ).fetchall()
+        return [
+            {
+                "column": r[0],
+                "ref_schema": r[1] or "",
+                "ref_table": r[2],
+                "ref_column": r[3],
+            }
+            for r in rows
+        ]
+
     def execute(
         self,
         sql: str,

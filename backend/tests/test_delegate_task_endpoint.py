@@ -43,7 +43,7 @@ class TestRunSubAgentEndpoint(unittest.TestCase):
             # Return a final answer immediately (no tool calls) to end the loop.
             return {"content": "done", "tool_calls": [], "reasoning": ""}
 
-        def fake_system_prompt(name):
+        def fake_system_prompt(name, **kwargs):
             return "system"
 
         with patch(
@@ -74,7 +74,7 @@ class TestRunSubAgentEndpoint(unittest.TestCase):
             captured["endpoint"] = endpoint
             return {"content": "done", "tool_calls": [], "reasoning": ""}
 
-        def fake_system_prompt(name):
+        def fake_system_prompt(name, **kwargs):
             return "system"
 
         with patch(

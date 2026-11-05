@@ -24,7 +24,8 @@ describe('PlusMenu.jsx upload gating', () => {
   });
 
   it('hides the Upload file entry when uploadEnabled is false', () => {
-    const mainView = SOURCE.match(/\{view === 'main'\s*\?\s*\([\s\S]{0,2500}?<\/div>\s*\)\s*:/);
+    // Window widened (P1 department entry added to the main menu).
+    const mainView = SOURCE.match(/\{view === 'main'\s*\?\s*\([\s\S]{0,3500}?<\/div>\s*\)\s*:/);
     expect(mainView, 'main menu block not found').not.toBeNull();
     // The Upload button must be wrapped in an uploadEnabled gate.
     expect(mainView[0]).toMatch(/\{uploadEnabled\s*&&\s*\(\s*<button[\s\S]{0,600}?\}\s*<\/button>\s*\)\}/);

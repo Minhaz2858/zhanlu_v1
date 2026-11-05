@@ -257,6 +257,33 @@ def resolve_effective_llm(
             .first()
         )
 
+    def _lookup_scoped(llm_model_id: str | None) -> LlmModel | None:
+        """``_lookup`` restricted to the requesting org (P0-1, 2026-10-31).
+
+        The agent and project steps resolve credentials from a
+        ``llm_model_id`` reference; that reference must never select
+        ANOTHER org's model row (its endpoint and DECRYPTED api key).
+
+        Strict org equality — NO NULL/''-org fallback. The database
+        enforces ``org_id NOT NULL`` (default ``default-org``), so
+        un-scoped historical rows cannot exist; pre-tenancy data carries
+        ``default-org`` and is matched DIRECTLY by ``default-org``
+        callers. A request with no org context fails CLOSED (no
+        credential selection at all) rather than scanning all orgs.
+        """
+        if not llm_model_id or not org_id:
+            return None
+        return (
+            db.query(LlmModel)
+            .filter(
+                LlmModel.id == llm_model_id,
+                LlmModel.enabled.is_(True),
+                LlmModel.is_deleted.is_(False),
+                LlmModel.org_id == org_id,
+            )
+            .first()
+        )
+
     resolved: LlmModel | None = None
     locked = False
     locked_reason = ""
@@ -267,7 +294,10 @@ def resolve_effective_llm(
         from app.models.project import Project
         proj = db.query(Project).filter(Project.id == project_id, Project.is_deleted.is_(False)).first()
         if proj and proj.llm_model_id:
-            resolved = _lookup(proj.llm_model_id)
+            # P0-1 (reviewer check #3): a project row whose llm_model_id
+            # points at ANOTHER org's model must not select that org's
+            # credentials — same scoped contract as the agent step.
+            resolved = _lookup_scoped(proj.llm_model_id)
             if resolved:
                 source = "project"
                 if not user_is_admin and proj.resource_type == "company":
@@ -277,14 +307,48 @@ def resolve_effective_llm(
     # 2) Agent binding (only if project didn't resolve)
     if (agent_id or agent_name) and resolved is None:
         from app.models.agent_app import AgentApp
-        q = db.query(AgentApp).filter(AgentApp.is_deleted.is_(False))
+
         if agent_id:
-            q = q.filter(AgentApp.id == agent_id)
+            # P0-1 closing fix (reviewer decision, 2026-10-31): the PK
+            # fetch is org-scoped too — the foreign AgentApp row itself
+            # (metadata, resource_type, model binding) must not be
+            # retrievable via a guessed/planted id. Tenant isolation is
+            # enforced at the identity-resolution boundary, not only at
+            # the credential lookup. System agents are unaffected: their
+            # access goes through the Rule-0 name short-circuit (each
+            # org resolves its OWN catalog default) — an explicit
+            # ownership policy, not a PK-path exception.
+            agent = (
+                db.query(AgentApp)
+                .filter(
+                    AgentApp.id == agent_id,
+                    AgentApp.is_deleted.is_(False),
+                    AgentApp.org_id == org_id,
+                )
+                .first()
+            )
         else:
-            q = q.filter(AgentApp.name == agent_name)
-        agent = q.first()
+            # P0-1 credential-isolation fix (2026-10-31 audit): agent
+            # NAMES are not unique across organizations. The previous
+            # name-only lookup could resolve ANOTHER org's same-named
+            # agent and use its llm_model_id — routing this org's traffic
+            # through another tenant's LLM endpoint and DECRYPTED api key.
+            # STRICT org equality (same contract as _lookup_scoped): the
+            # DB enforces org_id NOT NULL (default 'default-org'), so
+            # un-scoped historical rows cannot exist — pre-tenancy rows
+            # carry 'default-org' and match it directly. No org context
+            # ⇒ no name-based credential selection (fail-closed).
+            agent = None
+            if agent_name and org_id:
+                agent = (
+                    db.query(AgentApp).filter(
+                        AgentApp.name == agent_name,
+                        AgentApp.is_deleted.is_(False),
+                        AgentApp.org_id == org_id,
+                    ).first()
+                )
         if agent and agent.llm_model_id:
-            resolved = _lookup(agent.llm_model_id)
+            resolved = _lookup_scoped(agent.llm_model_id)
             if resolved:
                 source = "agent"
                 if not user_is_admin and agent.resource_type == "company":

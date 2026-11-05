@@ -133,7 +133,25 @@ def _load_catalog_facts(
             getattr(ov, "table_role", None),
         )
         authority = getattr(m, "authority_override", None) if m else None
-        facts[name] = {"role": role, "grain": grain, "authority": authority}
+        fact = {"role": role, "grain": grain, "authority": authority}
+        # 2B-3: scope rides the same read contract as retrieval — human
+        # override > inferred×confidence > unknown (effective_classification
+        # enforces the precedence; degrades to absent keys on any problem).
+        try:
+            from app.services.db.schema_classification import (
+                effective_classification as _effective_cls,
+            )
+
+            fact.update(_effective_cls(m, ov))
+        except Exception as e:  # pragma: no cover — degrade, never gate-break
+            logger.debug("source verification: scope facts unavailable: %s", e)
+        # The observed partition value rides the stored signals (the same
+        # provenance _load_classification_facts uses) — without it the
+        # wrong-partition check cannot compare values.
+        signals = getattr(m, "dataset_scope_signals_json", None) if m else None
+        if isinstance(signals, dict) and signals.get("partition_value"):
+            fact["partition_value"] = signals.get("partition_value")
+        facts[name] = fact
     return facts
 
 
@@ -283,6 +301,114 @@ def verify_sources(
                     )
             names = non_forecast
 
+    # ── 3.5 Scope authorization (2B-3, flag-gated, ships OFF) ──────────────
+    # Plan-level counterpart of the execution gate's scope_authorization:
+    # a company-wide question whose ENTIRE selection is confirmed partition
+    # data is clarified (not answered from one partition silently) when the
+    # catalog also holds a global dataset, and disclosed when it does not.
+    # Evidence-positive only: unknown scope and ``partition_family`` guesses
+    # are never convicted; human overrides win via effective_classification;
+    # any catalog problem degrades to no scope check.
+    try:
+        from app.config import settings as _sv_settings
+
+        if getattr(_sv_settings, "SCHEMA_SCOPE_AUTHORIZATION_ENABLED", False):
+            from app.services.db.schema_classification import (
+                resolve_question_scope_from_facts,
+            )
+            from app.services.db.table_retrieval import (
+                _load_classification_facts as _sv_load_cls_facts,
+            )
+
+            _kb_facts = _sv_load_cls_facts(db, [kb_id], project_id=project_id)
+            _q_scope = resolve_question_scope_from_facts(question or "", _kb_facts)
+            _asked = str((_q_scope or {}).get("value") or "").strip().lower()
+            _confirmed = {
+                n for n in names
+                if str((facts.get(n) or {}).get("dataset_scope") or "").startswith(
+                    "partition:"
+                )
+            }
+            if _asked:
+                # The question named a partition; a DIFFERENT confirmed
+                # partition in the plan would report the wrong region's
+                # numbers. Remove it with a disclosure when others remain.
+                _wrong = {
+                    n for n in _confirmed
+                    if str((facts.get(n) or {}).get("partition_value") or "")
+                    .strip().lower() not in ("", _asked)
+                }
+                if _wrong and len(names) > len(_wrong):
+                    for n in sorted(_wrong):
+                        res.removed_tables.append(n)
+                        res.disclosures.append(
+                            "scope: table '" + n + "' holds a different "
+                            "partition than the question asks about ("
+                            + _asked + ") — excluded"
+                        )
+                    names = [n for n in names if n not in _wrong]
+                    for n in _wrong:
+                        facts.pop(n, None)
+                elif _wrong:
+                    res.clarify = (
+                        "The question asks about "
+                        f"{_asked!r}, but the selected data covers a "
+                        "different partition. Please confirm the data you "
+                        "want, or point me at the right one."
+                    )
+                    return res
+            elif _confirmed and len(_confirmed) == len(names):
+                # Company-wide question, every selected table a confirmed
+                # partition. Clarify when a global dataset exists (it is the
+                # right answer and must not be silently skipped); otherwise
+                # disclose honestly — nothing better exists to answer with.
+                _globals = sorted(
+                    n for n, f in (_kb_facts or {}).items()
+                    if str((f or {}).get("dataset_scope") or "") == "global"
+                )
+                if _globals:
+                    res.clarify = (
+                        "This question spans the whole organization, but the "
+                        "selected data covers only a single partition. The "
+                        "company-wide dataset(s) "
+                        + ", ".join(f"{g!r}" for g in _globals)
+                        + " also exist — should I answer from those, or from "
+                        "one specific partition?"
+                    )
+                    return res
+                res.disclosures.append(
+                    "scope: company-wide question answered from partition "
+                    "data only (" + ", ".join(sorted(_confirmed)) + "); no "
+                    "company-wide dataset exists in this catalog, so figures "
+                    "cover those partitions only"
+                )
+            elif (
+                # Reviewer table, row 3: probable partitions with the key
+                # unidentified. Disclose uncertainty; do not refuse on an
+                # unverified inference, and do not silently claim completeness.
+                (family_names := {
+                    n for n in names
+                    if str((facts.get(n) or {}).get("dataset_scope") or "")
+                    == "partition_family"
+                })
+                and (len(_confirmed) + len(family_names)) == len(names)
+            ):
+                _globals = sorted(
+                    n for n, f in (_kb_facts or {}).items()
+                    if str((f or {}).get("dataset_scope") or "") == "global"
+                )
+                res.disclosures.append(
+                    "scope: the selected data's scope could not be fully "
+                    "verified (" + ", ".join(sorted(family_names | _confirmed))
+                    + " — probable partitions); a company-wide dataset"
+                    + (" (" + ", ".join(f"{g!r}" for g in _globals) + ") also "
+                       "exists" if _globals else " does not exist in this "
+                       "catalog")
+                    + " — figures may not be complete"
+                )
+    except Exception as _scope_err:  # degrade: a catalog problem never gates
+        logger.debug("source verification: scope check skipped: %s", _scope_err)
+
     # ── 4. Build guidance: grain facts + authority, for the SQL model ──────
     lines: list[str] = ["[Source verification]"]
     for n in names:
@@ -295,6 +421,18 @@ def verify_sources(
                 f"- {n}: grain unknown (role: {role}) — check the primary "
                 f"key before aggregating"
             )
+        # 2B-3: scope the SQL model must respect when aggregating.
+        ds = str(f.get("dataset_scope") or "")
+        if ds.startswith("partition:"):
+            pv = str(f.get("partition_value") or "").strip()
+            lines.append(
+                f"- {n}: scope = {ds}"
+                + (f" (value {pv!r})" if pv else "")
+                + " — a single partition; company-wide totals must not come "
+                "from it alone"
+            )
+        elif ds == "global":
+            lines.append(f"- {n}: scope = global (company-wide dataset)")
     if res.removed_tables or res.added_tables:
         if res.added_tables:
             lines.append(

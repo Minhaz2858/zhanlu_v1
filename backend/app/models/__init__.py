@@ -7,13 +7,23 @@ from app.models.user import User
 from app.models.project import Project
 from app.models.project_memory import ProjectMemory
 from app.models.project_agent import ProjectAgent
+from app.models.project_knowledge_base import ProjectKnowledgeBase
 from app.models.chat_session import ChatSession
 from app.models.chat_message import ChatMessage
 from app.models.agent_app import AgentApp
 from app.models.knowledge_base import KnowledgeBase
 from app.models.semantic_guideline import SemanticGuideline
 from app.models.automation_task import AutomationTask
+from app.models.automation_draft import AutomationDraft
 from app.models.automation_execution import AutomationExecution
+from app.models.automation_scheduling import (
+    AutomationOccurrence,
+    WorkflowOccurrence,
+    ExecutionLease,
+    AutomationExecutionEvent,
+    AutomationDeliveryEvent,
+    AutomationSideEffectOp,
+)
 from app.models.automation_file import AutomationFile
 from app.models.tool import Tool
 from app.models.user_file import UserFile

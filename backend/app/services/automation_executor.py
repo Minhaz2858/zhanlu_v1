@@ -675,12 +675,58 @@ def classify_run_failure_reason(error: str) -> str:
     return "unknown"
 
 
+def _runner_fencing_enabled() -> bool:
+    """R6 fencing flag (env-overridable, default ON): worker-owned state
+    transitions go through the runner protocol with lease tokens."""
+    from app.config import settings
+
+    return getattr(settings, "AUTOMATION_RUNNER_PROTOCOL", True)
+
+
 def _mark_failed_no_retry(db: Session, execution: AutomationExecution, error: str) -> None:
     """CAS transition queued/running -> failed WITHOUT scheduling a retry.
 
     For non-transient failures (e.g. paused-for-confirmation) where retrying
     would just reproduce the same outcome.
+
+    R6 fencing: when the runner-protocol flag is on AND this worker holds
+    the live lease, the write is token-fenced (a stale worker whose lease
+    was taken over cannot terminalize the row). Without a lease (legacy
+    rows / flag off) the historical CAS applies.
     """
+    fenced = None  # None ⇒ fencing layer not applicable (legacy CAS path)
+    if _runner_fencing_enabled():
+        # Fail-closed: any database error here PROPAGATES — a real
+        # lease-backed execution that cannot establish ownership never
+        # silently degrades to the unfenced CAS.
+        from app.services.automation.runner_protocol import current_token
+        from app.services.automation.scheduler_core import fenced_status_write
+
+        token = current_token(db, execution.id, _worker_id())
+        if token:
+            fenced = fenced_status_write(
+                db, execution.id, token,
+                from_statuses=("queued", "running"), to_status="failed",
+                extra_values={"error": (error or "")[:5000],
+                              "completed_at": datetime.now(timezone.utc)},
+                execution_cls=AutomationExecution,
+            )
+        else:
+            # Flag on but no OWNABLE token: either a foreign live lease
+            # (recovery owns the row — the stale worker must NOT write)
+            # or no lease row at all (legacy row — the historical CAS
+            # applies).
+            from app.models.automation_scheduling import ExecutionLease
+
+            lease = db.get(ExecutionLease, execution.id)
+            if lease is not None and isinstance(lease, ExecutionLease) \
+                    and lease.lease_expires_at > datetime.utcnow():
+                db.refresh(execution)
+                return  # foreign live lease — never overwrite
+            fenced = None
+    if fenced:
+        db.refresh(execution)
+        return
     db.execute(
         update(AutomationExecution)
         .where(
@@ -1078,27 +1124,79 @@ def execute_automation(execution_id: str) -> None:
         # CAS transition queued -> running. Guards against duplicate spawns
         # (e.g. a retry firing twice) and stamps the wall-clock deadline the
         # janitor uses to reap hung runs.
+        # R6 fencing: worker-owned transition — token-fenced when the
+        # runner-protocol flag is on and this worker holds the live lease;
+        # a foreign live lease (recovery owns the row) aborts the claim.
         now = datetime.now(timezone.utc)
-        rc = db.execute(
-            update(AutomationExecution)
-            .where(
-                AutomationExecution.id == execution_id,
-                AutomationExecution.status == "queued",
-            )
-            .values(
-                status="running",
-                started_at=now,
-                timeout_at=now + timedelta(seconds=settings.AUTOMATION_RUN_TIMEOUT_SECONDS),
-                lease_owner=_worker_id(),
-            )
+        run_values = dict(
+            status="running",
+            started_at=now,
+            timeout_at=now + timedelta(seconds=settings.AUTOMATION_RUN_TIMEOUT_SECONDS),
+            lease_owner=_worker_id(),
         )
-        db.commit()
-        if rc.rowcount != 1:
+        claim_won = None
+        if _runner_fencing_enabled():
+            # Fail-closed: DB errors here propagate — never silently unfence.
+            from app.services.automation.runner_protocol import current_token
+            from app.services.automation.scheduler_core import (
+                fenced_status_write,
+            )
+
+            token = current_token(db, execution_id, _worker_id())
+            if token is not None:
+                claim_won = fenced_status_write(
+                    db, execution_id, token,
+                    from_statuses=("queued",), to_status="running",
+                    extra_values=run_values,
+                    execution_cls=AutomationExecution,
+                )
+                if not claim_won:
+                    logger.info(
+                        "execute_automation: %s fenced claim lost - aborting "
+                        "(state moved or lease taken over)",
+                        execution_id,
+                    )
+            else:
+                # No ownable lease: a foreign LIVE lease (another process
+                # holds the promotion lock) aborts the claim; no lease at
+                # all (legacy row) → historical CAS.
+                from app.models.automation_scheduling import ExecutionLease
+
+                lease = db.get(ExecutionLease, execution_id)
+                if isinstance(lease, ExecutionLease) \
+                        and lease.lease_expires_at > now:
+                    logger.info(
+                        "execute_automation: %s claim refused - lease held by %s",
+                        execution_id, lease.owner,
+                    )
+                    return
+                claim_won = None
+        if claim_won is None:
+            rc = db.execute(
+                update(AutomationExecution)
+                .where(
+                    AutomationExecution.id == execution_id,
+                    AutomationExecution.status == "queued",
+                )
+                .values(**run_values)
+            )
+            db.commit()
+            claim_won = rc.rowcount == 1
+        if not claim_won:
             logger.info(
                 "execute_automation: %s not in queued state - aborting (likely duplicate)",
                 execution_id,
             )
             return
+        # R6 Phase 3: critical lifecycle event, ACK-after-commit (§1.4).
+        try:
+            from app.services.automation import execution_events as _ev
+            _ev.emit_run_started(db, execution_id,
+                                 getattr(execution, "attempt", 0) or 0,
+                                 worker=_worker_id())
+        except Exception as _ev_err:  # noqa: BLE001 — lifecycle ledger error
+            logger.warning("execute_automation: run_started event failed: %s",
+                           _ev_err)
         db.refresh(execution)
 
         # Auto-prompt injection (per spec): every run immediately drops a
@@ -1509,7 +1607,9 @@ def execute_automation(execution_id: str) -> None:
         except Exception as e:
             logger.exception("execute_automation: file generation failed: %s", e)
             # Don't fail the whole run — the text output is still useful.
+            # R1 (audit B7): record the failure honestly on the execution.
             files, quality_gate = [], None
+            _record_artifact_render_failure(db, execution, e)
 
         # Bug fix (2026-08-13): the assistant bubble was persisted in the
         # inner `finally` above BEFORE any AutomationFile rows existed, so
@@ -1591,27 +1691,90 @@ def execute_automation(execution_id: str) -> None:
                 "Report produced without any successful datasource call — "
                 "figures were not grounded in queried data"
             )
-        rc = db.execute(
-            update(AutomationExecution)
-            .where(
-                AutomationExecution.id == execution_id,
-                AutomationExecution.status == "running",
+        # R6 §6.2b: worker-owned finalization — two fenced steps
+        # (running→finalizing→terminal) with the output persisted BEFORE
+        # the finalizing CAS. A stale token (recovery took over) aborts —
+        # the stale worker NEVER falls through to the legacy CAS (that
+        # would overwrite newer state); its persisted output is left for
+        # recovery's finalize-replay.
+        finalized = False
+        abort_stale = False
+        if _runner_fencing_enabled():
+            # Fail-closed: DB errors here propagate — never silently unfence.
+            from app.services.automation.runner_protocol import (
+                current_token,
+                finalize_from_running,
             )
-            .values(
-                status=final_status,
-                completed_at=completed_at,
-                duration_seconds=duration,
-                **({"error": final_error} if final_error else {}),
-            )
-        )
-        db.commit()
-        if rc.rowcount != 1:
+
+            token = current_token(db, execution_id, _worker_id())
+            if token:
+                # Persist output FIRST (ordering guarantee: recovery sees
+                # output ⇒ finalize-replay, never a re-invocation).
+                db.execute(
+                    update(AutomationExecution)
+                    .where(AutomationExecution.id == execution_id)
+                    .values(
+                        output_text=(assistant_text or "")[:200_000],
+                        **({"output_data": output_data} if output_data else {}),
+                    )
+                )
+                db.commit()
+                finalized = finalize_from_running(
+                    db, execution_id, token, AutomationExecution,
+                    terminal_status=final_status,
+                    duration_seconds=duration,
+                    error=final_error,
+                )
+                if not finalized:
+                    abort_stale = True
+            # token None (no lease on legacy rows): fall through to the
+            # historical CAS below.
+        if abort_stale:
             logger.info(
-                "execute_automation: %s could not commit (status changed) - result discarded",
+                "execute_automation: %s lost the lease during finalization "
+                "- result discarded (recovery owns the row)",
                 execution_id,
             )
             return
+        if finalized:
+            db.refresh(execution)
+        else:
+            rc = db.execute(
+                update(AutomationExecution)
+                .where(
+                    AutomationExecution.id == execution_id,
+                    AutomationExecution.status == "running",
+                )
+                .values(
+                    status=final_status,
+                    completed_at=completed_at,
+                    duration_seconds=duration,
+                    **({"error": final_error} if final_error else {}),
+                )
+            )
+            db.commit()
+            if rc.rowcount != 1:
+                logger.info(
+                    "execute_automation: %s could not commit (status changed) - result discarded",
+                    execution_id,
+                )
+                return
         db.refresh(execution)
+
+        # R6 Phase 3: critical terminal event, ACK-after-commit (§1.4).
+        try:
+            from app.services.automation import execution_events as _ev
+            _attempt = getattr(execution, "attempt", 0) or 0
+            if final_status in ("succeeded", "completed"):
+                _ev.emit_run_finished(db, execution_id, _attempt,
+                                      status=final_status)
+            else:
+                _ev.emit_run_failed(db, execution_id, _attempt,
+                                    classification=final_status,
+                                    error=final_error)
+        except Exception as _ev_err:  # noqa: BLE001 — terminal state already durable
+            logger.warning("execute_automation: terminal event failed: %s",
+                           _ev_err)
 
         task.last_run = execution.completed_at.isoformat()
         task.last_run_at = execution.completed_at
@@ -1660,22 +1823,54 @@ def _mark_failed(db: Session, execution: AutomationExecution, error: str) -> Non
 
     The CAS (``status IN (queued, running)``) prevents the executor and the
     janitor from both marking (and both retrying) the same execution.
+
+    R6 fencing: worker-owned transition — token-fenced when the runner
+    flag is on and this worker holds the live lease; a stale worker whose
+    lease was taken over never terminalizes the row (and never schedules a
+    duplicate retry — recovery owns that decision).
     """
-    rc = db.execute(
-        update(AutomationExecution)
-        .where(
-            AutomationExecution.id == execution.id,
-            AutomationExecution.status.in_(["queued", "running"]),
+    fenced = None
+    if _runner_fencing_enabled():
+        # Fail-closed: DB errors here propagate — never silently unfence.
+        from app.services.automation.runner_protocol import current_token
+        from app.services.automation.scheduler_core import fenced_status_write
+
+        token = current_token(db, execution.id, _worker_id())
+        if token:
+            won = fenced_status_write(
+                db, execution.id, token,
+                from_statuses=("queued", "running"), to_status="failed",
+                extra_values={"error": (error or "")[:5000],
+                              "completed_at": datetime.now(timezone.utc)},
+                execution_cls=AutomationExecution,
+            )
+            if not won:
+                return  # recovery owns the row — no duplicate retry
+            fenced = True
+        else:
+            from app.models.automation_scheduling import ExecutionLease
+
+            lease = db.get(ExecutionLease, execution.id)
+            if lease is not None and isinstance(lease, ExecutionLease) \
+                    and lease.lease_expires_at > datetime.utcnow():
+                return  # foreign live lease — never overwrite
+            fenced = None
+    if fenced is None:
+        rc = db.execute(
+            update(AutomationExecution)
+            .where(
+                AutomationExecution.id == execution.id,
+                AutomationExecution.status.in_(["queued", "running"]),
+            )
+            .values(
+                status="failed",
+                error=(error or "")[:5000],
+                completed_at=datetime.now(timezone.utc),
+            )
         )
-        .values(
-            status="failed",
-            error=(error or "")[:5000],
-            completed_at=datetime.now(timezone.utc),
-        )
-    )
-    db.commit()
-    if rc.rowcount != 1:
-        return  # already terminal - nothing to do
+        db.commit()
+        if rc.rowcount != 1:
+            return  # already terminal - nothing to do
 
     db.refresh(execution)
     task = db.query(AutomationTask).filter(
@@ -1803,20 +1998,14 @@ def _persist_cancellation_to_chat(
 # ---------------------------------------------------------------------------
 
 def _parse_sse_chunk(chunk) -> Optional[dict]:
-    """Parse one SSE chunk ('data: {json}\\n\\n') into a dict, or None."""
-    if not isinstance(chunk, str):
-        return None
-    s = chunk.strip()
-    if not s.startswith("data:"):
-        return None
-    payload = s[len("data:"):].strip()
-    if not payload:
-        return None
-    try:
-        import json as _json
-        return _json.loads(payload)
-    except Exception:
-        return None
+    """Parse one SSE chunk ('data: {json}\\n\\n') into a dict, or None.
+
+    R6 Phase 2: delegated to the centralized §5 parser — the regex lives in
+    ONE place now (app/services/agent_invocation.parse_sse_frame); behavior
+    is byte-identical for the str chunks this executor feeds it.
+    """
+    from app.services.agent_invocation import parse_sse_frame
+    return parse_sse_frame(chunk)
 
 
 def _persist_run_progress(
@@ -1848,6 +2037,18 @@ def _persist_run_progress(
     """
     if not execution_id:
         return
+    # R6 Phase 3: mirror the progress write as a durable, attempt-scoped,
+    # bounded-loss telemetry event (§1.4 ledger). Never fatal.
+    try:
+        from app.services.automation import execution_events as _ev
+        _ev.record_telemetry_event(
+            execution_id, "progress",
+            {"current_phase": phase, "steps": len(steps or []),
+             "has_partial_text": partial_text is not None},
+        )
+    except Exception as _ev_err:  # noqa: BLE001 — telemetry is bounded-loss
+        logger.debug("_persist_run_progress: ledger write dropped: %s",
+                     _ev_err)
     try:
         from app.database import SessionLocal
         pdb = SessionLocal()
@@ -2647,6 +2848,47 @@ def _extract_structured_payload(text: str, output_format: str):
         except Exception:
             pass
     return text
+
+
+def _record_artifact_render_failure(
+    db: Session, execution: AutomationExecution, exc: Exception
+) -> None:
+    """Record an artifact-render failure honestly on the execution row
+    (R1, audit B7) WITHOUT changing the run's status.
+
+    The run itself may still be a success (text output survived); only the
+    deliverable generation failed. Recorded via ``output_data``:
+      - ``artifacts_failed: true``
+      - ``artifacts_failed_reason: <first 300 chars of the exception>``
+    and as a failed activity step so the live checklist shows it. Never
+    raises (the executor's success path must not be endangered by the
+    failure recorder).
+    """
+    try:
+        od = dict(execution.output_data or {})
+        od["artifacts_failed"] = True
+        od["artifacts_failed_reason"] = str(exc)[:300]
+        execution.output_data = od
+        steps = list(execution.activity_steps or [])
+        steps.append(
+            {
+                "number": len(steps) + 1,
+                "description": "Artifact generation failed — text output is "
+                "still available for download.",
+                "status": "failed",
+            }
+        )
+        execution.activity_steps = steps
+        db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "failed to record artifact render failure for execution %s",
+            getattr(execution, "id", "?"),
+        )
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _render_and_save_files(

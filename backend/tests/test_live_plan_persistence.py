@@ -46,15 +46,18 @@ def test_plan_and_finalize_phases_persist():
     assert '_push_live_event("phase_enter", "phase_enter.finalize")' in src
 
 
-def test_plan_step_titles_bypass_content_scrubber():
-    """Plan step titles are server-generated metadata (same class as tool
-    labels) and must survive verbatim — no SQL/ERP masking."""
+def test_plan_step_titles_go_through_content_scrubber():
+    """Security closure audit: plan step titles may be LLM-AUTHORED
+    (parse_dynamic_plan) — they are raw model text, NOT server-template
+    metadata like tool labels. The persisted plan-step pushes must therefore
+    use the DEFAULT content scrubber (the old sanitize=False premise leaked
+    identifiers echoed by the planner). Ordinary titles still render
+    verbatim — the sanitizer only replaces forbidden patterns."""
     src = _read(_AGENTS)
-    # The plan-step push sites must pass sanitize=False.
-    assert src.count("sanitize=False") >= 3, \
-        "plan_step_added + 2× plan_step_completed sites must bypass the scrubber"
+    assert "sanitize=False" not in src, \
+        "no live-event site may bypass the content scrubber (plan titles are model text)"
     sse = _read(_SSE)
     assert "sanitize: bool = True" in sse, \
         "_build_live_event must accept a sanitize flag"
     assert "if sanitize else dict(params or {})" in sse, \
-        "_build_live_event must skip scrubbing when sanitize=False"
+        "_build_live_event must keep supporting explicit sanitize control"

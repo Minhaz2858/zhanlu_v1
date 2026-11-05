@@ -45,7 +45,7 @@ from app.services.data_execution.prompt_block import build_session_state_block
 from app.services.tool_handlers.artifact_tool import _create_artifact_tool
 from app.services.llm_service import (
     llm_headers, llm_url, get_model, model_has_fixed_temperature,
-    maybe_enable_parallel_tool_calls,
+    maybe_enable_parallel_tool_calls, llm_endpoint_headers,
 )
 from app.services.llm_router import resolve_effective_llm, EffectiveLLM
 from app.services.project_access import (
@@ -108,6 +108,7 @@ from app.services.file_turn_guard import (
     should_force_create_file,
     is_file_deliverable_request,
     file_artifact_created,
+    detect_give_up,
     build_file_disclosure,
 )
 from app.services.tool_result_persistence import (
@@ -223,6 +224,7 @@ from app.services.turn_planner import (  # noqa: E402 — deterministic turn pla
     build_turn_plan,
     mark_final_step_completed,
     plan_completed_steps,
+    plan_meta_frame,
     plan_step_added_frame,
     plan_step_completed_frame,
     plan_to_system_block,
@@ -972,6 +974,190 @@ def _resolve_regenerate_turn(
             messages.pop(_i)
             break
     return user_content, file_urls, selected_skill, selected_skill_id
+
+
+def _merge_fsm_conv_messages(
+    existing: list | None,
+    user_msg: dict | None,
+    assistant_msg: dict,
+    regenerate: bool = False,
+) -> list[dict]:
+    """Merge a turn's messages into a freshly-loaded ``conv.messages`` list.
+
+    Stage-1 FSM persistence invariant (2026-10-30): the user message AND the
+    assistant answer must BOTH be present exactly once in the persisted
+    conversation, and a regenerate turn must REPLACE (not stack on) the
+    previous assistant reply.
+
+    Rules:
+    - Regenerate: drop the trailing assistant reply if the early-commit pop
+      never landed, so the new reply replaces it in place.
+    - User message: appended only when missing (id-based) and NOT a
+      regenerate turn — on regenerate the original user message is already
+      in history (``_resolve_regenerate_turn`` reuses it; ``user_msg`` here
+      carries a fresh unused id).
+    - Assistant message: appended only when its id is not already present,
+      so a retried persist never duplicates the bubble.
+    - Non-dict entries in ``existing`` are preserved untouched at the front
+      (defensive: the column historically held only dicts).
+
+    Pure function — returns a NEW list; the input is not mutated.
+    """
+    merged: list = [m for m in (existing or [])]
+    if (
+        regenerate
+        and merged
+        and isinstance(merged[-1], dict)
+        and merged[-1].get("role") == "assistant"
+    ):
+        merged.pop()
+    _ids = {
+        m.get("id") for m in merged if isinstance(m, dict) and m.get("id")
+    }
+    if (
+        not regenerate
+        and isinstance(user_msg, dict)
+        and user_msg.get("id")
+        and user_msg.get("id") not in _ids
+    ):
+        merged.append(dict(user_msg))
+        _ids.add(user_msg.get("id"))
+    if assistant_msg.get("id") and assistant_msg.get("id") not in _ids:
+        merged.append(dict(assistant_msg))
+    return merged
+
+
+def _persist_fsm_turn(
+    db_bind,
+    conversation_id: str,
+    *,
+    chat_session_id: str | None,
+    regenerate: bool,
+    assistant_content: str,
+    plan_summary=None,
+    live_events=None,
+    citations=None,
+    user_msg: dict | None = None,
+    assistant_msg: dict,
+    client_message_id: str | None = None,
+) -> dict | None:
+    """Atomically persist one FSM turn to BOTH persistence representations.
+
+    STAGE-1 (2026-10-30): extracted from the v3 FSM route branch so the
+    transaction boundary is directly DB-testable.
+
+    D4 AUTHORITATIVE IDENTITY (2026-11-01): when the client transported
+    ``assistant_message_id`` (Stage 2B Commit 4A), that row — created by the
+    client BEFORE the stream and the ONLY id backed by a real row at stream
+    time — is THE turn's record. The backend now FINALIZES IT IN PLACE
+    (exact-row update, validated session + role) instead of INSERTing a
+    second row with a fresh uuid. That duplicate was the confirmed P0 twin
+    defect: an empty client row plus a filled backend row per FSM turn.
+
+    Fallbacks (backward compatible):
+      * no ``client_message_id`` (old clients) → legacy INSERT;
+      * row missing / foreign session / wrong role → legacy INSERT (a
+        cross-session row is NEVER adopted);
+      * ``regenerate=True`` → no chat_messages write at all (the client's
+        optimistic row is the writer of record there — unchanged contract).
+
+    Writes, in ONE transaction on a FRESH session bound to ``db_bind``:
+      1. The assistant ``chat_messages`` row (update-in-place or insert).
+      2. ``agent_conversations.messages`` merged via
+         ``_merge_fsm_conv_messages`` (id-dedupe, missing-user-message
+         repair, regenerate-replace) — carrying the SAME authoritative id.
+
+    NOTE on the dual-store contract: the backend does NOT write USER rows to
+    ``chat_messages`` — in interactive chat that table's user rows are
+    client-created via the entity API before the stream starts (see the
+    Turn Identity Transport comment in add_message_stream). The user-message
+    repair here covers the ``agent_conversations.messages`` JSON store only;
+    that is by design, not an omission.
+
+    If the commit fails, the session is closed without committing — the DB
+    rolls the whole transaction back, so NEITHER store changes (atomicity).
+    Returns ``{"messages": <conv.messages>, "assistant_message_id": <id>,
+    "answer_persisted": <bool>}`` on success, or ``None`` when the
+    conversation row vanished or the commit raised.
+    """
+    from sqlalchemy.orm import sessionmaker as _fsm_sessionmaker
+
+    from app.models.chat_message import ChatMessage as Message
+
+    _fsm_db = _fsm_sessionmaker(bind=db_bind)()
+    try:
+        _answer_persisted = False
+        _persisted_message_id = (assistant_msg or {}).get("id")
+        if chat_session_id and not regenerate:
+            _client_row = None
+            if client_message_id:
+                _client_row = (
+                    _fsm_db.query(Message)
+                    .filter(
+                        Message.id == client_message_id,
+                        Message.session_id == chat_session_id,
+                        Message.role == "assistant",
+                        Message.is_deleted == False,  # noqa: E712
+                    )
+                    .first()
+                )
+            if _client_row is not None:
+                # D4 exact-row finalization: fill the client's optimistic row
+                # IN PLACE. Idempotent — re-persisting the same turn rewrites
+                # the same values onto the same row.
+                _client_row.content = assistant_content
+                _client_row.trace = plan_summary or {}
+                _client_row.live_events = live_events or None
+                _client_row.sources = citations or None
+                _client_row.reasoning_content = None
+                _persisted_message_id = _client_row.id
+                _answer_persisted = True
+            else:
+                # FIX 2026-09-22 (round 2): ChatMessage has NO agent_name
+                # column and its reasoning column is reasoning_content — the
+                # previous kwargs raised TypeError and the reply was dropped
+                # again.
+                msg = Message(
+                    id=str(uuid.uuid4()),
+                    session_id=chat_session_id,
+                    role="assistant",
+                    content=assistant_content,
+                    trace=plan_summary or {},
+                    reasoning_content=None,
+                    live_events=live_events or None,
+                    sources=citations or None,
+                )
+                _fsm_db.add(msg)
+                _persisted_message_id = msg.id
+                _answer_persisted = True
+        _fsm_conv = _fsm_db.query(AgentConversation).filter(
+            AgentConversation.id == conversation_id
+        ).first()
+        _fsm_msgs: list | None = None
+        if _fsm_conv is not None:
+            _fsm_conv.messages = _merge_fsm_conv_messages(
+                _fsm_conv.messages,
+                user_msg,
+                assistant_msg,
+                regenerate=regenerate,
+            )
+            _fsm_conv.updated_date = datetime.now(timezone.utc)
+            _fsm_msgs = list(_fsm_conv.messages)
+        # ONE atomic commit: the chat_messages row and the conv.messages
+        # update land together or not at all. On exception, close() below
+        # discards the transaction (implicit rollback).
+        _fsm_db.commit()
+        if _fsm_msgs is None:
+            # Stage-1 contract preserved: the conversation row vanished →
+            # None (the caller treats it as "nothing persisted").
+            return None
+        return {
+            "messages": _fsm_msgs,
+            "assistant_message_id": _persisted_message_id,
+            "answer_persisted": _answer_persisted,
+        }
+    finally:
+        _fsm_db.close()
 
 
 def _extract_citations_from_tool_calls(tool_calls: list | None) -> list[dict]:
@@ -2438,6 +2624,139 @@ def _build_column_summary(rows: list[dict]) -> str:
     return "\n".join(lines) if lines else "(no numeric columns found)"
 
 
+# ── Turn-observation recovery (fix #1, 2026-10-29) ─────────────────────────
+# Incident (convs 6c466a7d / 7e2e6a53): the bound warehouse was queried
+# successfully (20-21 nl2sql nodes, 100-275 real rows in observation_records)
+# yet the final answer was the generic "had trouble putting it all together"
+# apology. Mechanism: the goal-contract answer datasets are only collected
+# when QUERY_PURPOSE_TAGGING_ENABLED is on (default off), and the wall-clock
+# cap broke the loop before the model narrated results — so post-loop
+# synthesis saw zero rows and fell back.
+#
+# This helper reads (NEVER re-executes) the durable observation_records of
+# the CURRENT turn's executions. Turn attribution is exact: execution ids
+# come from the tool-result dicts the loop itself recorded this turn
+# (NormalizedQueryResult.to_tool_result()["provenance"]["execution_id"]) —
+# no time-window heuristics. Tenant isolation is enforced by joining
+# executions and filtering on conversation/org/app. Only successful nl2sql
+# observations with structured rows qualify; zero-row successes and failures
+# never fabricate data.
+_RECOVERY_MAX_EXECUTION_IDS = 50
+
+
+def _recover_turn_observation_datasets(
+    db,
+    *,
+    conversation_id: str,
+    org_id: str | None,
+    app_id: str | None,
+    tool_calls_for_frontend: list | None,
+) -> tuple[list[dict], dict]:
+    """Recover successful NL2SQL datasets from the current turn's executions.
+
+    Returns ``(datasets, stats)`` where ``datasets`` matches the
+    goal-contract answer-dataset shape consumed by ``merge_answer_rows``
+    (``{"rows", "sql", "source_name", "source_id", "purpose"}``) and
+    ``stats`` carries bounded diagnostics (counts only — never row data).
+    Fail-closed: any error yields ``([], stats)`` — the caller keeps the
+    existing honest fallback text.
+    """
+    stats: dict = {
+        "execution_ids": 0,
+        "success_observations": 0,
+        "success_zero_row": 0,
+        "failed_observations": 0,
+        "malformed_observations": 0,
+        "rows_recovered": 0,
+    }
+    execution_ids: list[str] = []
+    try:
+        for _tc in tool_calls_for_frontend or []:
+            if not isinstance(_tc, dict):
+                continue
+            _res = _tc.get("results")
+            if not isinstance(_res, dict):
+                continue
+            _prov = _res.get("provenance")
+            if not isinstance(_prov, dict):
+                continue
+            _eid = str(_prov.get("execution_id") or "").strip()
+            if _eid and _eid not in execution_ids:
+                execution_ids.append(_eid)
+            if len(execution_ids) >= _RECOVERY_MAX_EXECUTION_IDS:
+                break
+    except Exception as _eid_err:  # noqa: BLE001 — fail closed
+        logger.warning(
+            "turn-observation recovery: execution-id collection failed "
+            "(fail-closed): %s",
+            _eid_err,
+        )
+        return [], stats
+    stats["execution_ids"] = len(execution_ids)
+    if not execution_ids:
+        return [], stats
+
+    datasets: list[dict] = []
+    try:
+        from app.models.execution import Execution, ObservationRecord
+
+        _rows = (
+            db.query(ObservationRecord)
+            .join(Execution, Execution.id == ObservationRecord.execution_id)
+            .filter(
+                ObservationRecord.execution_id.in_(execution_ids),
+                ObservationRecord.is_deleted.is_(False),
+                ObservationRecord.observation_type == "nl2sql",
+                Execution.conversation_id == conversation_id,
+                Execution.org_id == (org_id or "default-org"),
+                Execution.app_id == (app_id or "default-app"),
+            )
+            .order_by(
+                ObservationRecord.created_date.asc(),
+                ObservationRecord.seq.asc(),
+            )
+            .all()
+        )
+        for _obs in _rows:
+            if not getattr(_obs, "success", False):
+                stats["failed_observations"] += 1
+                continue
+            stats["success_observations"] += 1
+            _rd = _obs.result_data
+            if not isinstance(_rd, dict):
+                stats["malformed_observations"] += 1
+                continue
+            _data = _rd.get("data")
+            if not isinstance(_data, list):
+                stats["malformed_observations"] += 1
+                continue
+            if not _data:
+                # Successful zero-row execution: honest-empty, never a
+                # synthesis source, and never conflated with a failure.
+                stats["success_zero_row"] += 1
+                continue
+            datasets.append(
+                {
+                    "rows": list(_data),
+                    "sql": str(_rd.get("sql") or ""),
+                    "source_name": str(_rd.get("source_name") or ""),
+                    "source_id": str(_rd.get("source_id") or ""),
+                    "purpose": "answer",
+                }
+            )
+    except Exception as _db_err:  # noqa: BLE001 — fail closed
+        logger.warning(
+            "turn-observation recovery: observation query failed "
+            "(fail-closed, conv=%s): %s",
+            conversation_id,
+            _db_err,
+        )
+        return [], stats
+
+    stats["rows_recovered"] = sum(len(d["rows"]) for d in datasets)
+    return datasets, stats
+
+
 async def _force_llm_synthesis(
     user_msg: str,
     rows: list[dict],
@@ -2885,6 +3204,34 @@ def _detect_system_agent_intent(
         if structure_re is not None and structure_re.search(user_content):
             return (intent_name, target_agent)
     return None
+
+
+def _append_department_block(system_prompt: str, conv) -> str:
+    """P1 (2026-10-31, roadmap D2): inject the conversation's department
+    context so the General Assistant routes specialists within the selected
+    department by default and expands across departments only when the
+    request clearly needs capabilities absent there.
+
+    DISCOVERY-ONLY: the block influences which agents the LLM looks for —
+    it NEVER grants data access (KB/RLS/policy scoping is untouched).
+    """
+    try:
+        if conv is None:
+            return system_prompt
+        dept = ((conv.metadata_ or {}).get("department") or "").strip()
+        if not dept:
+            return system_prompt
+        block = (
+            f"\n\nACTIVE DEPARTMENT: {dept}\n"
+            "The user selected this department. When coordinating specialists, "
+            "call `list_available_agents` with department=\"{dept}\" first and "
+            "prefer specialists from it. Expand to other departments ONLY when "
+            "the request clearly requires capabilities or data domains absent "
+            "here — and say which department each finding comes from."
+        ).format(dept=dept)
+        return (system_prompt or "") + block
+    except Exception:  # noqa: BLE001 — decorative context must never break a turn
+        return system_prompt
 
 
 def _route_to_dedicated_system_agent(
@@ -3471,6 +3818,10 @@ _LONG_RUNNING_TOOLS = frozenset({
     "ask_forecast", "ask_report",
     "ask_knowledge_graph", "ask_decision", "ask_macro_override",
     "web_search", "execute_automation", "execute_code",
+    # Multi-agent milestone (2026-11-01): delegate_task spawns real
+    # specialist runs that take minutes — the heartbeat path must stream
+    # their live agent-execution frames instead of waiting for the batch.
+    "delegate_task",
     # Artifact / dashboard generation can take tens of seconds to minutes
     # (Jinja scaffold + DB writes + optional git commits + poller start).
     # Register them so the batch tool wrapper emits tool_progress frames and
@@ -3835,6 +4186,7 @@ async def _emit_tool_progress_while_waiting(
     task: asyncio.Task,
     parsed_calls: list,
     interval: float = 5.0,
+    extra_frames: list | None = None,
 ):
     """Yield ``tool_progress`` SSE frames while ``task`` is still running.
 
@@ -3843,12 +4195,16 @@ async def _emit_tool_progress_while_waiting(
     in-flight tool calls as ``status: running``. This is additive — the
     frontend already renders ``tool_progress`` events and treats entries
     without a ``results`` key as in-flight.
+
+    ``extra_frames``: live agent-execution frames appended by long-running
+    delegation handlers (multi-agent milestone) — drained each tick.
     """
     async for frame in emit_tool_progress_while_waiting(
         task,
         parsed_calls,
         interval=interval,
         display_names=TOOL_DISPLAY_NAMES,
+        extra_frames=extra_frames,
     ):
         yield frame
 
@@ -4584,6 +4940,101 @@ _ARG_KEY_PRIORITY: dict[str, list[tuple[str, list[str]]]] = {
     ],
 }
 
+def _verification_verdict(tool_calls) -> tuple[bool, bool, list[str]]:
+    """Verification verdict for the finalize phase (consistency audit D3).
+
+    Returns ``(failed, grounded, failed_steps)``:
+      * ``failed`` — any tool's FINAL attempt failed/errored/was denied;
+      * ``grounded`` — at least one successful DATA call backs the answer;
+      * ``failed_steps`` — the failed tool names (for the honest exceptions
+        note).
+
+    The old gate was a pure OR over statuses: one failed supplementary tool
+    (e.g. a ``read_file`` miss) forced "Verification failed" on an answer
+    fully grounded in successful queries. Invariants preserved: failures are
+    never silently ignored (they are listed), and failure WITHOUT data
+    grounding still fails verification.
+
+    Status reconciliation (multi-agent milestone §7, 2026-11-01): the
+    verdict now looks at each tool's LAST attempt, not every attempt. A
+    tool that failed once (e.g. a transient ``malformed output`` parse
+    error) and was retried SUCCESSFULLY did complete its work — bounded
+    recovery must not report "verification failed because some steps did
+    not complete" when every required step actually finished. Per-attempt
+    failures remain fully visible in the execution tree / live events;
+    only the verdict is reconciled. A tool whose latest attempt failed is
+    still a failed step — no silent conversion of failures into success.
+    """
+    calls = [tc for tc in (tool_calls or []) if isinstance(tc, dict)]
+    _BAD = ("failed", "error", "denied")
+    # Final status per tool name (calls are in execution order).
+    _final_status: dict[str, str] = {}
+    for tc in calls:
+        name = str(tc.get("name") or "tool")
+        _final_status[name] = str(tc.get("status") or "").lower()
+    failed_steps = [name for name, st in _final_status.items() if st in _BAD]
+    try:
+        from app.services.turn_evidence import DATA_EVIDENCE_TOOLS as _EV_TOOLS
+    except Exception:  # noqa: BLE001 — degrade to empty set, never break gate
+        _EV_TOOLS = set()
+    grounded = any(
+        (tc.get("name") or "") in _EV_TOOLS
+        and str(tc.get("status") or "").lower() not in ("failed", "error", "denied", "blocked")
+        for tc in calls
+    )
+    return (bool(failed_steps), grounded, failed_steps)
+
+
+def _enforce_turn_execution_strategy(tools: list, turn_plan) -> tuple[list, str]:
+    """Enforce a TurnPlan's ``execution_strategy`` on the per-turn toolset.
+
+    Chat-experience repair (2026-10-31): the TurnPlan already classifies
+    greetings/smalltalk as ``direct_response`` — but the strategy was only
+    advisory text, so the ReAct loop still ran with the full toolset
+    (including ``delegate_task`` / ``list_available_agents``) and the local
+    LLM freewheeled into multi-agent fan-out for "hi". A direct-response
+    turn is conversational by definition: no tools, no delegation, no
+    database access, no synthetic execution events. This is NOT keyword
+    routing — the classification is the existing TurnPlan
+    (is_greeting/_SMALLTALK_RE) and the strategy taxonomy already existed;
+    this only makes it binding.
+
+    Returns ``(tools, note)`` — ``note`` explains any restriction (for logs).
+    """
+    strategy = getattr(turn_plan, "execution_strategy", None)
+    if strategy == "direct_response":
+        # Mirrors the existing loop-guard tool-free pass (an already
+        # exercised code path — empty tool lists are safe downstream).
+        return [], "direct_response turn — toolset cleared (conversational)"
+    return tools, ""
+
+
+def _delegate_agent_identity(args: dict | None) -> list[str]:
+    """Extract the REAL specialist names a ``delegate_task`` call targets.
+
+    Part C (chat experience repair): the ``subagent_invoked`` live event used
+    to carry only the activity description (``agent_label``), so the UI fell
+    back to a generic "sub-agent" label. The actual AgentApp identity is
+    available in the call args (single: ``agent_name``; batch:
+    ``tasks[].agent_name``) — surface it so the execution tree shows real
+    agent names. Unknown names are simply absent; never invented.
+    """
+    if not isinstance(args, dict):
+        return []
+    names: list[str] = []
+    single = args.get("agent_name")
+    if isinstance(single, str) and single.strip():
+        names.append(single.strip())
+    tasks = args.get("tasks")
+    if isinstance(tasks, list):
+        for t in tasks:
+            if isinstance(t, dict):
+                n = t.get("agent_name")
+                if isinstance(n, str) and n.strip() and n.strip() not in names:
+                    names.append(n.strip())
+    return names
+
+
 def _format_activity_description(tool_name: str, args: dict | None = None) -> str:
     """Build a human-readable activity step description from tool name + args.
 
@@ -5292,6 +5743,42 @@ def _loop_guard_config_for(agent_app) -> ToolGuardrailConfig:
             no_progress_block_after=2,
         )
     return ToolGuardrailConfig()
+
+
+def _resolve_agent_app_scoped(db: Session, agent_name, org_id):
+    """Org-scoped ``AgentApp`` resolution (D-5 security sweep, 2026-10-31).
+
+    Agent names are NOT unique across organizations: with same-named agents
+    in two orgs, a name-only ``.first()`` can return ANOTHER org's app and
+    every binding hanging off it — tool config, bound data sources,
+    workflow definition, experience-store identity (measured live during
+    the 2C synthetic-schema e2e: one org's conversation inherited another
+    org's data-source catalog). Every agent-app resolution in this module
+    MUST go through this helper.
+
+    Resolution order:
+      1. the org's own row for that name (when ``org_id`` is known) — for
+         single-tenant deployments everything lives under ``default-org``
+         and matches here directly (that IS the legacy compatibility path);
+      2. a historical un-scoped row (org NULL or empty string) with that
+         name — the ORM cannot create these (org_id is NOT NULL, default
+         ``default-org``), so this branch is defensive only;
+      3. ``None`` — never another org's row, ``default-org`` included.
+    """
+    if not agent_name:
+        return None
+    _base = db.query(AgentApp).filter(
+        AgentApp.name == agent_name,
+        AgentApp.is_deleted == False,  # noqa: E712
+    )
+    if org_id:
+        row = _base.filter(AgentApp.org_id == org_id).first()
+        if row is not None:
+            return row
+        return _base.filter(
+            AgentApp.org_id.is_(None) | (AgentApp.org_id == "")
+        ).first()
+    return _base.first()
 
 
 # Map LLM tool names to display names for frontend tool_calls.
@@ -6730,10 +7217,9 @@ async def add_message(
     agent_app = None
     tool_config = None
     if agent_name:
-        agent_app = db.query(AgentApp).filter(
-            AgentApp.name == agent_name,
-            AgentApp.is_deleted == False,
-        ).first()
+        # D-5 sweep: org-scoped resolution — a same-named app in another
+        # org must never supply tool config or bindings to this turn.
+        agent_app = _resolve_agent_app_scoped(db, agent_name, conv.org_id)
         if agent_app and agent_app.tool_config:
             tool_config = agent_app.tool_config
         elif agent_app:
@@ -6854,6 +7340,9 @@ async def add_message(
                     _v2_bound_count, _v2_pinned, conversation_id,
                 )
                 _plan_trigger = PlanTrigger(True, 1.0, {"data_bound": _v2_bound_count, "pinned": int(_v2_pinned)}, source="data-bound-override")
+            # One canonical turn identity for the whole v2 request (FSM run
+            # AND the tool loop share it) — per-turn SQL budget scope.
+            assistant_msg_id = str(uuid.uuid4())
             if _plan_trigger and is_fsm_enabled():
                 logger.info(
                     "v2 add_message: planning trigger fired "
@@ -6864,16 +7353,34 @@ async def add_message(
                     conversation_id,
                     getattr(user, "id", None),
                 )
+                # D-3 (FSM tenant isolation, 2026-10-31): the authenticated
+                # user's org is authoritative. A conversation whose org
+                # disagrees with the caller fails CLOSED — no silent retarget.
+                _fsm_conv_org = getattr(conv, "org_id", None) or "default-org"
+                _fsm_user_org = getattr(user, "org_id", None) or "default-org"
+                if _fsm_conv_org != _fsm_user_org:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="ERR_ORG_MISMATCH: conversation org does not "
+                        "match the authenticated user",
+                    )
                 _fsm_result = SynexiaFSM(db).run(
                     ExecutionRequest(
                         conversation_id=conversation_id,
                         agent_name=agent_name or "general_assistant",
+                        # Adversarial-review concern #3: thread the org-
+                        # resolved AgentApp PK so legitimate evaluation
+                        # profiles keep resolving in-org (the old
+                        # app_id-as-PK profile path is gone by design).
+                        agent_id=agent_app.id if agent_app else None,
                         user_message=user_content,
                         user_id=str(getattr(user, "id", None)) if user else None,
                         mode="dynamic",
                         org_id=getattr(conv, "org_id", None) or "default-org",
                         app_id=app_id or "default-app",
                         conversation_context=_conv_ctx,
+                        # Per-turn SQL budget scope: one user message = one turn.
+                        turn_id=assistant_msg_id,
                         # Hierarchical LLM pin: FSM internals use the
                         # project/agent resolved endpoint, not .env defaults.
                         endpoint=_eff_llm_v2.endpoint,
@@ -6932,6 +7439,7 @@ async def add_message(
             project_id=getattr(conv, "project_id", None),
             query=user_content)
         system_prompt = get_system_prompt(agent_name, agent_app, user_message=user_content, bcs_block=_bcs_block)
+        system_prompt = _append_department_block(system_prompt, conv)
 
         # P8: Unified system prompt assembly (memory + todos + coding context + learning graph)
         try:
@@ -7173,7 +7681,8 @@ async def add_message(
         # --- End Auto-Compaction ---
 
         # Multi-turn tool calling loop
-        assistant_msg_id = str(uuid.uuid4())
+        # (assistant_msg_id was already defined above, before the FSM run —
+        # one canonical identity per v2 request, shared by budget scopes)
         artifact_ids: list[str] = []
         tool_calls_for_frontend = []
         guardrail_retries = 0
@@ -7364,6 +7873,8 @@ async def add_message(
                     has_artifact_tool="create_artifact" in _tool_names,
                     dashboard_forced=dashboard_forced,
                     pptx_forced=_pptx_forced,
+                    automation_setup=bool(
+                        _AUTOMATION_SETUP_HEADER_RE.search(user_content or "")),
                 )
             ):
                 logger.info(
@@ -7795,8 +8306,13 @@ async def add_message(
                     "conversation_id": conversation_id,
                     "agent_app_id": agent_app_id,
                     "agent_name": agent_name,
+                    # Closure check B (FSM tenant isolation): the chat
+                    # loop's org rides on every tool context so memory
+                    # writes stamp the authenticated org.
+                    "org_id": getattr(conv, "org_id", None),
                     "conversation_metadata": conv.metadata_ or {},
                     "chat_session_id": chat_session_id,
+                    "turn_id": assistant_msg_id,
                     **(data_ctx_extras or {}),
                 }
                 sibling_results: list[dict] = []
@@ -7889,8 +8405,15 @@ async def add_message(
                 "conversation_id": conversation_id,
                 "agent_app_id": agent_app_id,
                 "agent_name": agent_name,
+                # Closure check B (FSM tenant isolation): the chat
+                # loop's org rides on every tool context so memory
+                # writes stamp the authenticated org.
+                "org_id": getattr(conv, "org_id", None),
                 "conversation_metadata": conv.metadata_ or {},
                 "chat_session_id": chat_session_id,
+                # 2026-10-29: per-turn SQL budget scope — one user message =
+                # one turn (the assistant message id is unique per turn).
+                "turn_id": assistant_msg_id,
                 **(data_ctx_extras or {}),
                 "endpoint": _eff_llm_v2.endpoint,
             }
@@ -8789,8 +9312,16 @@ async def resume_conversation(
         "conversation_id": conversation_id,
         "agent_app_id": agent_app_id,
         "agent_name": agent_name,
+        # Closure check B (FSM tenant isolation): the chat loop's org
+        # rides on every tool context so memory writes stamp the
+        # authenticated org.
+        "org_id": getattr(conv, "org_id", None),
         "conversation_metadata": conv.metadata_ or {},
         "chat_session_id": chat_session_id,
+        # 2026-10-29: resumed tool approval = the tail of its original turn.
+        # A fresh scope gives the remainder a full budget (honest: the
+        # pre-pause executions ran in a different request/process).
+        "turn_id": str(uuid.uuid4()),
         **(data_ctx_extras or {}),
         "endpoint": _resume_eff_llm.endpoint,
     }
@@ -8936,10 +9467,12 @@ async def resume_conversation(
     agent_app = None
     try:
         if conv.agent_name:
-            agent_app = db.query(AgentApp).filter(
-                AgentApp.name == conv.agent_name,
-                AgentApp.is_deleted == False,
-            ).first()
+            # D-5 sweep: org-scoped resolution (resume path executes tools
+            # with this app's tool config — cross-org inheritance would run
+            # another org's tools).
+            agent_app = _resolve_agent_app_scoped(
+                db, conv.agent_name, conv.org_id
+            )
     except Exception as _aa_err:
         logger.warning(
             "resume: agent_app lookup failed (conv=%s): %s",
@@ -9061,6 +9594,8 @@ async def resume_conversation(
                 max_iterations=MAX_TOOL_ITERATIONS,
                 has_artifact_tool="create_artifact" in _tool_names_from_schemas(tools),
                 pptx_forced=_pptx_forced,
+                automation_setup=bool(
+                    _AUTOMATION_SETUP_HEADER_RE.search(user_content or "")),
             )
         ):
             tool_choice = {
@@ -9894,7 +10429,7 @@ async def _call_synthesis_llm(
     if endpoint is not None:
         _model = endpoint.model_id
         _url = endpoint.base_url.rstrip("/") + "/chat/completions"
-        _headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+        _headers = llm_endpoint_headers(endpoint.api_key)
     else:
         _model = get_model()
         _url = llm_url()
@@ -10044,7 +10579,7 @@ async def _call_llm_with_tools(
     if endpoint is not None:
         _model = endpoint.model_id
         _url = endpoint.base_url.rstrip("/") + "/chat/completions"
-        _headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+        _headers = llm_endpoint_headers(endpoint.api_key)
     else:
         _model = model_override or get_model()
         _url = llm_url()
@@ -10080,7 +10615,25 @@ async def _call_llm_with_tools(
     if _clamped_max is not None:
         payload["max_tokens"] = _clamped_max
     if tools:
-        payload["tools"] = tools
+        # P0 pilot fix (2026-10-31): patch {"type":"object"} schemas without
+        # "properties" — strict providers (DashScope qwen) 400 the whole
+        # request otherwise. See app/services/tool_schema_sanitize.py.
+        from app.services.tool_schema_sanitize import sanitize_tool_schemas
+        payload["tools"] = sanitize_tool_schemas(tools)
+        _t = payload["tools"]
+        logger.debug(
+            "call_llm_with_tools: sending %d tools: %s",
+            len(_t), [(_x.get("function") or {}).get("name") for _x in _t if isinstance(_x, dict)][:40],
+        )
+        for _i, _tool in enumerate(_t):
+            if not (isinstance(_tool, dict) and isinstance(_tool.get("function"), dict)
+                    and _tool["function"].get("name")):
+                # diagnostics for provider 400s ("'function' is a required
+                # property - tools.N"): log the malformed entry with its index
+                logger.warning(
+                    "LLM tools payload: non-envelope tool at index %d: %s",
+                    _i, json.dumps(_tool, default=str)[:400],
+                )
     # Proactively skip tool_choice for models that reject it (vLLM without
     # --enable-auto-tool-choice). Tool calls are recovered from content text.
     _skip_tool_choice = _should_skip_tool_choice(endpoint)
@@ -10806,7 +11359,7 @@ async def _stream_llm_with_tools(
     if endpoint is not None:
         _model = endpoint.model_id
         _stream_url = endpoint.base_url.rstrip("/") + "/chat/completions"
-        _stream_headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+        _stream_headers = llm_endpoint_headers(endpoint.api_key)
     else:
         _model = model_override or get_model()
         _stream_url = llm_url()
@@ -10857,7 +11410,8 @@ async def _stream_llm_with_tools(
         # tool-definition sites may still pass through unwrapped
         # schemas. Normalize here so the LLM never sees a malformed tool.
         from app.services.tool_registry import normalize_tools_list
-        base_payload["tools"] = normalize_tools_list(tools)
+        from app.services.tool_schema_sanitize import sanitize_tool_schemas
+        base_payload["tools"] = sanitize_tool_schemas(normalize_tools_list(tools))
     # P0-2: parallel tool calls capability injection (flag-gated; the v3
     # loop executes multiple tool_calls in parallel via execute_tool_batch).
     maybe_enable_parallel_tool_calls(base_payload, _model)
@@ -11318,19 +11872,18 @@ def _store_turn_cache(
         logger.warning("experience: response cache store failed (non-fatal): %s", _cache_store_err)
 
 
-def _resolve_agent_app_key(db: Session, agent_name, app_id: str) -> str:
+def _resolve_agent_app_key(db: Session, agent_name, app_id: str,
+                           org_id=None) -> str:
     """Resolve the agent store key consistent with the chat routes.
 
     The chat routes key recipes/profiles/cache on ``agent_app.id`` when an
     AgentApp exists, else on ``agent_name``. Keep this identical so the
-    feedback endpoint touches the same stores.
+    feedback endpoint touches the same stores. Org-scoped (D-5 sweep):
+    feedback/profile stores are keyed by the org's own app id — another
+    org's same-named app must never own the key.
     """
     try:
-        agent_app = (
-            db.query(AgentApp)
-            .filter(AgentApp.name == agent_name, AgentApp.is_deleted == False)  # noqa: E712
-            .first()
-        )
+        agent_app = _resolve_agent_app_scoped(db, agent_name, org_id)
         return agent_app.id if agent_app else (agent_name or app_id or "general_assistant")
     except Exception as _key_err:  # noqa: BLE001 — best-effort
         logger.debug("experience: agent key resolve failed: %s", _key_err)
@@ -11407,7 +11960,8 @@ def add_message_feedback(
     except Exception as _intent_err:  # noqa: BLE001 — best-effort
         logger.debug("feedback: intent classify failed: %s", _intent_err)
 
-    agent_key = _resolve_agent_app_key(db, conv.agent_name, app_id)
+    agent_key = _resolve_agent_app_key(db, conv.agent_name, app_id,
+                                       org_id=conv.org_id)
 
     # 1) ExperienceEntry — the durable feedback record.
     try:
@@ -11553,7 +12107,8 @@ def add_role_relevance_feedback(
     if target_msg is None:
         return JSONResponse(status_code=404, content={"ok": False, "error": "message not found"})
 
-    agent_key = _resolve_agent_app_key(db, conv.agent_name, app_id)
+    agent_key = _resolve_agent_app_key(db, conv.agent_name, app_id,
+                                       org_id=conv.org_id)
 
     # Snapshot the user's role descriptions at feedback time so historical
     # feedback stays interpretable even if roles change later.
@@ -11893,10 +12448,10 @@ async def add_message_stream(
     # cache entirely: they are side-effectful pipelines, not idempotent
     # Q&A, so a cached answer could replay stale node output.
     if conv.agent_name:
-        _wf_agent_app = (
-            db.query(AgentApp)
-            .filter(AgentApp.name == conv.agent_name, AgentApp.is_deleted == False)  # noqa: E712
-            .first()
+        # D-5 sweep: a workflow runs side-effectful steps from THIS app's
+        # definition — another org's same-named app must never run here.
+        _wf_agent_app = _resolve_agent_app_scoped(
+            db, conv.agent_name, conv.org_id
         )
     else:
         _wf_agent_app = None
@@ -12011,10 +12566,8 @@ async def add_message_stream(
         and not file_urls
     ):
         try:
-            _cache_agent_app = (
-                db.query(AgentApp)
-                .filter(AgentApp.name == conv.agent_name, AgentApp.is_deleted == False)  # noqa: E712
-                .first()
+            _cache_agent_app = _resolve_agent_app_scoped(
+                db, conv.agent_name, conv.org_id
             )
             if _cache_agent_app is not None:
                 from app.services.experience_intent import classify_question
@@ -12236,10 +12789,12 @@ async def add_message_stream(
                 _v3_proj_lookup = _dsr_db.get(_Project, _v3_effective_pid)
                 _v3_effective_pname = _v3_proj_lookup.name if _v3_proj_lookup else None
             if conv.agent_name:
-                _v3_agent_for_dsr = _dsr_db.query(AgentApp).filter(
-                    AgentApp.name == conv.agent_name,
-                    AgentApp.is_deleted == False,
-                ).first()
+                # D-5 (2026-10-30, now via the shared helper): the data-ctx
+                # prep resolves the org's own app — another org's row would
+                # hand this conversation another org's bound data sources.
+                _v3_agent_for_dsr = _resolve_agent_app_scoped(
+                    _dsr_db, conv.agent_name, conv.org_id
+                )
                 if _v3_agent_for_dsr is not None:
                     # Thread the conv's pinned data_source_id (set by the
                     # automation executor on task-pinned runs) so the
@@ -12491,6 +13046,9 @@ async def add_message_stream(
         except Exception as _p3_err:  # noqa: BLE001 — fail-open to FSM
             logger.warning("v3 phase3 route check failed (non-fatal): %s", _p3_err)
 
+        # One canonical turn identity for the whole v3 request (FSM run AND
+        # any later tool-loop fallback share it) — per-turn SQL budget scope.
+        assistant_msg_id = str(uuid.uuid4())
         if _v3_plan_trigger and is_fsm_enabled():
 
             async def _fsm_event_stream():
@@ -12542,10 +13100,29 @@ async def add_message_stream(
                 _v3_agent_name = conv.agent_name or "general_assistant"
                 _v3_org_id = getattr(conv, "org_id", None) or "default-org"
                 _v3_app_id = app_id or "default-app"
+                # D-3 (FSM tenant isolation, 2026-10-31): authenticated
+                # user's org is authoritative — mismatch fails CLOSED.
+                _v3_user_org = getattr(user, "org_id", None) or "default-org"
+                if _v3_org_id != _v3_user_org:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="ERR_ORG_MISMATCH: conversation org does not "
+                        "match the authenticated user",
+                    )
+                # Adversarial-review concern #3: thread the org-resolved
+                # AgentApp PK so legitimate evaluation profiles keep
+                # resolving in-org (app_id-as-PK profile lookup removed).
+                try:
+                    _v3_fsm_agent = _resolve_agent_app_scoped(
+                        db, _v3_agent_name, _v3_org_id
+                    )
+                except Exception:
+                    _v3_fsm_agent = None
 
                 _fsm_req = ExecutionRequest(
                     conversation_id=conversation_id,
                     agent_name=_v3_agent_name,
+                    agent_id=_v3_fsm_agent.id if _v3_fsm_agent else None,
                     # Vision bridge: the analysis block rides on the user
                     # message so planning AND the FINALIZE narrator see what
                     # the images contain (the FSM's own attachment path
@@ -12566,6 +13143,8 @@ async def add_message_stream(
                     # list_data_sources, execute_query) see the same
                     # bound_kb_ids the v2 tool loop would have set up.
                     data_ctx_extras=_v3_data_ctx_extras or None,
+                    # Per-turn SQL budget scope: one user message = one turn.
+                    turn_id=assistant_msg_id,
                     # Mark automation runs (force_planning is only sent by
                     # the automation executor) so the quality gate uses the
                     # stricter unattended threshold (0.6 vs 0.4).
@@ -12626,6 +13205,13 @@ async def add_message_stream(
                                 _push_live("tool_call_failed", "tool_call_failed", {"tool_label": name})
                             elif status == "replanning":
                                 _push_live("retry", "retry", {"target": name})
+                                # 2026-11-02 (dynamic orchestration timeline):
+                                # a replanning node IS the supervisor revising
+                                # its plan — say so on the timeline (Phase 4).
+                                _push_live(
+                                    "replanning_started", "replanning_started",
+                                    {"reason": f"Revising approach after {name}"},
+                                )
                         elif ntype == "plan" and status == "running":
                             # Plan summary card. Step labels come from
                             # node_dict.children[*].name when the plan DAG is
@@ -12721,9 +13307,18 @@ async def add_message_stream(
                         "artifact_ids": _tc.get("artifact_ids", []),
                     })
                 _assistant_msg = {
-                    "id": str(uuid.uuid4()),
+                    # D4 authoritative identity: the client's optimistic row
+                    # id when transported (Commit 4A) — so chat_messages,
+                    # conv.messages and the client's bubble all carry ONE id
+                    # for this turn. Legacy callers (no id) keep a fresh uuid.
+                    "id": _assistant_message_id or str(uuid.uuid4()),
                     "role": "assistant",
-                    "content": (assistant_content or "")[:4000],
+                    # STAGE-1 FIX (2026-10-30): no [:4000] truncation. The
+                    # streamed answer (and the chat_messages row below) carry
+                    # the FULL text — the conv.messages copy must agree with
+                    # both, otherwise reload shows a different (cut-off)
+                    # answer than what the user just read.
+                    "content": assistant_content or "",
                     "created_date": datetime.now(timezone.utc).isoformat(),
                     "tool_calls": _compact_tool_calls,
                     "artifact_ids": fsm_result.artifact_ids or [],
@@ -12761,41 +13356,39 @@ async def add_message_stream(
                 #     as the workflow branch at ~11500) — reloading the row
                 #     in a fresh session and appending THERE is the only
                 #     write that actually lands.
+                #
+                # STAGE-1 FIX (2026-10-30): the old block issued TWO separate
+                # commits (ChatMessage row, then conv.messages) and only ever
+                # appended the assistant message — if the first commit
+                # succeeded and the second failed (or the early user-message
+                # commit at the top of the handler failed), the persisted
+                # conversation lost either side of the turn. Invariant now:
+                # user message + assistant answer land in ONE atomic
+                # transaction, via _persist_fsm_turn (extracted so the
+                # transaction boundary is DB-testable) using
+                # _merge_fsm_conv_messages (id-dedupe, regenerate-replace,
+                # missing-user-message repair).
                 try:
-                    from sqlalchemy.orm import sessionmaker as _fsm_sessionmaker
-
-                    from app.models.chat_message import ChatMessage as Message
-
-                    _fsm_db = _fsm_sessionmaker(bind=db.get_bind())()
-                    try:
-                        if chat_session_id and not _regenerate:
-                            # FIX 2026-09-22 (round 2): ChatMessage has NO
-                            # agent_name column and its reasoning column is
-                            # reasoning_content — the previous kwargs raised
-                            # TypeError and the reply was dropped again.
-                            msg = Message(
-                                id=str(uuid.uuid4()),
-                                session_id=chat_session_id,
-                                role="assistant",
-                                content=assistant_content,
-                                trace=fsm_result.plan_summary or {},
-                                reasoning_content=None,
-                                live_events=live_events or None,
-                                sources=_fsm_citations or None,
-                            )
-                            _fsm_db.add(msg)
-                            _fsm_db.commit()
-                        _fsm_conv = _fsm_db.query(AgentConversation).filter(
-                            AgentConversation.id == conversation_id
-                        ).first()
-                        if _fsm_conv is not None:
-                            _fsm_conv.messages = list(
-                                (_fsm_conv.messages or []) + [_assistant_msg]
-                            )
-                            _fsm_conv.updated_date = datetime.now(timezone.utc)
-                            _fsm_db.commit()
-                    finally:
-                        _fsm_db.close()
+                    _fsm_persist = _persist_fsm_turn(
+                        db.get_bind(),
+                        conversation_id,
+                        chat_session_id=chat_session_id,
+                        regenerate=_regenerate,
+                        assistant_content=assistant_content,
+                        plan_summary=fsm_result.plan_summary,
+                        live_events=live_events,
+                        citations=_fsm_citations,
+                        user_msg=user_msg,
+                        assistant_msg=_assistant_msg,
+                        client_message_id=_assistant_message_id,
+                    )
+                    # Keep the request-scoped conv in memory in sync so the
+                    # `done` frame's conv.to_dict() agrees with the persisted
+                    # state. No commit on `db` — the fresh session above is
+                    # the writer of record; committing here again would only
+                    # widen the failure window.
+                    if _fsm_persist is not None:
+                        conv.messages = _fsm_persist["messages"]
                 except Exception as _conv_msg_err:
                     logger.warning(
                         "v3 FSM route: assistant/conv persist failed (non-fatal): %s",
@@ -12808,10 +13401,10 @@ async def add_message_stream(
 
                 # --- Experience layer (Phase A): turn-end recipe + user profile ---
                 try:
-                    _fsm_agent_app = (
-                        db.query(AgentApp)
-                        .filter(AgentApp.name == _v3_agent_name, AgentApp.is_deleted == False)  # noqa: E712
-                        .first()
+                    # D-5 sweep: experience telemetry must be attributed to
+                    # THIS org's app, never a same-named app elsewhere.
+                    _fsm_agent_app = _resolve_agent_app_scoped(
+                        db, _v3_agent_name, conv.org_id
                     )
                     _fsm_agent_app_id = _fsm_agent_app.id if _fsm_agent_app else _v3_agent_name
                     _fsm_tool_seq = []
@@ -12856,6 +13449,19 @@ async def add_message_stream(
                     "fsm_plan_summary": fsm_result.plan_summary,
                     "sources": _fsm_citations,
                 }
+                # D4 authoritative identity (2026-11-01): attest persistence
+                # and echo the authoritative assistant row id — with the
+                # exact-row finalization the client's optimistic row IS the
+                # persisted record, so `answer_persisted: true` tells the
+                # frontend to relinquish its own content write (single
+                # writer, idempotent). Absent on regenerate/fallback paths
+                # where the client remains the writer of record.
+                if _fsm_persist is not None and not _regenerate:
+                    done_payload["answer_persisted"] = bool(
+                        _fsm_persist.get("answer_persisted"))
+                    if _fsm_persist.get("assistant_message_id"):
+                        done_payload["assistant_message_id"] = _fsm_persist[
+                            "assistant_message_id"]
                 # Live artifact cards (2026-10-10): the frontend's done
                 # handler reads artifact objects from the conversation's last
                 # assistant message, but the request-scoped `conv` here can be
@@ -12975,10 +13581,9 @@ async def add_message_stream(
     agent_app = None
     tool_config = None
     if agent_name:
-        agent_app = db.query(AgentApp).filter(
-            AgentApp.name == agent_name,
-            AgentApp.is_deleted == False,
-        ).first()
+        # D-5 sweep: org-scoped resolution — a same-named app in another
+        # org must never supply tool config or bindings to this turn.
+        agent_app = _resolve_agent_app_scoped(db, agent_name, conv.org_id)
         if agent_app and agent_app.tool_config:
             tool_config = agent_app.tool_config
 
@@ -12990,6 +13595,7 @@ async def add_message_stream(
         db, user, conv.org_id,
         project_id=getattr(conv, "project_id", None), query=user_content)
     system_prompt = get_system_prompt(agent_name, agent_app, user_message=user_content, bcs_block=_bcs_block)
+    system_prompt = _append_department_block(system_prompt, conv)
     agent_app_id = agent_app.id if agent_app else agent_name
 
     # ── 2026-08-25: Project Knowledge Cache -- Qwen fast-path ─────────
@@ -13635,10 +14241,13 @@ async def add_message_stream(
         # instantly with "Instance <AgentApp ...> is not bound to a Session"
         # on the first guardrail setup of a fresh Data Analyst conversation.
         if agent_name:
-            _fresh_agent_app = db.query(AgentApp).filter(
-                AgentApp.name == agent_name,
-                AgentApp.is_deleted == False,  # noqa: E712
-            ).first()
+            # D-5 sweep: the re-fetch must resolve the SAME app the stream
+            # started with — the org's own row — not whichever same-named
+            # row comes first. ``conv`` was re-fetched on this shadow
+            # session above, so its org is authoritative here.
+            _fresh_agent_app = _resolve_agent_app_scoped(
+                db, agent_name, conv.org_id
+            )
             if _fresh_agent_app is not None:
                 agent_app = _fresh_agent_app
 
@@ -13655,7 +14264,8 @@ async def add_message_stream(
             if _fresh_user is not None:
                 user = _fresh_user
 
-        assistant_msg_id = str(uuid.uuid4())
+        # assistant_msg_id was already hoisted above (one canonical identity
+        # per v3 request — FSM run and tool loop share the budget scope).
         artifact_ids: list[str] = []
         # File-format intent is needed INSIDE the loop (synthesis gate for
         # the empty-rows path) as well as after it (orchestrator fallback),
@@ -13720,6 +14330,8 @@ async def add_message_stream(
                         "agent_name": getattr(conv, "agent_name", None),
                         "org_id": getattr(conv, "org_id", None),
                         "app_id": getattr(conv, "app_id", None),
+                        # Per-turn SQL budget scope: one research run = one turn.
+                        "turn_id": assistant_msg_id,
                         # 2026-09-03: carry the bound data sources into the
                         # deep-research tool context. Pre-fix the research
                         # branch built a bare context WITHOUT bound_kb_ids, so
@@ -13983,6 +14595,12 @@ async def add_message_stream(
         # context so the loop follows it. Flag-gated: TURN_PLAN_ENABLED.
         _turn_plan = None
         _turn_plan_completed: set[int] = set()
+        # Part C (chat experience repair): hoisted so the stream's finally
+        # block can always flush open sub-agent badges, even if the loop
+        # exited before the first iteration initialized them. The per-
+        # iteration re-init below stays authoritative during the loop.
+        _subagent_id_stack: list[dict] = []
+        _subagent_seq: int = 0
         if settings.TURN_PLAN_ENABLED:
             try:
                 _turn_plan = build_turn_plan(
@@ -14029,17 +14647,35 @@ async def add_message_stream(
                         _le_plan_phase = _push_live_event("phase_enter", "phase_enter.plan")
                         if _le_plan_phase:
                             yield _le_plan_phase
+                    # P1.5 (Phase 1): persist the plan's structured meta —
+                    # intent type, objective statement, execution strategy,
+                    # acceptance criteria, risk. Real backend data only (the
+                    # planner produced it); scrubbed like every live event;
+                    # NEVER emitted empty (no fake progress).
+                    _le_plan_meta = _push_live_event(
+                        "plan_meta", "plan_meta", _turn_plan.plan_meta(),
+                    )
+                    if _le_plan_meta:
+                        yield _le_plan_meta
+                    _pm_frame = plan_meta_frame(_turn_plan)
+                    if _pm_frame:
+                        yield _pm_frame
                     for _st in _turn_plan.steps:
                         yield plan_step_added_frame(_st)
                         # Persist each plan step as a typed live event so the
-                        # plan checklist survives reload. Titles are
-                        # server-generated plan metadata (same class as tool
-                        # labels) — bypass the SQL/ERP content scrubber so
-                        # "Query the bound data source" renders verbatim.
+                        # plan checklist survives reload. Titles may be
+                        # LLM-authored (parse_dynamic_plan) — they go through
+                        # the DEFAULT content scrubber: ordinary titles
+                        # ("Query the bound data source") render verbatim,
+                        # titles echoing identifiers become "[data]".
                         _le_step = _push_live_event(
                             "plan_step_added", "plan_step_added",
-                            {"step_index": _st.step_index, "title": _st.title_en},
-                            sanitize=False,
+                            {
+                                "step_index": _st.step_index,
+                                "task_id": _st.task_id or None,
+                                "description": _st.description,
+                                "title": _st.title_en,
+                            },
                         )
                         if _le_step:
                             yield _le_step
@@ -14050,6 +14686,31 @@ async def add_message_stream(
             except Exception as _plan_err:  # noqa: BLE001 — planning must never break the loop
                 logger.warning("turn-plan build failed (planless loop): %s", _plan_err)
                 _turn_plan = None
+        # ── Part D (chat experience repair): ENFORCE the plan's strategy ──
+        # Greetings/smalltalk classify as direct_response; without this gate
+        # the loop kept the full toolset and the local LLM fanned a "hi" out
+        # to multiple sub-agents (root cause of the fake execution tree).
+        # NOTE: ``tools`` is a closure variable from the outer request scope —
+        # mutate it IN PLACE (slice assignment); rebinding the name here would
+        # shadow it and UnboundLocalError every earlier read in event_stream.
+        if _turn_plan is not None:
+            try:
+                _kept_tools, _strategy_note = _enforce_turn_execution_strategy(
+                    tools, _turn_plan)
+                if _strategy_note:
+                    tools[:] = _kept_tools
+                    logger.info("v3 stream: %s (conv=%s)", _strategy_note, conversation_id)
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "[turn context] This is a conversational turn. "
+                            "Respond directly and naturally in the user's "
+                            "language. Do not call tools, query data, or "
+                            "delegate to specialists."
+                        ),
+                    })
+            except Exception as _strat_err:  # noqa: BLE001 — never break the loop
+                logger.debug("execution-strategy enforcement skipped: %s", _strat_err)
         # ── Query-purpose resolver (flag-gated, Bug 2 fix) ─────────────
         # Resolves catalog table roles ONCE per turn (memoized) so every
         # ask_data_agent result can be tagged probe/auxiliary/answer before
@@ -14247,6 +14908,14 @@ async def add_message_stream(
         _wall_extensions_used = 0
         _wall_max_extensions = int(getattr(settings, "TURN_WALL_MAX_EXTENSIONS", 2))
         _wall_extension_s = float(getattr(settings, "TURN_WALL_EXTENSION_S", 90.0))
+        # Phase 2.1: per-turn healing budget — bounds TOTAL tool recovery
+        # actions (retries + arg reformulations) across the whole task, so
+        # bounded-per-call retries can still compound into an endless loop.
+        from app.services.execution_recovery import HealingBudget as _HealingBudget
+
+        _turn_healing_budget = _HealingBudget(
+            max_healings=int(getattr(settings, "EXEC_RECOVERY_MAX_PER_TASK", 4)),
+        )
         _turn_tier_info = (
             _classify_turn_tier(user_content or "", _auto_flag)
             if settings.TURN_COMPLEXITY_ENABLED
@@ -14658,6 +15327,11 @@ async def add_message_stream(
                     dashboard_forced=dashboard_forced,
                     pptx_forced=_pptx_forced,
                     output_format=_output_format,
+                    # Lifecycle separation: an automation CONFIGURATION turn
+                    # never forces a chat artifact — a format keyword there
+                    # is the definition's output_format for future runs.
+                    automation_setup=bool(
+                        _AUTOMATION_SETUP_HEADER_RE.search(user_content or "")),
                 )
             ):
                 logger.info(
@@ -14852,6 +15526,17 @@ async def add_message_stream(
                                         # in one CAD turn = the visible
                                         # buffering/collapse loop).
                                         if not _suppress_chat_deltas:
+                                            try:  # Stage 0 diagnostics — observe only
+                                                from app.services.turn_diagnostics import note_guard
+                                                note_guard(
+                                                    "replacement_content_replace",
+                                                    action="replaced",
+                                                    after_len=len(assistant_content or ""),
+                                                    iteration=iteration,
+                                                    replacement_pending=True,
+                                                )
+                                            except Exception:  # noqa: BLE001
+                                                pass
                                             yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                                         _nudge_replacement_pending = False
                                     else:
@@ -15309,6 +15994,17 @@ async def add_message_stream(
                         # the real replacement text.
                         if content_streamed and assistant_content and not _suppress_chat_deltas:
                             yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "goal_contract"})}\n\n'
+                        # 2026-10-29 cycle 2: the CURRENT iteration's prose is
+                        # NOT yet in _v3_iter_contents (that hand-off happens
+                        # at top-of-loop) — register it directly, or a
+                        # wall-cap break right after this guard loses the
+                        # only server-side copy (the 2026-10-29 replay lost
+                        # a 5,042-char grounded report exactly this way).
+                        if content_streamed and assistant_content:
+                            from app.services.answer_recovery import register_best as _gc_register
+
+                            _gc_register(_v3_recovered_best, assistant_content)
+                            _gc_register(_v3_preserved_content, assistant_content)
                         assistant_content = ""
                         _nudge_replacement_pending = True
                         continue
@@ -15401,6 +16097,13 @@ async def add_message_stream(
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
                         # 2026-08-31: content_preserve (see guardrail site).
                         yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "apology_force"})}\n\n'
+                    # 2026-10-29 cycle 2: preserve as recovery best before
+                    # clearing (see goal-contract site note).
+                    if content_streamed and assistant_content:
+                        from app.services.answer_recovery import register_best as _apf_register
+
+                        _apf_register(_v3_recovered_best, assistant_content)
+                        _apf_register(_v3_preserved_content, assistant_content)
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     logger.warning(
@@ -15435,6 +16138,13 @@ async def add_message_stream(
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
                         # 2026-08-31: content_preserve (see guardrail site).
                         yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "bounce_back_force"})}\n\n'
+                    # 2026-10-29 cycle 2: preserve as recovery best before
+                    # clearing (see goal-contract site note).
+                    if content_streamed and assistant_content:
+                        from app.services.answer_recovery import register_best as _bbf_register
+
+                        _bbf_register(_v3_recovered_best, assistant_content)
+                        _bbf_register(_v3_preserved_content, assistant_content)
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     logger.warning(
@@ -15481,6 +16191,13 @@ async def add_message_stream(
                     # indicator visible during the forced retry.
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "empty_answer_force"})}\n\n'
+                    # 2026-10-29 cycle 2: preserve as recovery best before
+                    # clearing (see goal-contract site note).
+                    if content_streamed and assistant_content:
+                        from app.services.answer_recovery import register_best as _eaf_register
+
+                        _eaf_register(_v3_recovered_best, assistant_content)
+                        _eaf_register(_v3_preserved_content, assistant_content)
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     logger.warning(
@@ -15510,6 +16227,13 @@ async def add_message_stream(
                     # iteration's first delta swaps in the real answer.
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "hallucination_guardrail"})}\n\n'
+                    # 2026-10-29 cycle 2: preserve as recovery best before
+                    # clearing (see goal-contract site note).
+                    if content_streamed and assistant_content:
+                        from app.services.answer_recovery import register_best as _hg_register
+
+                        _hg_register(_v3_recovered_best, assistant_content)
+                        _hg_register(_v3_preserved_content, assistant_content)
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     continue
@@ -16555,10 +17279,17 @@ async def add_message_stream(
                     "conversation_id": conversation_id,
                     "agent_app_id": agent_app_id,
                     "agent_name": agent_name,
+                    # Closure check B (FSM tenant isolation): the chat
+                    # loop's org rides on every tool context so memory
+                    # writes stamp the authenticated org.
+                    "org_id": getattr(conv, "org_id", None),
                     "conversation_metadata": conv.metadata_ or {},
                     "chat_session_id": chat_session_id,
+                    "turn_id": assistant_msg_id,
                     **(data_ctx_extras or {}),
                     "main_agent_will_synthesize": bool(_orch_doc_format),
+                    # Phase 2.1: shared per-turn healing budget.
+                    "_healing_budget": _turn_healing_budget,
                 }
                 sibling_results: list[dict] = []
                 if sibling_calls:
@@ -16803,12 +17534,26 @@ async def add_message_stream(
                         logger.debug("typing effect failed (non-fatal): %s", _typing_err)
                 # Sub-agent delegation badge: surfaces what the parent chat
                 # loop asked the sub-agent to do (e.g. ask_data_agent).
-                if tn.startswith("ask_"):
+                # P1 Phase 4: delegate_task is also a parent→child delegation
+                # (batch items each carry their own agent_name), so it gets
+                # the same invoked badge — the LiveActivityStream renders it
+                # as a sub-agent branch header instead of a plain tool row.
+                if tn.startswith("ask_") or tn == "delegate_task":
                     _subagent_seq += 1
                     _subagent_id = f"sub_{_subagent_seq}"
+                    _sub_inv_params: dict = {
+                        "agent_label": desc, "target": tn, "subagent_id": _subagent_id,
+                    }
+                    # Part C: surface the REAL specialist identity (AgentApp
+                    # name) so the execution tree never shows a generic
+                    # "sub-agent" label when the actual name is available.
+                    if tn == "delegate_task":
+                        _agent_names = _delegate_agent_identity(pc.get("args"))
+                        if _agent_names:
+                            _sub_inv_params["agent_names"] = _agent_names
+                            _sub_inv_params["agent_name"] = _agent_names[0]
                     _le_sub_inv = _push_live_event(
-                        "subagent_invoked", "subagent_invoked",
-                        {"agent_label": desc, "target": tn, "subagent_id": _subagent_id},
+                        "subagent_invoked", "subagent_invoked", _sub_inv_params,
                     )
                     if _le_sub_inv:
                         yield _le_sub_inv
@@ -16828,8 +17573,15 @@ async def add_message_stream(
                 "conversation_id": conversation_id,
                 "agent_app_id": agent_app_id,
                 "agent_name": agent_name,
+                # Closure check B (FSM tenant isolation): the chat
+                # loop's org rides on every tool context so memory
+                # writes stamp the authenticated org.
+                "org_id": getattr(conv, "org_id", None),
                 "conversation_metadata": conv.metadata_ or {},
                 "chat_session_id": chat_session_id,
+                # 2026-10-29: per-turn SQL budget scope — one user message =
+                # one turn (the assistant message id is unique per turn).
+                "turn_id": assistant_msg_id,
                 # Phase 2/3: the boxed query_database tool resolves the
                 # tenant's domain config + pipeline scope from this.
                 "org_id": getattr(conv, "org_id", None),
@@ -16846,6 +17598,8 @@ async def add_message_stream(
                 # UI can show "Resolving schema → Generating SQL → Executing".
                 "progress_emitter": _tool_progress,
                 "step_counter": _step_counter,
+                # Phase 2.1: shared per-turn healing budget for bounded recovery.
+                "_healing_budget": _turn_healing_budget,
             }
 
             # ── Tool execution ──────────────────────────────────────────────
@@ -17045,7 +17799,13 @@ async def add_message_stream(
             if any(_is_long_running_tool(c["tool_name"]) for c in parsed_calls):
                 _tool_task = asyncio.ensure_future(_run_tool_batch())
                 try:
-                    async for _frame in _emit_tool_progress_while_waiting(_tool_task, parsed_calls):
+                    # Multi-agent milestone: drain `_tool_progress` live while
+                    # the batch runs — delegation handlers append structured
+                    # agent-execution frames (agent_started / agent_tool_* /
+                    # agent_completed) that must reach the panel in real time.
+                    async for _frame in _emit_tool_progress_while_waiting(
+                        _tool_task, parsed_calls, extra_frames=_tool_progress,
+                    ):
                         yield _frame
                 finally:
                     if not _tool_task.done():
@@ -17145,7 +17905,6 @@ async def add_message_stream(
                                 _le_done = _push_live_event(
                                     "plan_step_completed", "plan_step_completed",
                                     {"step_index": _plan_st.step_index, "title": _plan_st.title_en},
-                                    sanitize=False,
                                 )
                                 if _le_done:
                                     yield _le_done
@@ -17233,6 +17992,46 @@ async def add_message_stream(
                         except Exception:
                             pass
                 if _needs_smart_retry:
+                    # 2026-11-02 (dynamic orchestration timeline): say what is
+                    # happening — a retry of the data step, driven by the
+                    # supervisor revising its approach. Emits (a) agent_retrying
+                    # for the activity feed, (b) replanning_started (the plan
+                    # is being adjusted), and (c) plan_updated re-opening the
+                    # affected step (status back to pending) so the timeline
+                    # shows real state instead of a stuck checkmark.
+                    _retry_step = next(
+                        (s for s in (_turn_plan.steps if _turn_plan else [])
+                         if s.step_index not in _turn_plan_completed),
+                        None,
+                    ) if _turn_plan else None
+                    _le_retry = _push_live_event(
+                        "agent_retrying", "agent_retrying",
+                        {"tool_label": "ask_data_agent", "attempt": 1},
+                    )
+                    if _le_retry:
+                        yield _le_retry
+                    _le_replan = _push_live_event(
+                        "replanning_started", "replanning_started",
+                        {"reason": "Refining the data query after an empty result"},
+                    )
+                    if _le_replan:
+                        yield _le_replan
+                    yield plan_replan_started_frame(
+                        "Refining the data query after an empty result"
+                    )
+                    if _retry_step is not None:
+                        _le_pu = _push_live_event(
+                            "plan_updated", "plan_updated",
+                            {
+                                "step_index": _retry_step.step_index,
+                                "task_id": _retry_step.task_id or None,
+                                "title": _retry_step.title_en,
+                                "status": "pending",
+                            },
+                        )
+                        if _le_pu:
+                            yield _le_pu
+                        yield plan_step_updated_frame(_retry_step, status="pending")
                     try:
                         async def _retry_llm_call(_sys, _msgs, _ep=effective_llm.endpoint):
                             _r = await _call_synthesis_llm(_sys, _msgs, endpoint=_ep)
@@ -17445,6 +18244,16 @@ async def add_message_stream(
                             _purpose, len(_ds["rows"]), conversation_id,
                             tool_name,
                         )
+                        try:  # Stage 0 diagnostics — observe only
+                            from app.services.turn_diagnostics import note_tool_execution
+                            _td_prov = (result.get("provenance") or {}) if isinstance(result, dict) else {}
+                            note_tool_execution(
+                                tool_name,
+                                ok=(result.get("success") if isinstance(result, dict) else None),
+                                execution_id=_td_prov.get("execution_id"),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     # Surface the dominant purpose on the top-level result so
                     # downstream callers that read ``result["query_purpose"]``
                     # still see something useful (last sub-query wins for
@@ -17903,13 +18712,48 @@ async def add_message_stream(
                     )
                     if _le_fin:
                         yield _le_fin
+                    # Phase 2.8: recovery observability. The classification /
+                    # decision were ACTUALLY computed by the execution seam
+                    # (execute_tool_with_retry / _maybe_review_and_refine) —
+                    # these events surface real backend operations, never
+                    # fabricated progress. Category strings are server enums;
+                    # recovery hints are scrubbed like every live event.
+                    if isinstance(result, dict) and result.get("failure_category") and new_status != "done":
+                        _le_cls = _push_live_event(
+                            "failure_classified", "failure_classified",
+                            {
+                                "tool_label": tool_name,
+                                "category": str(result.get("failure_category")),
+                                "recovery": str(result.get("recovery_hint") or "")[:120],
+                            },
+                        )
+                        if _le_cls:
+                            yield _le_cls
+                    if isinstance(result, dict) and isinstance(result.get("execution_decision"), dict):
+                        _dec = result["execution_decision"]
+                        _le_dec = _push_live_event(
+                            "execution_decision", "execution_decision",
+                            {
+                                "decision": str(_dec.get("decision") or ""),
+                                "action": str(_dec.get("proposed_next_action") or "")[:120],
+                            },
+                        )
+                        if _le_dec:
+                            yield _le_dec
                     # Sub-agent return row — pairs with the invoked badge above
                     # so the user can see the delegation's outcome + duration.
-                    if tn.startswith("ask_"):
+                    # P1 Phase 4: matches the delegate_task branch opened above.
+                    if tn.startswith("ask_") or tn == "delegate_task":
                         _le_sub_ret_params: dict = {
                             "agent_label": step_desc or tool_name,
                             "duration": round(_step_dur_ms / 1000, 1),
                         }
+                        # Part C: pair the return with its invoked event by
+                        # subagent_id (stable) — label-only matching broke
+                        # when the activity description differed between the
+                        # two emissions, leaving the node stuck at Running.
+                        if _subagent_id_stack and _subagent_id_stack[-1]["target"] == tn:
+                            _le_sub_ret_params["subagent_id"] = _subagent_id_stack[-1]["id"]
                         if _le_rowcount is not None:
                             _le_sub_ret_params["row_count"] = _le_rowcount
                         _le_sub_ret = _push_live_event(
@@ -18272,6 +19116,22 @@ async def add_message_stream(
                 conv.messages = messages
                 conv.updated_date = datetime.now(timezone.utc)
                 db.commit()
+                # A-6 (enterprise reliability audit, 2026-11-01): close any
+                # still-"running" activity step BEFORE the paused frame —
+                # the approval-pause branch returns without passing through
+                # the done/failed step closure, so the UI card used to spin
+                # forever while the turn awaited approval.
+                for _s in _activity_steps:
+                    if _s.get("status") == "running":
+                        _s["status"] = "awaiting_approval"
+                        yield _emit_activity_step(
+                            _s.get("number"), _s.get("description", ""),
+                            "awaiting_approval",
+                            tool_name=_s.get("tool_name"),
+                            command=_s.get("command"),
+                            output_preview=_s.get("output_preview"),
+                            artifact_id=_s.get("artifact_id"),
+                        )
                 yield f'data: {json.dumps({"type": "paused", "conversation": conv.to_dict()})}\n\n'
                 _discard_steer(conversation_id)
                 return
@@ -18300,7 +19160,6 @@ async def add_message_stream(
                         _le_done = _push_live_event(
                             "plan_step_completed", "plan_step_completed",
                             {"step_index": _plan_st.step_index, "title": _plan_st.title_en},
-                            sanitize=False,
                         )
                         if _le_done:
                             yield _le_done
@@ -18410,17 +19269,37 @@ async def add_message_stream(
         if "finalize" not in _emitted_phases:
             _emitted_phases.add("finalize")
             yield _emit_phase("finalize")
-            # Live feed: honest verdict — verify_passed only when no tool
-            # call failed; otherwise verify_failed (never claim success
-            # after a step like a sandbox/artifact build actually failed).
-            _any_failed_tool = any(
-                str(tc.get("status") or "").lower()
-                in ("failed", "error", "denied")
-                for tc in (locals().get("tool_calls_for_frontend") or [])
-            ) and not _clarify_issued
+            # Live feed: honest verdict (consistency audit D3, 2026-10-31).
+            # Old gate: ANY failed tool forced verify_failed — a supplementary
+            # read_file miss stamped "Verification failed" on an answer fully
+            # grounded in successful queries. New verdict: verification FAILS
+            # only when failures exist AND no successful data call grounds
+            # the answer. Grounded-but-with-failures passes WITH the failed
+            # steps listed in the event params (never silently ignored).
+            # 2026-11-02 (dynamic orchestration timeline): announce the
+            # verification PHASE before the verdict — the whitelisted
+            # verification_started event was never emitted, so the timeline
+            # jumped straight to passed/failed with no "checking" state.
+            _le_vs = _push_live_event(
+                "verification_started", "verification_started",
+                {"checking": "figures_and_sources"},
+            )
+            if _le_vs:
+                yield _le_vs
+            try:
+                _v_failed, _v_grounded, _v_steps = _verification_verdict(
+                    locals().get("tool_calls_for_frontend"))
+            except Exception:  # noqa: BLE001 — gate must never break the stream
+                _v_failed, _v_grounded, _v_steps = True, False, []
+            _verdict_failed = (_v_failed and not _v_grounded) and not _clarify_issued
+            _verdict_params = {
+                "failed_steps": _v_steps[:8],
+                "grounded_by_data": _v_grounded,
+            }
             _le_vp = _push_live_event(
-                "verify_failed" if _any_failed_tool else "verify_passed",
-                "verify_failed" if _any_failed_tool else "verify_passed",
+                "verify_failed" if _verdict_failed else "verify_passed",
+                "verify_failed" if _verdict_failed else "verify_passed",
+                _verdict_params,
             )
             if _le_vp:
                 yield _le_vp
@@ -18740,6 +19619,10 @@ async def add_message_stream(
                                             "conversation_id": conversation_id,
                                             "agent_app_id": agent_app_id,
                                             "agent_name": agent_name,
+                                            # Closure check B (FSM tenant
+                                            # isolation): org rides on the
+                                            # tool context.
+                                            "org_id": getattr(conv, "org_id", None),
                                             "conversation_metadata": conv.metadata_ or {},
                                             "chat_session_id": chat_session_id,
                                             **(data_ctx_extras or {}),
@@ -18868,11 +19751,21 @@ async def add_message_stream(
                                     )
                                     _fb_text = ""
                             if _fb_text and len(_fb_text.strip()) > 50:
-                                assistant_content = _fb_text
+                                # 2026-10-29 cycle 2: same recovery floor as
+                                # the empty-bubble path — a short re-synthesis
+                                # must not replace a much longer preserved
+                                # answer from earlier in the turn.
+                                from app.services.answer_recovery import final_answer as _fb_final
+
+                                assistant_content = _fb_final(
+                                    _fb_text,
+                                    (_v3_preserved_content[0] if _v3_preserved_content else "")
+                                    or (_v3_recovered_best[0] if _v3_recovered_best else ""),
+                                )
                                 logger.info(
                                     "Post-loop: LLM-first synthesis produced %d chars "
                                     "(rows=%d, conv=%s)",
-                                    len(_fb_text), len(_fb_rows), conversation_id,
+                                    len(assistant_content), len(_fb_rows), conversation_id,
                                 )
                             else:
                                 assistant_content = _choose_fallback(
@@ -18931,6 +19824,14 @@ async def add_message_stream(
                     _rec_len, _cur_len, conversation_id,
                 )
                 accumulated_content = _v3_recovered_best[0]
+                try:  # Stage 0 diagnostics — observe only
+                    from app.services.turn_diagnostics import note_guard
+                    note_guard(
+                        "recovered_best_restore", action="replaced",
+                        before_len=_cur_len, after_len=_rec_len,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         # Post-loop promise-text cleanup (Fix 5): if the accumulated
         # content ends with a pending-action sentence ("Let me verify…"),
@@ -18962,6 +19863,15 @@ async def add_message_stream(
                     "(conv=%s, %d chars -> %d chars)",
                     conversation_id, len(accumulated_content), len(_hygiene_stripped),
                 )
+                try:  # Stage 0 diagnostics — observe only, never alters content
+                    from app.services.turn_diagnostics import note_guard
+                    note_guard(
+                        "internal_reference_hygiene", action="stripped",
+                        before_len=len(accumulated_content),
+                        after_len=len(_hygiene_stripped),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 accumulated_content = _hygiene_stripped
             # SQL/plan-narration strip (defense-in-depth for models that
             # narrate SQL in the final iteration without emitting tool
@@ -18974,6 +19884,15 @@ async def add_message_stream(
                     "(conv=%s, %d chars -> %d chars)",
                     conversation_id, len(accumulated_content), len(_sql_stripped),
                 )
+                try:  # Stage 0 diagnostics — observe only
+                    from app.services.turn_diagnostics import note_guard
+                    note_guard(
+                        "sql_narration_hygiene", action="stripped",
+                        before_len=len(accumulated_content),
+                        after_len=len(_sql_stripped),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 accumulated_content = _sql_stripped
 
         # ── Duplicate-answer guard (2026-10-19) ──────────────────────────
@@ -18986,9 +19905,20 @@ async def add_message_stream(
         # second half is genuinely different text is never touched
         # (whitespace-normalized identity + 400-char minimum block).
         try:
+            _dup_before_len = len(accumulated_content or "")
             accumulated_content, _dup_fired = collapse_duplicate_tail(
                 accumulated_content or ""
             )
+            if _dup_fired:
+                try:  # Stage 0 diagnostics — observe only
+                    from app.services.turn_diagnostics import note_guard
+                    note_guard(
+                        "duplicate_tail", action="stripped",
+                        before_len=_dup_before_len,
+                        after_len=len(accumulated_content or ""),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as _dup_err:  # noqa: BLE001 — guard must never break the turn
             logger.debug("duplicate-answer guard skipped: %s", _dup_err)
 
@@ -19547,6 +20477,61 @@ async def add_message_stream(
                             conversation_id, deferred_err,
                         )
 
+        # ── Turn-observation recovery (fix #1, 2026-10-29) ────────────────
+        # When the goal-contract answer datasets are empty (the collection
+        # path is gated on QUERY_PURPOSE_TAGGING_ENABLED, default off) but
+        # THIS turn's tool results carry execution ids whose nl2sql
+        # observations succeeded, recover those rows so the existing
+        # synthesis machinery below can ground the final answer. Read-only
+        # over observation_records — never re-executes SQL. Primary path is
+        # unchanged whenever the contract datasets are populated.
+        try:
+            _rec_contract_ds = (
+                _contract.answer_datasets() if _contract is not None else []
+            )
+        except Exception:  # noqa: BLE001 — contract must never break the loop
+            _rec_contract_ds = []
+        if not _rec_contract_ds:
+            try:
+                _rec_datasets, _rec_stats = _recover_turn_observation_datasets(
+                    db,
+                    conversation_id=conversation_id,
+                    org_id=getattr(conv, "org_id", None),
+                    app_id=getattr(conv, "app_id", None),
+                    tool_calls_for_frontend=tool_calls_for_frontend,
+                )
+                if _rec_datasets:
+                    _last_rows = merge_answer_rows(_rec_datasets)
+                    logger.info(
+                        "v3 turn-observation recovery: %d dataset(s), %d row(s) "
+                        "recovered for synthesis (conv=%s, exec=%s, ok=%s, "
+                        "zero_row=%s, failed=%s, malformed=%s)",
+                        len(_rec_datasets), len(_last_rows), conversation_id,
+                        _rec_stats.get("execution_ids"),
+                        _rec_stats.get("success_observations"),
+                        _rec_stats.get("success_zero_row"),
+                        _rec_stats.get("failed_observations"),
+                        _rec_stats.get("malformed_observations"),
+                    )
+                elif _rec_stats.get("execution_ids"):
+                    logger.info(
+                        "v3 turn-observation recovery: nothing usable "
+                        "(conv=%s, exec=%s, ok=%s, zero_row=%s, failed=%s, "
+                        "malformed=%s) — keeping existing honest fallback",
+                        conversation_id,
+                        _rec_stats.get("execution_ids"),
+                        _rec_stats.get("success_observations"),
+                        _rec_stats.get("success_zero_row"),
+                        _rec_stats.get("failed_observations"),
+                        _rec_stats.get("malformed_observations"),
+                    )
+            except Exception as _rec_err:  # noqa: BLE001 — fail closed
+                logger.warning(
+                    "v3 turn-observation recovery failed (fail-closed, "
+                    "conv=%s): %s",
+                    conversation_id, _rec_err,
+                )
+
         # ── Empty-bubble guarantee (post-strip, post-deferred) ────────────
         # The strips above (promise + internal-reference) can remove ALL
         # accumulated prose when the model's only output was narration —
@@ -19624,13 +20609,25 @@ async def add_message_stream(
                         conversation_history=llm_messages,
                         max_retries=2,
                     )
-                    if len(_llm_answer) > 50:
-                        accumulated_content = _llm_answer
-                        logger.info(
-                            "v3 empty-bubble: LLM answer (%d chars, conv=%s)",
-                            len(_llm_answer), conversation_id,
-                        )
-                    else:
+                    # 2026-10-29 cycle 2: a recovery re-synthesis must not
+                    # REPLACE a much longer preserved answer (the replay
+                    # regression: 89-char fragment overwrote a 5,042-char
+                    # grounded report). final_answer() prefers the
+                    # preserved best, stripped of trailing pending offers.
+                    from app.services.answer_recovery import final_answer as _final_answer
+
+                    accumulated_content = _final_answer(
+                        _llm_answer,
+                        (_v3_preserved_content[0] if _v3_preserved_content else "")
+                        or (_v3_recovered_best[0] if _v3_recovered_best else ""),
+                    )
+                    logger.info(
+                        "v3 empty-bubble: recovery answer (%d chars, preserved=%d, conv=%s)",
+                        len(accumulated_content),
+                        len(_v3_preserved_content[0]) if _v3_preserved_content else 0,
+                        conversation_id,
+                    )
+                    if len(accumulated_content) <= 50:
                         # LLM couldn't produce a real answer either
                         accumulated_content = _data_rows_fallback(
                             tool_calls_for_frontend, user_content=user_content,
@@ -19733,6 +20730,62 @@ async def add_message_stream(
                     _yield_err,
                 )
 
+        # ── Give-up recovery (fix #1, 2026-10-29) ──────────────────────────
+        # The incident's terminal state: NON-empty accumulated text that is
+        # narration + the model's own give-up apology ("had trouble putting
+        # it all together / try again with a more specific request") even
+        # though 20+ queries had succeeded. The empty-bubble guarantee above
+        # never fires for non-empty text, so the apology survived. When the
+        # recovered (or contract) rows exist and the final text is a give-up,
+        # run the existing forced synthesis ONCE and replace the apology with
+        # a grounded answer. Fail-closed: on any error keep the existing text.
+        if (
+            (accumulated_content or "").strip()
+            and detect_give_up(accumulated_content)
+            and "_last_rows" in locals()
+            and _last_rows
+        ):
+            try:
+                _giveup_answer = await _force_llm_synthesis(
+                    user_content,
+                    _last_rows,
+                    synth_call_fn=_deferred_synth_call,
+                    conversation_history=llm_messages,
+                    max_retries=2,
+                )
+                # 2026-10-29 cycle 2: same recovery floor — a fragment must
+                # not replace a much longer preserved answer.
+                from app.services.answer_recovery import final_answer as _gu_final
+
+                _gu_resolved = _gu_final(
+                    _giveup_answer,
+                    (_v3_preserved_content[0] if _v3_preserved_content else "")
+                    or (_v3_recovered_best[0] if _v3_recovered_best else ""),
+                )
+                if len(_gu_resolved) > 50:
+                    accumulated_content = _gu_resolved
+                    logger.info(
+                        "v3 give-up recovery: replaced apology with grounded "
+                        "synthesis (%d chars, rows=%d, conv=%s)",
+                        len(accumulated_content), len(_last_rows),
+                        conversation_id,
+                    )
+                    if locals().get("content_streamed"):
+                        yield (
+                            'data: '
+                            + json.dumps({
+                                "type": "content_replace",
+                                "content": accumulated_content,
+                            })
+                            + '\n\n'
+                        )
+            except Exception as _giveup_err:  # noqa: BLE001 — fail closed
+                logger.warning(
+                    "v3 give-up recovery synthesis failed (fail-closed, "
+                    "conv=%s): %s",
+                    conversation_id, _giveup_err,
+                )
+
         # ── Persist the guarantee text to the DB row (reload safety) ─────
         # The live content_replace above updates the open bubble, but on
         # resume/checkpoint paths the final assistant row can stay empty
@@ -19742,6 +20795,14 @@ async def add_message_stream(
         # page reload shows the same bubble the user saw live. When the
         # normal final-write later appends a real row, this is a no-op (the
         # latest row is then non-empty).
+        # O3 CORRECTION (2026-10-27): per-turn persistence outcome.
+        # True ONLY when `accumulated_content` (the canonical answer for THIS
+        # turn) is verifiably durably present in the intended chat_messages
+        # row. Reported on the `done` frame as `answer_persisted` so the
+        # frontend can relinquish its own content write ONLY on confirmed
+        # success. Defaults False: any skip, validation failure, swallowed
+        # exception or uncertain commit leaves it False.
+        _answer_persisted = False
         if accumulated_content and (accumulated_content or "").strip():
             try:
                 from app.models.chat_message import ChatMessage as _GCM
@@ -19764,18 +20825,45 @@ async def add_message_stream(
                         .order_by(_GCM.order.desc())
                         .first()
                     )
-                    if (
-                        _last_asst is not None
-                        and not (_last_asst.content or "").strip()
-                    ):
-                        _last_asst.content = accumulated_content
-                        db.commit()
-                        logger.info(
-                            "v3 empty-bubble guarantee: persisted %d chars to "
-                            "assistant row %s (conv=%s)",
-                            len(accumulated_content), _last_asst.id,
-                            conversation_id,
-                        )
+                    if _last_asst is not None:
+                        _row_content = (_last_asst.content or "")
+                        if not _row_content.strip():
+                            # Patch-if-empty (unchanged predicate): write the
+                            # canonical content into the optimistic row.
+                            _last_asst.content = accumulated_content
+                            db.commit()
+                            _answer_persisted = True
+                            logger.info(
+                                "v3 empty-bubble guarantee: persisted %d chars to "
+                                "assistant row %s (conv=%s)",
+                                len(accumulated_content), _last_asst.id,
+                                conversation_id,
+                            )
+                        elif _row_content == accumulated_content:
+                            # The row already holds EXACTLY this turn's canonical
+                            # answer (e.g. a retry or a re-emitted turn). No write
+                            # is needed and NO commit is issued here; the value is
+                            # already durable because we just read it back from the
+                            # database in this transaction.
+                            _answer_persisted = True
+                            logger.info(
+                                "v3 answer already persisted (%d chars) on "
+                                "assistant row %s (conv=%s)",
+                                len(_row_content), _last_asst.id,
+                                conversation_id,
+                            )
+                        else:
+                            # A DIFFERENT non-empty answer occupies the row
+                            # (e.g. Regenerate, partial/previous text). Never
+                            # overwrite it here — the frontend keeps ownership
+                            # and will write the canonical answer itself.
+                            logger.info(
+                                "v3 answer NOT persisted by backend: row %s has "
+                                "different non-empty content (%d chars vs %d), "
+                                "leaving it to the client (conv=%s)",
+                                _last_asst.id, len(_row_content),
+                                len(accumulated_content), conversation_id,
+                            )
             except Exception as _gpersist_err:
                 logger.warning(
                     "v3 empty-bubble guarantee DB persist failed (non-fatal): %s",
@@ -19808,8 +20896,17 @@ async def add_message_stream(
                     conversation_history=llm_messages,
                     max_retries=2,
                 )
-                if len(_llm_ans) > 50:
-                    accumulated_content = _llm_ans
+                # 2026-10-29 cycle 2: same recovery floor — a fragment must
+                # not replace a much longer preserved answer.
+                from app.services.answer_recovery import final_answer as _ap_final
+
+                _ap_resolved = _ap_final(
+                    _llm_ans,
+                    (_v3_preserved_content[0] if _v3_preserved_content else "")
+                    or (_v3_recovered_best[0] if _v3_recovered_best else ""),
+                )
+                if len(_ap_resolved) > 50:
+                    accumulated_content = _ap_resolved
                 else:
                     accumulated_content = _data_rows_fallback(
                         tool_calls_for_frontend, user_content=user_content,
@@ -20174,6 +21271,7 @@ async def add_message_stream(
             # One agent_invocations row per conversation turn: duration,
             # token usage, cost, trace id. Best-effort — never breaks the
             # done frame.
+            _turn_invocation_id = None
             try:
                 from datetime import datetime as _dt2, timezone as _tz2
                 from app.services.agent_invocations import record_invocation
@@ -20192,7 +21290,23 @@ async def add_message_stream(
                     if isinstance(_t, dict) and _t.get("type") == "tool_call"
                 ) or None
 
-                record_invocation(
+                # Consistency audit D2 (2026-10-31): direct-execution turns
+                # previously recorded NO evidence (the pipeline was
+                # delegation-only). Successful data-tool results are stored
+                # as REAL shared-registry evidence items and referenced from
+                # this turn's invocation output_json — the execution panel's
+                # evidence count now reflects actual stored evidence.
+                _turn_evidence_ids: list = []
+                try:
+                    from app.services.turn_evidence import record_turn_evidence
+
+                    _turn_evidence_ids = record_turn_evidence(
+                        conversation_id, tool_calls_for_frontend,
+                    )
+                except Exception as _ev_err:  # noqa: BLE001 — non-fatal
+                    logger.debug("turn evidence capture failed: %s", _ev_err)
+
+                _turn_invocation_id = record_invocation(
                     db,
                     agent_app_id=agent_app_id,
                     conversation_id=conversation_id,
@@ -20211,10 +21325,51 @@ async def add_message_stream(
                     trace_id=None,  # quality-eval trace removed (Phase A/B)
                     model_name=_inv_model,
                     tool_call_count=_tool_count,
+                    output_json=(
+                        {"evidence_ids": _turn_evidence_ids}
+                        if _turn_evidence_ids else None
+                    ),
                 )
             except Exception as _inv_err:  # noqa: BLE001 — non-fatal
                 logger.warning("v3 stream: invocation record failed (non-fatal): %s", _inv_err)
+            # Part C (chat experience repair): terminal-event guarantee. A
+            # sub-agent badge whose return event was lost (tool crash,
+            # handler exception) must NEVER linger as "Running" in the tree.
+            # Emit an honest interrupted return for any still-open badge.
+            for _sa in reversed(_subagent_id_stack):
+                try:
+                    _le_flush = _push_live_event(
+                        "subagent_returned", "subagent_returned",
+                        {
+                            "agent_label": _sa.get("target") or "subagent",
+                            "subagent_id": _sa.get("id"),
+                            "outcome": "interrupted",
+                        },
+                    )
+                    if _le_flush:
+                        yield _le_flush
+                except Exception:  # noqa: BLE001 — flush is best-effort
+                    pass
+            _subagent_id_stack.clear()
             _done_payload = {"type": "done", "content": _done_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()}
+            # O3 CORRECTION (2026-10-27): additive, backward-compatible field.
+            # True iff THIS turn's canonical answer is verifiably committed to
+            # chat_messages. The frontend relinquishes its own content write
+            # only when this is True. Old clients ignore unknown keys.
+            #
+            # Guard: the flag describes `accumulated_content`, but the frame
+            # publishes `_done_content` (which dashboard gates may have
+            # appended to). If they differ, the row does not hold what we are
+            # about to display, so ownership is NOT confirmed.
+            _done_payload["answer_persisted"] = bool(
+                _answer_persisted
+                and (_done_content or "") == (accumulated_content or "")
+            )
+            # Consistency audit D1 (2026-10-31): additive field — the turn's
+            # own invocation row id, so the execution tree can be scoped to
+            # THIS turn. Old clients ignore unknown keys.
+            if _turn_invocation_id:
+                _done_payload["invocation_id"] = _turn_invocation_id
             # P1-5 TrustPanel: standardized trust contract on every answer
             # (citations + confidence + grade) — build failure is non-fatal.
             try:
@@ -20224,6 +21379,16 @@ async def add_message_stream(
                 logger.warning("v3 stream: trust panel failed (non-fatal): %s", _trust_err)
             if _v3_cancelled:
                 _done_payload["status"] = "cancelled"
+            try:  # Stage 0 diagnostics — observe only; payload untouched
+                from app.services.turn_diagnostics import note_terminal
+
+                note_terminal(
+                    "done",
+                    content_len=len(_done_content or ""),
+                    persist_status="not_owned_yet",  # Stage 0: backend does not own persistence
+                )
+            except Exception:  # noqa: BLE001
+                pass
             yield f'data: {json.dumps(_done_payload)}\n\n'
         except (GeneratorExit, StopIteration):
             raise
@@ -20234,10 +21399,31 @@ async def add_message_stream(
             )
             # Emit a minimal fallback `done` so the frontend at least unblocks.
             try:
-                yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content or "", "trace": [], "conversation": {}})}\n\n'
+                # answer_persisted=False: this frame is emitted only because
+                # serialization of the real `done` failed, so we cannot
+                # attest to the committed row here.
+                yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content or "", "trace": [], "conversation": {}, "answer_persisted": False})}\n\n'
             except Exception:
                 logger.error("v3 stream: fallback done frame also failed")
         finally:
+            # Part C: abnormal-exit terminal guarantee (exception / client
+            # disconnect). Yielding here is unsafe (GeneratorExit), but the
+            # PERSISTED live events are what the execution tree replays on
+            # reconnection — record honest interrupted returns so no node
+            # stays Running forever.
+            try:
+                for _sa in reversed(_subagent_id_stack):
+                    _push_live_event(
+                        "subagent_returned", "subagent_returned",
+                        {
+                            "agent_label": _sa.get("target") or "subagent",
+                            "subagent_id": _sa.get("id"),
+                            "outcome": "interrupted",
+                        },
+                    )
+                _subagent_id_stack.clear()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
             # Clean up the steer bus for this conversation (best-effort).
             try:
                 _discard_steer(conversation_id)
@@ -20267,9 +21453,51 @@ async def add_message_stream(
                 stream_db.close()
             except Exception as _close_err:
                 logger.debug("v3 stream: shadow session close failed (non-fatal): %s", _close_err)
+            try:  # Stage 0 diagnostics — record WHY the generator ended
+                import sys as _td_sys
+                from app.services.turn_diagnostics import note_stream_exit
+
+                _td_exc = _td_sys.exc_info()[0]
+                if _td_exc is not None and issubclass(_td_exc, asyncio.CancelledError):
+                    _td_reason = "cancelled"
+                elif _td_exc is not None and issubclass(_td_exc, GeneratorExit):
+                    _td_reason = "generator_exit"
+                elif _td_exc is not None:
+                    _td_reason = "exception"
+                else:
+                    _td_reason = "normal"
+                note_stream_exit(
+                    _td_reason,
+                    terminal_seen=bool(_done_payload) if "_done_payload" in locals() else False,
+                    exception=(_td_exc.__name__ if _td_exc is not None else None),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _turn_scoped_stream():
+        """Stage 0 diagnostics: run ``event_stream`` inside a turn scope.
+
+        OBSERVABILITY ONLY. This does NOT wrap/decorate frames: it is the
+        same generator ``event_stream`` with the body executed inside
+        ``turn_scope``, so the canonical ``turn_id`` is available to every
+        log line, tool call and FSM thread. Frames, ordering and exceptions
+        are forwarded by the existing ``_disconnect_safe_stream`` /
+        ``_guarantee_done`` / ``_sse_with_heartbeat`` stack unchanged.
+
+        If the diagnostics import fails, it degrades to the plain generator.
+        """
+        try:
+            from app.services.turn_diagnostics import turn_scope
+        except Exception:  # noqa: BLE001 — diagnostics must never break a turn
+            async for _f in event_stream():
+                yield _f
+            return
+        with turn_scope(conversation_id=conversation_id):
+            async for _f in event_stream():
+                yield _f
 
     return StreamingResponse(
-        _sse_with_heartbeat(_guarantee_done(_disconnect_safe_stream(event_stream))),
+        _sse_with_heartbeat(_guarantee_done(_disconnect_safe_stream(_turn_scoped_stream))),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -207,13 +207,43 @@ def search_catalog(query: str, limit: int = 5) -> list[dict]:
     return out
 
 
-def handle_search_tools(args: dict) -> dict:
-    """Registry handler for the ``search_tools`` meta-tool."""
+def handle_search_tools(
+    args: dict,
+    db=None,
+    user_id=None,
+    context: dict | None = None,
+) -> dict:
+    """Registry handler for the ``search_tools`` meta-tool.
+
+    Signature matches the governed invocation contract
+    (``(args, db, user_id, context)``) — the registry dispatches sync
+    handlers with all three positional args, and a guessed-name invocation
+    via ``execute_tool`` arrives here the same way. Discovery honesty
+    (milestone acceptance, 2026-11-01): results are filtered by the
+    CALLER's effective tool policy, so ``search_tools`` never advertises a
+    tool the agent is forbidden to invoke.
+    """
     query = str((args or {}).get("query", "")).strip()
     limit = int((args or {}).get("limit", 5) or 5)
     if not query:
         return {"success": False, "error": "query is required"}
     matches = search_catalog(query, limit=max(1, min(limit, 20)))
+    # Caller policy filter — never advertise forbidden tools. Extra cards
+    # beyond the limit may be dropped by the filter; over-fetch so the
+    # caller still gets a full page of ALLOWED matches.
+    try:
+        from app.services.agent_tool_policy import (
+            load_tool_policy,
+            policy_filters_catalog,
+        )
+
+        _policy = load_tool_policy(db, (context or {}).get("agent_app_id"))
+        if _policy:
+            _over = search_catalog(query, limit=max(1, min(limit, 20)) * 3)
+            _filtered = policy_filters_catalog(_policy, _over)
+            matches = _filtered[: max(1, min(limit, 20))]
+    except Exception:  # noqa: BLE001 — discovery must never break execution
+        pass
     if not matches:
         return {
             "success": True,

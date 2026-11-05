@@ -7,8 +7,10 @@ Replaces the raw LLM tool-calling loop with a governed pipeline:
 The FSM wraps the existing `execute_tool` function — tool behavior is
 unchanged, but the FSM adds plan/gate/observe/verify AROUND the execution.
 
-Feature flag: SYNEXIA_FSM_ENABLED (default False).  When False, the
-existing raw tool loop runs.  When True, the FSM orchestrates.
+Feature flag: SYNEXIA_FSM_ENABLED (config default True; production
+deployments set it false — the raw ReAct tool loop is the production chat
+path, and the v2/v3 "data-bound override" routing additionally gates on this
+flag before entering the FSM).
 """
 
 import logging
@@ -199,8 +201,23 @@ class ExecutionRequest(BaseModel):
     """Input to the FSM — replaces raw user message in add_message."""
     conversation_id: Optional[str] = None
     agent_name: str = "general_assistant"
+    # FSM tenant isolation (IC-2/D-4, 2026-10-31): the resolved AgentApp
+    # PK from the requesting organization. Optional for compatibility;
+    # when absent the FSM resolves the agent STRICTLY in-org by name
+    # (synexia.identity.resolve_agent_in_org) — never cross-org, never
+    # bare-name. Ends the app_id triple-meaning (app string vs PK vs
+    # memory key).
+    agent_id: Optional[str] = None
     user_message: str
     user_id: Optional[str] = None
+    # Canonical turn identity (2026-10-29 cycle 2): one user message = one
+    # turn. Threaded from the chat loop's tool context so EVERY nested
+    # SQL attempt inside this FSM run — across all plan nodes, replans and
+    # sub-executions — shares ONE per-turn SQL budget (turn_sql_budget).
+    # Without it each FSM execution would get a fresh exec-scoped budget
+    # and a ReAct loop issuing repeated query_database calls could never
+    # be bounded turn-wide.
+    turn_id: Optional[str] = None
     attachments: list[str] = Field(default_factory=list)
     mode: str = "dynamic"  # "dynamic" | "frozen"
     org_id: str = "default-org"
@@ -518,6 +535,11 @@ class SynexiaFSM:
             agent_name=request.agent_name,
             user_message=request.user_message,
             task_spec=self.execution.task_spec,
+            # FSM tenant isolation (IC-2/IC-3): the assembler resolves
+            # agent config, tool config and memories STRICTLY within the
+            # requesting organization.
+            org_id=request.org_id,
+            agent_id=request.agent_id,
             # Phase 1: forward the user's uploaded file_urls so the
             # context assembler can extract their text and fold it into
             # the LLM prompt. Without this, ExecutionRequest.attachments
@@ -637,12 +659,19 @@ class SynexiaFSM:
         """
         from app.services.synexia.capability_router import execute_plan_nodes
 
+        # Turn identity flows with the data context so every nested SQL
+        # attempt in this run shares the turn-wide budget (see
+        # ExecutionRequest.turn_id).
+        _dce = dict(request.data_ctx_extras or {})
+        if request.turn_id and not _dce.get("turn_id"):
+            _dce["turn_id"] = request.turn_id
+
         observations = execute_plan_nodes(
             db=self.db,
             execution=self.execution,
             plan=self.plan,
             user_id=request.user_id,
-            data_ctx_extras=request.data_ctx_extras,
+            data_ctx_extras=_dce,
             on_plan_node=on_plan_node,
             endpoint=request.endpoint,
         )
@@ -651,30 +680,31 @@ class SynexiaFSM:
     def _load_evaluation_profile(self, request: ExecutionRequest) -> Optional[dict]:
         """Return the agent's ``evaluation_profile`` dict, or None.
 
-        Looks up ``AgentApp`` by ``request.app_id`` (preferred) or
-        ``request.agent_name`` as fallback. Returns the JSON column
-        unchanged. Best-effort: any failure (table missing, agent not
-        found, malformed JSON) returns None and logs a warning. Never
-        raises.
+        FSM tenant isolation (IC-4, 2026-10-31): the agent row is
+        resolved with STRICT org equality (synexia.identity) — the
+        previous unscoped PK path that misused the app string as a row
+        id, and the unscoped NAME fallback, could load ANOTHER
+        organization's evaluation profile and govern this org's VERIFY
+        verdict with foreign grounding rules. Both are removed. Returns
+        the JSON column unchanged. Best-effort: any failure (table
+        missing, agent not found, malformed JSON) returns None and logs
+        a warning. Never raises.
         """
         if not getattr(self.db, "execute", None):
             return None
         try:
             # Late import so a missing models package never breaks FSM init.
-            from app.models.agent_app import AgentApp
+            from app.services.synexia.identity import resolve_agent_in_org
         except Exception as _imp_err:
-            logger.debug("VERIFY: AgentApp model unavailable: %s", _imp_err)
+            logger.debug("VERIFY: identity resolver unavailable: %s", _imp_err)
             return None
         try:
-            agent = None
-            if getattr(request, "app_id", None) and request.app_id != "default-app":
-                agent = self.db.query(AgentApp).filter(
-                    AgentApp.id == request.app_id,
-                ).first()
-            if agent is None and getattr(request, "agent_name", None):
-                agent = self.db.query(AgentApp).filter(
-                    AgentApp.name == request.agent_name,
-                ).first()
+            agent = resolve_agent_in_org(
+                self.db,
+                agent_id=getattr(request, "agent_id", None),
+                agent_name=getattr(request, "agent_name", None),
+                org_id=getattr(request, "org_id", None),
+            )
             if agent is None:
                 return None
             profile = getattr(agent, "evaluation_profile", None)
@@ -1442,5 +1472,10 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
 
 
 def is_fsm_enabled() -> bool:
-    """Check if the Synexia FSM is enabled via feature flag."""
+    """Check if the Synexia FSM is enabled via feature flag.
+
+    Config default is True (config.py), but production deployments set
+    SYNEXIA_FSM_ENABLED=false — the ReAct tool loop is the production chat
+    path (see docs/architecture/zhanlu-current-enterprise-agent-architecture-audit.md).
+    """
     return settings.SYNEXIA_FSM_ENABLED

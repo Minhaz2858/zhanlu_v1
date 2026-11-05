@@ -136,15 +136,24 @@ export default function DataSourcesSection({ form, update, onChange, t, agentId 
       <div className="space-y-3">
         <div className="flex flex-wrap gap-2">
           {selected.map((id) => {
-            const kb = available.find((x) => x.id === id);
+            // A bound id can legitimately resolve to no KB row: the KB was
+            // deleted, belongs to another project (multi-project sharing no
+            // longer rewrites a KB's project on attach), or `available` is
+            // still empty during the initial async load. Look in the
+            // unfiltered list first, then fall back to a plain chip with the
+            // raw id — NEVER crash the page on a stale/missing binding.
+            const kb = available.find((x) => x.id === id)
+              || allKbs.find((x) => x.id === id);
             const label = kb?.name || id;
             // Database KBs carry db_type; file KBs carry file_type. Pick
             // the right one so the chip shows "MySQL" / "PostgreSQL" for
             // databases and "PDF" / "DOCX" for documents.
             const isFileKb = kb?.source_kind === 'file';
-            const rawTypeLabel = isFileKb
-              ? (tr.kb.fileTypes?.[kb.file_type] || kb.file_type || '')
-              : (tr.kb.dbTypes?.[kb.db_type] || kb.db_type || '');
+            const rawTypeLabel = kb
+              ? (isFileKb
+                ? (tr.kb.fileTypes?.[kb.file_type] || kb.file_type || '')
+                : (tr.kb.dbTypes?.[kb.db_type] || kb.db_type || ''))
+              : '';
             const Icon = isFileKb ? FileText : Database;
             return (
               <span key={id} className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-secondary/50 px-2.5 py-1.5 text-xs text-foreground">

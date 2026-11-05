@@ -6,7 +6,7 @@ expression (or human-readable schedule) and the dispatcher in
 ``app/services/automation_dispatcher.py`` picks it up at the next run time.
 """
 
-from sqlalchemy import String, Text, JSON, ForeignKey, DateTime, Boolean
+from sqlalchemy import String, Text, JSON, ForeignKey, DateTime, Boolean, Integer, Index, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -14,6 +14,20 @@ from app.models.base import TimestampedBase
 
 class AutomationTask(TimestampedBase):
     __tablename__ = "automation_tasks"
+    __table_args__ = (
+        # R2 confirm idempotency arbiter (TS §1.2 / §4.2): a confirmation_key
+        # can produce exactly one live definition per org. Soft-deleted rows
+        # free the key. Partial unique index (PG: postgresql_where; SQLite:
+        # partial index — both supported by create_all and Alembic 126).
+        Index(
+            "uq_automation_tasks_org_confirmation_key",
+            "org_id",
+            "confirmation_key",
+            unique=True,
+            postgresql_where=text("is_deleted = false"),
+            sqlite_where=text("is_deleted = 0"),
+        ),
+    )
 
     # Canonical status vocabulary — the single source of truth for the LLM
     # create tool, the dispatcher self-heal sweep, the optional DB CHECK
@@ -120,3 +134,27 @@ class AutomationTask(TimestampedBase):
     llm_informed_tick: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=False
     )
+    # ── Canonical AutomationSpec (R2, TS §1.2) ───────────────────────────
+    # Canonical spec JSON. Optional — legacy rows are valid without it and
+    # remain fully functional on the scalar compat columns (schedule,
+    # cron_expression, timezone, output_format, notify_*, max_retries,
+    # skip_confirmation). From the R8 cutover onward the spec becomes
+    # authoritative and scalars derived.
+    spec: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Spec version; incremented on every definition edit.
+    spec_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Client-generated UUID copied from the confirmed draft — the confirm
+    # idempotency arbiter key (UNIQUE per org above).
+    confirmation_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # ── Trigger fidelity (R4, TS §1.2) ──────────────────────────────────
+    # "schedule" | "once" | "manual". NULL on legacy rows resolves at
+    # runtime: cron present → schedule, else manual (trigger_policy).
+    trigger_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # One-time execution instant (UTC-naive) for trigger_type="once".
+    run_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    # Loud schedule degradation (audit B12): True ⇒ the dispatcher skips
+    # firing and the UI shows the banner; never silently +1h.
+    schedule_degraded: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=False
+    )
+    schedule_error: Mapped[str | None] = mapped_column(Text, nullable=True)

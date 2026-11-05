@@ -32,6 +32,7 @@ import MobileMyFilesPage from '@/pages/mobile/MobileMyFilesPage';
 // alone is ~124 KB, and the marketplace/toolkit/builder pages pull heavy
 // deps (recharts, react-quill, three) that most users never touch on load.
 const AutomationTasks = lazy(() => import('@/pages/AutomationTasks'));
+const NewAutomationTask = lazy(() => import('@/pages/NewAutomationTask'));
 const AutomationTaskDetail = lazy(() => import('@/pages/AutomationTaskDetail'));
 const MySpace = lazy(() => import('@/pages/MySpace'));
 const MyFilesPage = lazy(() => import('@/pages/MyFilesPage'));
@@ -152,6 +153,7 @@ const AuthenticatedApp = () => {
         <Route path="/" element={<Chat />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/automation" element={<AutomationTasks />} />
+        <Route path="/automation/new" element={<NewAutomationTask />} />
         <Route path="/automation/chat" element={<Chat />} />
         <Route path="/automation/:id" element={<AutomationTaskDetail />} />
         <Route path="/my-space" element={<MySpace />} />

@@ -5,10 +5,10 @@
  * UX:
  *  - Loads all active KBs from the backend.
  *  - The KBs already assigned to THIS project are pre-selected & disabled.
- *  - The KBs already assigned to OTHER projects (or no project) can be
- *    selected with checkboxes. Save = bulk-update each by setting
- *    project_id = currentProject.id (and project = currentProject.name
- *    for legacy readers).
+ *  - Any other KB can be selected. Save = ATTACH each via the
+ *    project-knowledge-bases link endpoint (multi-project sharing,
+ *    2026-10-31). Attaching is ADDITIVE: a KB bound to another project is
+ *    linked here too — its existing binding is never overwritten.
  *
  * This makes "Connectors → project membership" a 1-click flow.
  */
@@ -16,6 +16,8 @@ import { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { base44 } from '@/api/base44Client';
+import { appParams } from '@/lib/app-params';
+import { authFetch } from '@/api/authFetch';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { Database, Check, Loader2, Search, FileText, Plus } from 'lucide-react';
 
@@ -85,13 +87,16 @@ export default function AddKbToProjectDialog({
     setSaving(true);
     try {
       const ids = Array.from(selected);
-      // Update each kb sequentially: idempotent and small payload.
+      // Attach each kb via the additive link endpoint (multi-project
+      // sharing). Never overwrites another project's binding; idempotent.
       for (const id of ids) {
-        await base44.entities.KnowledgeBase.update(id, {
-          project_id: project.id,
-          // Keep legacy `project` field in sync for older code paths.
-          project: project.name && project.name !== 'global' ? project.name : 'global',
-        });
+        const res = await authFetch(
+          `/api/apps/${appParams.appId}/projects/${project.id}/knowledge-bases/${id}`,
+          { method: 'POST' },
+        );
+        if (!res.ok) {
+          console.error(`Attach KB ${id} to project failed (${res.status})`);
+        }
       }
       onAdded?.(ids);
       onOpenChange(false);
@@ -174,7 +179,7 @@ export default function AddKbToProjectDialog({
                           )}
                           {!isBound && kb.project_id && kb.project_id !== project.id && (
                             <span className="ml-1.5 rounded bg-amber-100 px-1 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-                              {isEn ? 'in another project' : '属于其他项目'}
+                              {isEn ? 'also usable here' : '可同时用于本项目'}
                             </span>
                           )}
                         </span>

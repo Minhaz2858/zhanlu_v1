@@ -35,6 +35,7 @@ import { dedupeMessagesByFingerprint } from './messageDedup';
 // or an unconditional final write from destroying a valid displayed answer.
 import {
   applyContentReplace,
+  applyDelta,
   resolveFinalContent,
   shouldPersistContent,
   backendOwnsContent,
@@ -378,7 +379,44 @@ export default function Chat() {
   // here, parsed into fields, and the user can refine any field inline
   // before the agent actually creates the task. The card auto-dismisses
   // when the agent confirms creation, or when the user clicks ×.
-  const [pendingDraft, setPendingDraft] = useState(null); // { prefill: string, lang: 'zh' | 'en' } | null
+  const [pendingDraft, setPendingDraft] = useState(null);
+  // Ref mirror: the SSE done-handler closure must read the CURRENT pending
+  // draft (state captured at render would be stale — the card is set in the
+  // same tick that starts the stream).
+  const pendingDraftRef = useRef(null);
+  useEffect(() => { pendingDraftRef.current = pendingDraft; }, [pendingDraft]); // { prefill: string, lang: 'zh' | 'en' } | null
+  // P2 orchestration: department selector. A department is a pure
+  // routing hint for the general assistant's specialist discovery
+  // (conversation.metadata_.department → discovery default filter) —
+  // it never gates data access. Initialized from ?department= so a
+  // deep link re-hydrates the selection, and persisted back to the
+  // URL alongside project/agentName when the conv is created.
+  const [pendingDepartment, setPendingDepartment] = useState(() => {
+    try { return new URL(window.location.href).searchParams.get('department') || null; } catch { return null; }
+  });
+  // Unique department labels across the user's non-archived projects —
+  // the picker's source of truth. Sparse fetch keeps the payload small.
+  const [departments, setDepartments] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    try {
+      base44.entities.Project.list('-updated_date', 200, 0, ['id', 'department', 'status'])
+        .then((rows) => {
+          if (!alive) return;
+          const set = new Set();
+          for (const p of rows || []) {
+            if (p.status === 'archived') continue;
+            const d = (p.department || '').trim();
+            if (d) set.add(d);
+          }
+          setDepartments([...set].sort((a, b) => a.localeCompare(b)));
+        })
+        .catch(() => { /* picker just stays empty — never blocks chat */ });
+    } catch {
+      // Entity unavailable (partial SDK / test mocks) — picker stays empty.
+    }
+    return () => { alive = false; };
+  }, []);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   // genRef and stream lifecycle now come from PersistentStreamContext, which
@@ -426,6 +464,11 @@ export default function Chat() {
     // useEffect below that depends on ``activeId``. Skip the
     // prefill processing here to avoid double-sending.
     const autorun = params.get('autorun') === '1';
+    // Lifecycle separation (2026-11-03): /automation/new creates a SERVER
+    // draft before navigating; the pending card renders authoritative
+    // server state and activation happens ONLY via the card's explicit
+    // Confirm & Activate (confirm API). The agent edits the SAME draft.
+    const draftId = params.get('draftId') || null;
     if (prefill && !autorun) {
       // `?newTask=1` is set by the structured-creation dialogs (New Task /
       // Save & Continue in Chat). It means: "open a BRAND-NEW chat session
@@ -437,15 +480,20 @@ export default function Chat() {
       if (isAutomationRequest(prefill)) {
         // Stash the prefill as a pending draft BEFORE sending so the
         // editable summary card can mount before the agent starts
-        // streaming. The card stays visible until the user dismisses
-        // it (or the agent confirms the task is created).
-        setPendingDraft({ prefill, lang });
+        // streaming. With a server draftId the card is AUTHORITATIVE:
+        // it shows server validation and hosts Confirm & Activate /
+        // Discard. The card only auto-dismisses on legacy flows (no
+        // draftId) when the backend reports create_automation.
+        setPendingDraft({ prefill, lang, draftId, refreshAt: 0 });
       }
       if (newTask) {
         // Resolve the new-task options. We prefer the dialog's project
         // (if provided) so the user gets the project they were just in,
         // not whatever project the sidebar happens to have selected.
-        handleSend(prefill, {
+        const sendText = draftId
+          ? `${prefill}\n\n[A server-side automation draft already exists for this request: draft_id=${draftId}. Refine it with update_automation_draft — do NOT propose a duplicate draft. Activation happens only when the user clicks Confirm on the review card.]`
+          : prefill;
+        handleSend(sendText, {
           newSessionTitle: t.sessionList.newTask,
           newSessionProject: dialogProjectName,
           newSessionProjectId: dialogProjectId,
@@ -457,6 +505,7 @@ export default function Chat() {
           newParams.delete('newTask');
           newParams.delete('projectName');
           newParams.delete('projectId');
+          newParams.delete('draftId');
           const qs = newParams.toString();
           const newUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
           window.history.replaceState({}, '', newUrl);
@@ -637,6 +686,16 @@ export default function Chat() {
           if (agentName) {
             url.searchParams.set('agentName', agentName);
           }
+          // Seed the department chip from the conv's metadata (and
+          // persist it in the URL) so a refresh keeps the routing
+          // hint visible — same contract as projectName above.
+          const dept = (conv.metadata && conv.metadata.department) || null;
+          if (dept) {
+            url.searchParams.set('department', dept);
+          } else {
+            url.searchParams.delete('department');
+          }
+          setPendingDepartment(dept);
           window.history.replaceState({}, '', url.toString());
         } catch { /* SSR / non-browser env — best-effort */ }
         // Dashboard-mode: if this conversation was stamped as a dedicated
@@ -2067,12 +2126,19 @@ export default function Chat() {
       const friendlyErr = lang === 'en'
         ? "Sorry, I hit an error while responding. Please try again."
         : "抱歉，回复时出错了，请重试。";
-      const errMsg = await base44.entities.ChatMessage.create({
-        session_id: sid, role: 'assistant', content: friendlyErr, order: current.length,
-      });
-      if (gen !== genRef.current) return;
-      setMessages((prev) => [...prev, errMsg]);
-      onRunComplete(errMsg.id, errMsg.content || '');
+      // E-3 (enterprise reliability audit, 2026-11-01): do NOT persist the
+      // error text as a NEW assistant row. It created a second assistant
+      // record per failed turn (duplicate-message class) and contradicted
+      // the streaming done-handler rule that error text is never persisted.
+      // The friendly error now renders in the EXISTING placeholder bubble,
+      // client-side only; the backend row stays empty exactly like any
+      // stream that died before persistence.
+      if (aiMsg?.id) {
+        setMessages((prev) => prev.map((m) =>
+          m.id === aiMsg.id ? { ...m, content: friendlyErr, error: true } : m
+        ));
+        onRunComplete(aiMsg.id, '');
+      }
       if (gen === genRef.current) stream.complete();
     } finally {
       if (gen === genRef.current) {
@@ -2164,6 +2230,7 @@ export default function Chat() {
         ...(projectCtx.projectId ? { project_id: projectCtx.projectId } : (pendingProjectId ? { project_id: pendingProjectId } : {})),
         ...(projectCtx.projectName ? { project_name: projectCtx.projectName } : (pendingProject ? { project_name: pendingProject } : {})),
         ...(projectCtx.projectName ? { project: projectCtx.projectName } : (pendingProject ? { project: pendingProject } : {})),
+        ...(pendingDepartment ? { department: pendingDepartment } : {}),
       },
         // Derive the conversation title from the first user message
         // (trimmed, whitespace-normalized, truncated to 60 chars).
@@ -2224,6 +2291,7 @@ export default function Chat() {
         // a reload re-hydrates the full context.
         if (projectCtx.projectId) url.searchParams.set('project', projectCtx.projectId);
         if (projectCtx.projectName) url.searchParams.set('projectName', projectCtx.projectName);
+        if (pendingDepartment) url.searchParams.set('department', pendingDepartment);
         // (2026-08-31) Always write agentName too — the user's URL
         // should carry the FULL context (project + agent + conv) so
         // a refresh re-binds the same agent and the LLM keeps its
@@ -2237,6 +2305,11 @@ export default function Chat() {
     // the steer endpoint while this stream is in flight.
     setStreamingConvId(convId);
     let fullContent = '';
+    // D5 (2026-11-01): set by a rejected empty content_replace or a
+    // content_reset frame — the server is re-streaming from scratch. The
+    // next delta REPLACES the accumulator (no transient doubling); the
+    // visible bubble is never blanked (invariant I1).
+    let pendingReset = false;
     let toolCalls = [];
     let activitySteps = [];
     let liveEvents = [];      // typed live-activity feed ({type, label_key, params, ts})
@@ -2250,6 +2323,14 @@ export default function Chat() {
     let sources = [];         // citations extracted from the done event (Kimi/GPT-style source chips)
     let trustPanel = null;    // P1-5 TrustPanel contract from the done frame
     let aborted = false;
+    // STAGE 1 (2026-10-27): true once a terminal `done` frame was received.
+    // Used by resolveFinalContent to distinguish "server confirmed an empty
+    // answer" from "the stream ended without a terminal event".
+    let hadTerminalEvent = false;
+    // O3 correction (2026-10-27): the backend's OWN attestation that it
+    // committed this turn's canonical answer to chat_messages. Only an
+    // explicit `true` counts; anything else keeps the client as the writer.
+    let answerPersisted = false;
     try {
       stream.startSending(sid, gen);
       const selectedSkill = compactSelectedSkill(activeSkill);
@@ -2456,8 +2537,18 @@ export default function Chat() {
               ));
             }
           }
+        } else if (evt.type === 'content_reset') {
+          // D5 (2026-11-01): the server signals "re-streaming this answer
+          // from scratch" on mid-stream generator retries. The visible
+          // answer is NEVER blanked (invariant I1) — the reset is carried
+          // as state so the next delta REPLACES the accumulator instead of
+          // appending onto the stale pre-reset text (transient doubling).
+          pendingReset = true;
         } else if (evt.type === 'delta' && typeof evt.content === 'string') {
-          fullContent += evt.content;
+          // D5: reset-aware accumulation (see applyDelta in answerLifecycle).
+          const _d = applyDelta(fullContent, evt.content, pendingReset);
+          fullContent = _d.content;
+          pendingReset = _d.pendingReset;
           if (gen === genRef.current) {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id
@@ -2488,7 +2579,25 @@ export default function Chat() {
           // never shows. Each event carries the full accumulated text; the
           // `done` event still carries the authoritative final content.
           // 2026-08-25: clear the `refining` flag set by content_preserve.
-          fullContent = evt.content;
+          //
+          // STAGE 1 (2026-10-27): guard the replacement. The server emits the
+          // full replacement on the replacement generation's FIRST token
+          // (agents.py:14786-14787), so an empty/whitespace payload means the
+          // replacement has not produced anything yet. Assigning it would wipe
+          // a complete answer the user is reading — the "answer collapses"
+          // symptom. A non-empty payload is always accepted, even when shorter
+          // than the previous answer and in any language (no length/script
+          // rule — see lib/answerLifecycle.js).
+          const _replace = applyContentReplace(fullContent, evt.content);
+          if (!_replace.accepted) {
+            // D5: an empty replace from a retry path is a RESET MARKER, not
+            // an erasure — carry it so the re-streamed deltas replace (not
+            // double) the accumulator.
+            console.warn('[Chat] ignored empty content_replace; preserving answer');
+            pendingReset = evt.content === '';
+          }
+          fullContent = _replace.content;
+          if (_replace.accepted) pendingReset = false;
           if (gen === genRef.current) {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id
@@ -2509,7 +2618,12 @@ export default function Chat() {
           fullContent = fullContent || friendlyErr;
           if (gen === genRef.current) {
             setMessages((prev) => prev.map((m) =>
-              m.id === aiMsg.id ? { ...m, content: fullContent } : m
+              // Clear `refining` too: an error can arrive AFTER a
+              // content_preserve set the flag (e.g. the refinement LLM call
+              // dies on provider quota). Without this the "Refining answer…"
+              // indicator spins forever over an already-complete answer
+              // (observed 2026-11-02, CAD agent + DashScope insufficient_quota).
+              m.id === aiMsg.id ? { ...m, content: fullContent, refining: false } : m
             ));
           }
         } else if (evt.type === 'paused') {
@@ -2558,6 +2672,15 @@ export default function Chat() {
           if (typeof evt.content === 'string' && evt.content.trim()) {
             fullContent = evt.content;
           }
+          // STAGE 1: remember that a terminal `done` arrived. If its content is
+          // empty we must NOT blank the bubble — resolveFinalContent keeps the
+          // streamed answer and reports the turn as degraded (honest outcome)
+          // rather than showing a fabricated success.
+          hadTerminalEvent = true;
+          // O3 correction: capture the backend's persistence attestation.
+          // Strict equality with `true` — an absent, false, or malformed
+          // value must leave the client as the owner of `content`.
+          answerPersisted = evt.answer_persisted === true;
           // The done event carries the authoritative assistant message
           // (with full tool_calls + artifacts) inside evt.conversation.
           // Extract them so charts (report_card_payload in tool_calls) and
@@ -2650,16 +2773,23 @@ export default function Chat() {
           // editable summary; once the task exists server-side, it has
           // served its purpose. Also dispatch ``zhanlu:automation-created``
           // so other mount points (SessionList clock badge) refresh.
-          if (gen === genRef.current && Array.isArray(toolCalls) && toolCalls.some((tc) => {
+          const _automationToolSeen = Array.isArray(toolCalls) && toolCalls.some((tc) => {
             const name = tc.name || (tc.function && tc.function.name) || '';
-            return name === 'create_automation';
-          })) {
+            return name === 'create_automation' || name === 'propose_automation' || name === 'update_automation_draft';
+          });
+          if (gen === genRef.current && _automationToolSeen && !pendingDraftRef.current?.draftId) {
+            // Legacy flow (no server draft): the card has served its purpose
+            // once the task exists server-side.
             setPendingDraft(null);
             try {
               window.dispatchEvent(new CustomEvent('zhanlu:automation-created', {
                 detail: { session_id: sid },
               }));
             } catch { /* non-fatal */ }
+          } else if (gen === genRef.current && _automationToolSeen && pendingDraftRef.current?.draftId) {
+            // Server-draft flow: the card STAYS for the user's explicit
+            // Confirm & Activate — just refresh its server validation.
+            setPendingDraft((d) => d ? { ...d, refreshAt: Date.now() } : d);
           }
         }
       }
@@ -2738,9 +2868,46 @@ export default function Chat() {
     }
     // Persist the final assistant message + tool_calls + artifacts +
     // activity_steps so charts and file cards survive a page refresh.
+    //
+    // STAGE 1 (2026-10-27): the write used to be unconditional
+    // (`content: fullContent`), so a stream that ended WITHOUT a `done`
+    // frame — client watchdog, reload, server-side close — persisted empty
+    // or stale text over the row holding the real answer. That is the
+    // "answer disappears after reload / assistant message is empty" defect.
+    // resolveFinalContent applies authority (done > streamed > explicit
+    // placeholder) and shouldPersistContent blocks empty writes and writes
+    // from a superseded generation.
+    const _final = resolveFinalContent({
+      doneContent: hadTerminalEvent ? fullContent : '',
+      streamedContent: fullContent,
+      placeholder: lang === 'en'
+        ? 'The agent did not return a response. Please retry.'
+        : '智能体未返回内容，请重试。',
+      hadTerminal: hadTerminalEvent,
+    });
+    // O3 (2026-10-27): when a non-empty `done` arrived, the backend has
+    // already persisted the canonical answer into this assistant row. Writing
+    // `content` again from here is redundant when our text matches it, and
+    // actively destructive when our text is STALE (no `done` → watchdog /
+    // reload): the blind PUT would land after the backend's commit and
+    // overwrite the server's answer. Relinquish content ownership in that
+    // case; metadata (tool_calls / artifacts / sources) is still written.
+    const _backendOwns = backendOwnsContent({
+      hadTerminal: hadTerminalEvent,
+      doneContent: hadTerminalEvent ? fullContent : '',
+      answerPersisted,
+    });
+    const _persist = shouldPersistContent({
+      content: _final.source === 'placeholder' ? '' : _final.content,
+      isCurrentGeneration: gen === genRef.current,
+      backendOwnsContent: _backendOwns,
+    });
+    if (!_persist.writeContent) {
+      console.warn(`[Chat] skipping content write (${_persist.reason}) for ${aiMsg.id}`);
+    }
     try {
       await base44.entities.ChatMessage.update(aiMsg.id, {
-        content: fullContent,
+        ...(_persist.writeContent ? { content: _final.content } : {}),
         ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
         ...(activitySteps.length ? { activity_steps: activitySteps } : {}),
         ...(liveEvents.length ? { live_events: liveEvents } : {}),
@@ -3293,6 +3460,16 @@ export default function Chat() {
                             prefill={pendingDraft.prefill}
                             lang={pendingDraft.lang}
                             error={pendingDraft.error}
+                            draftId={pendingDraft.draftId || null}
+                            refreshAt={pendingDraft.refreshAt || 0}
+                            onConfirmed={() => {
+                              // Activated server-side via the confirm API —
+                              // the card's job is done.
+                              setPendingDraft(null);
+                              try {
+                                window.dispatchEvent(new CustomEvent('zhanlu:automation-created', {}));
+                              } catch { /* non-fatal */ }
+                            }}
                             onAppendToInput={(text) => {
                               setInputValue((cur) => (cur ? `${cur}\n${text}` : text));
                               // Focus the input so the user can review and send
@@ -3326,12 +3503,20 @@ export default function Chat() {
                           const visible = messages.filter((m) => !m.hidden && (m.id === streamingId || !(m.role === 'assistant' && !m.content)));
                           const lastId = visible.length ? visible[visible.length - 1].id : null;
                           const idle = !streamingId && !loading;
+                          // Part F (chat experience repair): the execution
+                          // tree must query the SAME conversation identity
+                          // the v3 stream used (the AgentConversation id),
+                          // never the ChatSession id — otherwise the
+                          // authoritative REST tree looks empty.
+                          const treeConvId = (typeof getSession === 'function'
+                            ? (getSession(activeId)?.conversation_id || null)
+                            : null) || activeId;
                           return visible.map((m) => {
                             const isStreaming = m.id === streamingId;
                             const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
                             const canRegenerate = m.role === 'assistant' && !!m.content && m.id === lastId && idle && !isStreaming;
                             return (
-                              <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onArtifactPreview={setOpenArtifact} onArtifactEdit={setCanvasArtifact} onPreviewFile={setOpenFilePreview} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} onRegenerate={canRegenerate ? handleRegenerate : null} />
+                              <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} conversationId={treeConvId} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onArtifactPreview={setOpenArtifact} onArtifactEdit={setCanvasArtifact} onPreviewFile={setOpenFilePreview} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} onRegenerate={canRegenerate ? handleRegenerate : null} />
                             );
                           });
                         })()}
@@ -3344,7 +3529,7 @@ export default function Chat() {
                     list and the "→ steer" pills are no longer needed. */}
                   </div>
                 </div>
-                <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={handleStopStreaming} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
+                <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={handleStopStreaming} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} departments={departments} pendingDepartment={pendingDepartment} onSelectDepartment={(d) => setPendingDepartment(d)} onClearDepartment={() => setPendingDepartment(null)} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
               </>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center px-6 pb-12">
@@ -3356,7 +3541,7 @@ export default function Chat() {
                   <StarterPrompts onPick={(q) => setInputValue(q)} />
                 </div>
                 <div className="mt-4 w-full max-w-4xl">
-                  <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={handleStopStreaming} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name, id) => setPendingProject(name, id)} centered inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
+                  <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={handleStopStreaming} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name, id) => setPendingProject(name, id)} centered inheritedKbCount={inheritedKbCount} departments={departments} pendingDepartment={pendingDepartment} onSelectDepartment={(d) => setPendingDepartment(d)} onClearDepartment={() => setPendingDepartment(null)} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
                   {chips.length > 0 && (
                     <RelatedContent
                       chips={chips}

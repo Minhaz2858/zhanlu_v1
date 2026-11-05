@@ -11,16 +11,14 @@ Why it has to exist (measured 2026-09-18 on a 143-table warehouse):
 
   * ``format_toc_text(toc, token_budget=1200)`` rendered 14 of 143 tables, in
     ``build_full_toc``'s alphabetical order, so the model only ever saw
-    ``_ref_material_mapping``, ``access_model_config``, ``actual_price``,
-    ``auth_*``… and then "... and 128 more tables". Not one business table was
-    in the surface it chose from.
-  * Asked about a sales report it therefore picked ``actual_price`` (data ends
-    2025-07-31) and ``chain_product_kind`` (0 rows) → 0 rows → "no data".
-  * Asked about contract execution it returned ``contract_execution``,
-    ``contract``, ``contract_execution_detail`` — names that do not exist.
-  * Holding the model and question fixed and raising only that budget to 6,000
-    made it pick ``erp_t_crm_contract``, ``erp_t_crm_contractentry``,
-    ``erp_t_crm_contractfin``, ``erp_v_contract_execution``. The model was
+    alphabetically-leading internal tables — "... and 128 more tables". Not
+    one business table was in the surface it chose from.
+  * Asked about a dated report it therefore picked a price column whose data
+    had ended months earlier and a 0-row dimension table → 0 rows → "no data".
+  * Asked about contract execution it invented plausible table names that do
+    not exist in the source.
+  * Holding the model and question fixed and raising only that budget to
+    6,000 made it pick the correct customer's contract tables. The model was
     never the problem; the surface it was given was.
 
 Everything here is derived from the catalog rows and the question — no table
@@ -48,6 +46,158 @@ logger = logging.getLogger(__name__)
 # ``SemanticStore.rank_relations`` and is preserved by only adding to its score.
 _W_PLAN = 3.0
 _W_DOMAIN = 1.5
+
+# ── Stage 2B-2: classification adjustments (flag-gated by the caller) ──────
+# Refinement weights, deliberately SMALLER than the core evidence components:
+# classification must never outrank what the question actually says. All
+# penalties/boosts scale by provenance — human verdict ×1.0, inferred verdict
+# ×its stored confidence — so a 0.6 guess can never dominate (review point 2).
+_W_CLASS_SYSTEM = 4.0                # penalty: platform tables sink
+_W_HUMAN_BUSINESS = 0.5              # boost: a human business verdict
+_W_SCOPE_GLOBAL = 0.4                # boost: global datasets fit any scope
+_W_SCOPE_PARTITION_UNIVERSAL = 1.2   # penalty: partition on a universal question
+_W_SCOPE_PARTITION_MATCH = 2.0       # boost: the question NAMED this partition
+
+
+def classification_adjustments(
+    facts: dict, question: str
+) -> dict[str, tuple[float, str]]:
+    """Pure: per-table ``(score delta, why)`` from classification facts.
+
+    ``facts`` is the ``effective_classification`` contract (loader below),
+    optionally carrying a structured ``partition_value`` per table. The
+    question scope is resolved against OBSERVED partition values only —
+    no vocabulary, no customer nouns.
+
+    Ranking precedence (reviewer condition 1):
+    - human override → full weight (highest authority);
+    - inferred classification → weight × its stored confidence;
+    - unknown → zero delta, zero assumption.
+    """
+    from app.services.db.schema_classification import (
+        resolve_question_scope_from_facts,
+    )
+
+    scope = resolve_question_scope_from_facts(question, facts)
+    out: dict[str, tuple[float, str]] = {}
+    for name, f in (facts or {}).items():
+        delta = 0.0
+        whys: list[str] = []
+
+        def _scale(source_key: str) -> float:
+            source = f.get(source_key + "_source")
+            if source == "human":
+                return 1.0
+            if source == "inferred":
+                return float(f.get(source_key + "_confidence") or 0.0)
+            return 0.0
+
+        sclass = f.get("schema_class")
+        if sclass == "system":
+            d = _W_CLASS_SYSTEM * _scale("schema_class")
+            if d:
+                delta -= d
+                whys.append(
+                    f"classified system ({f.get('schema_class_source')})"
+                )
+        elif sclass == "business" and f.get("schema_class_source") == "human":
+            delta += _W_HUMAN_BUSINESS
+            whys.append("human business override")
+
+        dscope = f.get("dataset_scope")
+        if dscope == "global":
+            d = _W_SCOPE_GLOBAL * _scale("dataset_scope")
+            if d:
+                delta += d
+                whys.append("global dataset")
+        elif dscope and (
+            dscope.startswith("partition:") or dscope == "partition_family"
+        ):
+            pv = str(f.get("partition_value") or "").strip().lower()
+            if scope and pv and pv == str(scope.get("value", "")).lower():
+                d = _W_SCOPE_PARTITION_MATCH * _scale("dataset_scope")
+                if d:
+                    delta += d
+                    whys.append(f"matches question scope {pv!r}")
+            else:
+                d = _W_SCOPE_PARTITION_UNIVERSAL * _scale("dataset_scope")
+                if d:
+                    delta -= d
+                    whys.append(
+                        "partitioned dataset — narrower than the question"
+                        if not scope else "different partition than asked"
+                    )
+        if delta or whys:
+            out[name] = (round(delta, 3), "; ".join(whys))
+    return out
+
+
+def _load_classification_facts(
+    db: Any, kb_ids: list[str], project_id: str | None = None
+) -> dict[str, dict]:
+    """Load ``effective_classification`` facts for a KB's tables.
+
+    Overlay overrides win (the contract enforces it); the structured
+    ``partition_value`` rides along from the stored signals for the
+    question-scope resolver. Degrades to {} on any catalog problem —
+    retrieval must never break answering.
+    """
+    if db is None or not kb_ids:
+        return {}
+    try:
+        from sqlalchemy import or_
+
+        from app.models.knowledge_catalog import (
+            KBTableMeta,
+            ProjectCatalogOverlay,
+        )
+        from app.services.db.schema_classification import (
+            effective_classification,
+        )
+
+        rows = (
+            db.query(KBTableMeta)
+            .filter(
+                KBTableMeta.kb_id.in_(list(kb_ids)),
+                KBTableMeta.is_deleted.is_(False),
+            )
+            .all()
+        )
+        ov_query = db.query(ProjectCatalogOverlay).filter(
+            ProjectCatalogOverlay.is_deleted.is_(False),
+        )
+        ov_query = ov_query.filter(
+            or_(
+                ProjectCatalogOverlay.kb_id.in_(list(kb_ids)),
+                *(
+                    [ProjectCatalogOverlay.project_id == project_id]
+                    if project_id
+                    else []
+                ),
+            )
+        )
+        overlays = ov_query.all() if rows else []
+        ov_by_table: dict[str, Any] = {}
+        for ov in overlays:
+            if ov.table_name:
+                # project-scoped overrides are the more specific human record
+                prev = ov_by_table.get(ov.table_name)
+                if prev is None or (
+                    ov.project_id == project_id and prev.project_id != project_id
+                ):
+                    ov_by_table[ov.table_name] = ov
+
+        facts: dict[str, dict] = {}
+        for m in rows:
+            fact = effective_classification(m, ov_by_table.get(m.table_name))
+            signals = m.dataset_scope_signals_json or {}
+            if isinstance(signals, dict):
+                fact["partition_value"] = signals.get("partition_value")
+            facts[m.table_name] = fact
+        return facts
+    except Exception as e:  # never let retrieval break answering
+        logger.warning("table_retrieval: classification facts unavailable: %s", e)
+        return {}
 
 
 @dataclass
@@ -101,6 +251,11 @@ class RetrievalResult:
     # because the similarity distribution was flat). Rendered with the ranked
     # block so the model — and the audit trail — sees the same caveats.
     notes: list[str] = field(default_factory=list)
+    # 2B-2 review concern 3 (2026-10-30): scope REFUSALS are not audit noise —
+    # they mean the answer's scope may differ from what was asked. Each entry
+    # is a reader-usable sentence the caller must surface in the disclosure
+    # channel (the SQL prompt note alone is not user-facing).
+    scope_refusals: list[str] = field(default_factory=list)
     # Which components contributed, largest first: {"text": 34, "column": 12, …}
     component_counts: dict[str, int] = field(default_factory=dict)
     # Phase 3A: provenance of the enterprise-ontology evidence used for this
@@ -122,6 +277,7 @@ class RetrievalResult:
             "latest_available": self.latest_available,
             "candidate_count": len(self.candidates),
             "notes": list(self.notes),
+            "scope_refusals": list(self.scope_refusals),
             "components": dict(self.component_counts),
             "candidates": [c.as_dict() for c in self.candidates[:12]],
         }
@@ -233,6 +389,7 @@ def retrieve_for_question(
     store: Any | None = None,
     embedder: Any | None = None,
     use_embeddings: bool | None = None,
+    classification_facts: dict | None = None,
     ontology_context: dict | None = None,
 ) -> RetrievalResult:
     """Rank the catalog tables for this question. Deterministic, read-only.
@@ -569,6 +726,21 @@ def retrieve_for_question(
         except Exception as e:  # never let retrieval break answering
             logger.warning("table_retrieval: fused evidence unavailable: %s", e)
 
+    # ── 4.5 classification refinement (2B-2; caller flag-gated) ─────────────
+    # Annotation-first, like coverage: adjustments shift RANK, nothing is
+    # filtered, and every delta lands in the candidate's evidence so the
+    # ranking stays arguable. Facts absent (flag off / loader degraded) →
+    # byte-identical behavior.
+    if classification_facts:
+        try:
+            for name, (delta, why) in classification_adjustments(
+                classification_facts, question
+            ).items():
+                if delta:
+                    _add(name, delta, why, "classification")
+        except Exception as e:  # never let retrieval break answering
+            logger.warning("table_retrieval: classification adjustment failed: %s", e)
+
     # ── 5. coverage annotation — a constraint, not a filter ─────────────────
     # Tables are never DROPPED for coverage. "This table has no data for your
     # period" is useful information the model must be able to see; silently
@@ -695,6 +867,8 @@ def reroute_uncovered(
     toc: list[dict],
     res: RetrievalResult,
     window: tuple[date, date] | None,
+    classification_facts: dict | None = None,
+    question_scope: dict | None = None,
 ) -> tuple[list[str], list[tuple[str, str]]]:
     """Swap out a selected table whose catalog window CANNOT hold the period.
 
@@ -703,15 +877,15 @@ def reroute_uncovered(
     carries the verdict as ``covers_window``. Until now nothing ACTED on it:
     the annotation reached the prompt and the answer, never the selection.
 
-    Measured live on 2026-09-20, question ``示例工厂本周销售情况，用图表展示``
+    Measured live on 2026-09-20, a dated Chinese-language reporting question
     (window 2026-09-14..2026-09-20):
 
-      * ``erp_v_sale_huizhou`` ranked #1 (score 5.73, max_date 2026-09-16,
+      * the freshest sales fact table ranked #1 (score 5.73,
         ``covers_window=True``) — and was NOT selected;
-      * the selector chose ``forecast_accuracy_log`` (max_date 2026-09-05,
-        ``covers_window=False``) because it is a REAL catalog table, so the
-        retrieval's top-ranked candidate was discarded (retrieval was only
-        consulted when the selection matched nothing that exists);
+      * the selector chose a different real catalog table whose data ended
+        before the window (``covers_window=False``) — the retrieval's
+        top-ranked candidate was discarded (retrieval was only consulted
+        when the selection matched nothing that exists);
       * the query returned 0 rows and the pipeline wrote an articulate
         "no data, unknown not zero" answer instead of the sales figures.
 
@@ -747,13 +921,149 @@ def reroute_uncovered(
     if not spare:
         return selected, []
 
+    # ── 2B-2: scope compatibility of substitutes ────────────────────────────
+    # A regional partition must never answer a company-wide question merely
+    # because its date coverage is better. With classification facts present,
+    # a substitute must be scope-compatible; an incompatible one is SKIPPED,
+    # and a convicted table with no compatible spare keeps the ORIGINAL
+    # selection (the never-dropped-without-replacement invariant) — the
+    # existing coverage disclosure carries the message, and the scope gate
+    # (2B-3) is the enforcement layer. Facts absent → behavior unchanged.
+    def _scope_compatible(name: str) -> bool:
+        if classification_facts is None:
+            return True
+        f = classification_facts.get(name) or {}
+        ds = f.get("dataset_scope")
+        asked_value = str((question_scope or {}).get("value") or "").strip().lower()
+        if asked_value:
+            if ds in (None, "global"):
+                return True
+            pv = str(f.get("partition_value") or "").strip().lower()
+            return pv == asked_value
+        # Universal (company-wide) question: only global or unknown-scope
+        # datasets may substitute — a partition is never scope-compatible.
+        return ds is None or ds == "global"
+
+    skipped_scope: list[str] = []
+
     out: list[str] = []
     swaps: list[tuple[str, str]] = []
     for name in selected:
         if spare and _ends_before_window(name):
-            replacement = spare.pop(0).table_name
+            replacement = None
+            for idx, cand in enumerate(spare):
+                if _scope_compatible(cand.table_name):
+                    replacement = spare.pop(idx).table_name
+                    break
+            if replacement is None:
+                skipped_scope.append(name)
+                logger.warning(
+                    "reroute: table %r needs replacement but no "
+                    "scope-compatible candidate exists — keeping it and "
+                    "disclosing rather than silently swapping scope",
+                    name,
+                )
+                out.append(name)
+                continue
             swaps.append((name, replacement))
             out.append(replacement)
         else:
             out.append(name)
+    if skipped_scope:
+        # Reader-usable sentence (concern 3): the note below reaches the SQL
+        # prompt; this one must reach the disclosure channel the caller owns.
+        res.scope_refusals.append(
+            "For "
+            + ", ".join(sorted(set(skipped_scope)))
+            + " a fresher replacement covering the requested period exists "
+            "only for a different data partition, so no substitution was "
+            "made; figures from the original table may not match the scope "
+            "the question asked about."
+        )
+        try:
+            res.notes.append(
+                "scope: no scope-compatible replacement for "
+                + ", ".join(skipped_scope)
+                + " — selection unchanged rather than cross-scope swapped"
+            )
+        except Exception:  # notes list is best-effort
+            pass
     return (out or selected), swaps
+
+
+def scope_disclosure_sentence(
+    selected: list[str],
+    facts: dict,
+    question_scope: dict | None,
+) -> str:
+    """The user-facing scope sentence for the FINAL selection (concern 3).
+
+    Pure. Built from the same ``effective_classification`` facts the ranking
+    used, so what it says is what the pipeline actually knew:
+
+    * a question that names a partition but draws on a DIFFERENT confirmed
+      partition gets a mismatch sentence;
+    * a universal (company-wide) question drawing on confirmed partition
+      datasets gets a "may not represent the whole" sentence;
+    * a universal question drawing on a ``partition_family`` dataset (family
+      shape detected, key NOT identified) gets an uncertainty sentence —
+      per the reviewer's table: probable partition must not silently claim
+      completeness, but an unverified guess must never be stated as fact.
+
+    Unknown or absent scope produces nothing: missing evidence must not read
+    as either safe or unsafe (concern 1 — unknown ≠ global, in both
+    directions), and a VERIFIED-global dataset among the selection makes
+    completeness achievable, so no uncertainty is claimed for it. Returns ""
+    when there is nothing to disclose.
+    """
+    if not selected or not facts:
+        return ""
+    asked = str((question_scope or {}).get("value") or "").strip().lower()
+    mismatches: list[str] = []
+    partitions: list[str] = []
+    families: list[str] = []
+    has_global = any(
+        str((facts.get(name) or {}).get("dataset_scope") or "") == "global"
+        for name in selected
+    )
+    for name in selected:
+        f = facts.get(name) or {}
+        ds = str(f.get("dataset_scope") or "")
+        if not ds:
+            continue
+        pv = str(f.get("partition_value") or "").strip()
+        if asked:
+            if ds.startswith("partition:") and pv and pv.lower() != asked:
+                mismatches.append(f"{name} holds {pv or 'a different'} data")
+        elif ds.startswith("partition:"):
+            if name not in partitions:
+                partitions.append(name)
+        elif ds == "partition_family" and not has_global:
+            if name not in families:
+                families.append(name)
+    if mismatches:
+        return (
+            "Note: the question asks about "
+            f"{asked!r}, but the answer draws on "
+            + " and ".join(sorted(set(mismatches)))
+            + "; those figures do not match the scope asked about."
+        )
+    parts: list[str] = []
+    if partitions:
+        parts.append(
+            "the answer draws on " + ", ".join(sorted(set(partitions)))
+            + ", which hold a single partition of the data rather than the "
+            "whole dataset"
+        )
+    if families:
+        parts.append(
+            "the answer draws on " + ", ".join(sorted(set(families)))
+            + ", whose scope could not be fully verified — they may hold "
+            "only part of the data"
+        )
+    if not parts:
+        return ""
+    return (
+        "Note: " + "; ".join(parts) +
+        " — figures may not represent the full scope asked about."
+    )

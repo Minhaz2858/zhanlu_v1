@@ -1277,3 +1277,36 @@ def test_an_unsupported_slot_may_not_be_a_non_metric():
     plan4 = _plan(non_metric_units=[{"unit": "x", "kind": "mystery"}])
     assert any("outside" in v for v in plan4.validate())
 
+
+def test_short_and_identifier_tokens_are_not_blindly_metrics():
+    """Audit B6: classify_unit rule 7 force-promoted ANY short / identifier-shaped
+    token to ``metric``, so generic words (``sum``, ``order_count``,
+    ``total_quantity``) became spurious "unsupported slots" and degraded the
+    prompt. They must resolve to a non-metric kind instead.
+
+    Real measure names the catalog DOES know (``实际发货数量``) and plausible
+    measure identifiers without a dimension/measure tell (``revenue``) must stay
+    ``metric`` — the refinement only culls operation/column-shaped tokens.
+    """
+    # Aggregation / SQL-structure verbs are operations, never figures.
+    assert g.classify_unit("sum") == "scaffolding"
+    assert g.classify_unit("count") == "scaffolding"
+    assert g.classify_unit("total") == "scaffolding"
+    assert g.classify_unit("avg") == "scaffolding"
+
+    # Dimension / column identifiers name entities, not measurements.
+    assert g.classify_unit("customer_name") == "grouping"
+    assert g.classify_unit("order_id") == "grouping"
+    assert g.classify_unit("product_type") == "grouping"
+
+    # Measure-shaped identifiers the catalog has no concept for are not
+    # *supported* metrics the disclosure layer can name — never an unsupported
+    # lie, never a metric.
+    assert g.classify_unit("order_count") == "unknown"
+    assert g.classify_unit("total_quantity") == "unknown"
+
+    # Sanity: genuine measure names are still metrics (intent of rule 7 preserved).
+    assert g.classify_unit("revenue") == "metric"
+    assert g.classify_unit("实际发货数量",
+                            descriptions=["发货数量"]) == "metric"
+

@@ -760,7 +760,7 @@ export default function ProjectDetail() {
                 <button
                   key={s.key}
                   onClick={onClick}
-                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${active ? 'bg-secondary text-foreground font-medium' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
                     }`}
                   aria-label={label}
                 >
@@ -769,7 +769,7 @@ export default function ProjectDetail() {
                     {label}
                   </span>
                   {count > 0 && (
-                    <span className={`rounded-full px-1.5 text-[10px] ${active ? 'bg-primary/20 text-primary' : 'bg-secondary text-muted-foreground'}`}>
+                    <span className={`rounded-full px-1.5 text-[10px] ${active ? 'bg-background text-foreground' : 'bg-secondary text-muted-foreground'}`}>
                       {count}
                     </span>
                   )}
@@ -802,7 +802,7 @@ export default function ProjectDetail() {
           >
             <header className="mb-4 flex items-center justify-between border-b border-border pb-3">
               <div className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
                   <Bot className="h-4 w-4" />
                 </span>
                 <h2 className="font-display text-base font-semibold text-foreground">
@@ -859,7 +859,7 @@ export default function ProjectDetail() {
           >
             <header className="mb-4 flex items-center justify-between border-b border-border pb-3">
               <div className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
                   <MessageSquare className="h-4 w-4" />
                 </span>
                 <h2 className="font-display text-base font-semibold text-foreground">
@@ -921,7 +921,7 @@ export default function ProjectDetail() {
           >
             <header className="mb-4 flex items-center justify-between gap-3 border-b border-border pb-3">
               <div className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
                   <Zap className="h-4 w-4" />
                 </span>
                 <h2 className="font-display text-base font-semibold text-foreground">
@@ -965,7 +965,7 @@ export default function ProjectDetail() {
           >
             <header className="mb-4 flex items-center justify-between border-b border-border pb-3">
               <div className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
                   <Brain className="h-4 w-4" />
                 </span>
                 <h2 className="font-display text-base font-semibold text-foreground">
@@ -1004,7 +1004,7 @@ export default function ProjectDetail() {
             <div className="flex items-start justify-between gap-3 pr-6">
               <div className="min-w-0">
                 <SheetTitle className="flex items-center gap-2 text-base">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
                     <Layers className="h-4 w-4" />
                   </span>
                   {t.projectDetail?.resourcesTitle || 'Resources'}
@@ -1097,7 +1097,7 @@ export default function ProjectDetail() {
         >
           <SheetHeader className="border-b border-border px-5 py-4">
             <SheetTitle className="flex items-center gap-2 text-base">
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
                 <Zap className="h-4 w-4" />
               </span>
               <span className="truncate">
@@ -1291,11 +1291,11 @@ function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true, proj
       {agents.map((a) => (
         <div
           key={a.id}
-          className="group relative flex items-start gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/40 cursor-pointer"
+          className="group relative flex items-start gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-foreground/25 cursor-pointer"
           onClick={() => onChat?.(a)}
         >
           <div
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground"
             onClick={(e) => { e.stopPropagation(); onChat?.(a); }}
           >
             <Bot className="h-4 w-4" />
@@ -1304,7 +1304,7 @@ function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true, proj
             className="min-w-0 flex-1"
             onClick={(e) => { e.stopPropagation(); onChat?.(a); }}
           >
-            <p className="truncate font-display text-sm text-foreground group-hover:text-primary">
+            <p className="truncate font-display text-sm text-foreground">
               {a.name}
             </p>
             <p className="line-clamp-2 mt-0.5 text-xs text-muted-foreground">
@@ -1332,7 +1332,7 @@ function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true, proj
                 const projModel = project?.llm_model_id ? llmModels.find((m) => m.id === project.llm_model_id) : null;
                 if (ownModel) {
                   return (
-                    <Badge variant="outline" className="border-primary/40 text-[10px] text-primary">
+                    <Badge variant="outline" className="border-border text-[10px] text-muted-foreground">
                       <Cpu className="mr-1 h-2.5 w-2.5" />
                       {ownModel.name}
                     </Badge>
@@ -1398,7 +1398,7 @@ function KbSection({ kbs, onRemove, lang, navigate, T, canEdit = true }) {
         return (
           <div
             key={k.id}
-            className="group relative flex items-start gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/40"
+            className="group relative flex items-start gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-foreground/25"
           >
             <div
               className={`flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg ${isDb
@@ -1413,7 +1413,7 @@ function KbSection({ kbs, onRemove, lang, navigate, T, canEdit = true }) {
               className="min-w-0 flex-1 cursor-pointer"
               onClick={() => navigate(`/my-space/kb/${k.id}`)}
             >
-              <p className="truncate font-display text-sm text-foreground group-hover:text-primary">
+              <p className="truncate font-display text-sm text-foreground">
                 {k.name}
               </p>
               <p className="min-w-0 break-all text-[11px] text-muted-foreground">
@@ -1478,7 +1478,7 @@ function ConversationsSection({ conversations, lang, T, onOpenConv }) {
             className="group flex w-full items-center gap-3 rounded-md border border-transparent px-2 py-1.5 text-left transition-colors hover:border-border hover:bg-secondary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
             title={title}
           >
-            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary group-hover:bg-primary/15">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
               <Bot className="h-3.5 w-3.5" />
             </div>
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
@@ -1581,11 +1581,11 @@ function TaskCard({ task, isEn, T, lang, onClick }) {
           onClick?.();
         }
       }}
-      className="group flex cursor-pointer flex-col items-stretch gap-3 rounded-lg border border-border bg-background p-4 text-left transition-all hover:border-primary/40 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+      className="group flex cursor-pointer flex-col items-stretch gap-3 rounded-lg border border-border bg-background p-4 text-left transition-all hover:border-foreground/25 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
     >
       {/* Compact metadata header */}
       <div className="flex w-full items-center gap-3 border-b border-border/60 pb-3">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
           <Zap className="h-4 w-4" />
         </span>
         <div className="min-w-0 flex-1">
@@ -1599,7 +1599,7 @@ function TaskCard({ task, isEn, T, lang, onClick }) {
               </span>
             )}
             {task.llm_informed_tick && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0 text-[10px] font-medium text-primary" title={T('每次执行前由智能体生成执行简报', 'Agent receives a briefing before each scheduled run')}>
+              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-1.5 py-0 text-[10px] font-medium text-muted-foreground" title={T('每次执行前由智能体生成执行简报', 'Agent receives a briefing before each scheduled run')}>
                 <Sparkles className="h-2.5 w-2.5" />
                 {T('智能调度', 'LLM-informed')}
               </span>
@@ -1639,7 +1639,7 @@ function TaskCard({ task, isEn, T, lang, onClick }) {
             : T('尚未运行', 'Never run')}
         </span>
         {history.length > 1 && (
-          <span className="inline-flex items-center gap-1 font-medium text-primary transition-transform group-hover:translate-x-0.5">
+          <span className="inline-flex items-center gap-1 font-medium text-muted-foreground transition-transform group-hover:translate-x-0.5">
             {T('查看历史', 'View history')} ({history.length} {T('次', 'runs')})
             <ChevronRight className="h-3 w-3" />
           </span>
@@ -1845,7 +1845,7 @@ function MemorySection({ memories, lang, T, canEdit = true, onAdd, onUpdate, onD
                           onClick={() => onUpdate(m.id, { pinned: !m.pinned })}
                           className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
                             m.pinned
-                              ? 'bg-primary/10 text-primary'
+                              ? 'bg-secondary text-foreground'
                               : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
                           }`}
                           title={m.pinned ? T('取消置顶', 'Unpin') : T('置顶', 'Pin')}
@@ -1876,7 +1876,7 @@ function MemorySection({ memories, lang, T, canEdit = true, onAdd, onUpdate, onD
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     {m.pinned && (
-                      <Badge variant="outline" className="border-primary/40 text-[10px] text-primary">
+                      <Badge variant="outline" className="border-border text-[10px] text-muted-foreground">
                         <Pin className="mr-1 h-2.5 w-2.5" />
                         {T('已置顶', 'Pinned')}
                       </Badge>

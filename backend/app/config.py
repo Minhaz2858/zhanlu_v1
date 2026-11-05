@@ -2233,6 +2233,21 @@ class Settings(BaseSettings):
     # provider. The dispatcher acquires an asyncio.Semaphore(N) around every
     # spawned executor (both scheduled fires and manual triggers).
     AUTOMATION_MAX_CONCURRENCY: int = 3
+
+    # Automation creation cutover (TS §4.1): when ON (default), chat creation
+    # goes through the Control Plane draft path (propose_automation /
+    # update_automation_draft / confirm) and the legacy create_automation /
+    # update_automation CRUD tools REFUSE (no direct ACTIVE task insert, no
+    # status activation). Set false only as a rollback to legacy behavior.
+    AUTOMATION_CREATION_V2: bool = True
+
+    # R6 Phase 4 (§6.5 stage 2, default OFF): run the automation agent
+    # harness in a SUBPROCESS over the JSONL control pipe instead of the
+    # in-proc thread. The parent (dispatcher/executor process) keeps ALL
+    # automation-table ownership — leases, fencing, events, finalization;
+    # the child only runs the harness (F-22 Option C).
+    AUTOMATION_SUBPROCESS_MODE: bool = False
+
     SANDBOX_IMAGE_PYTHON: str = "zhanlu-sandbox-python:latest"
     SANDBOX_IMAGE_OFFICE: str = "zhanlu-sandbox-office:latest"
     SANDBOX_IMAGE_WEBAPP: str = "zhanlu-sandbox-webapp:latest"

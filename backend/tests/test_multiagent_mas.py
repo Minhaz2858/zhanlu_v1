@@ -58,8 +58,12 @@ async def test_batch_fanout_is_bounded(db, monkeypatch):
         return {"success": True, "response": f"done: {task}", "iterations": 1}
 
     monkeypatch.setattr(dt, "_run_sub_agent", fake_sub)
+    # P1 signature: _delegate_batch takes normalized {task, agent_name,
+    # max_iterations} dicts (heterogeneous agents per item).
     result = await dt._delegate_batch(
-        [f"task-{i}" for i in range(6)], "explore", db, "u1", 5, None, None)
+        [{"task": f"task-{i}", "agent_name": "explore", "max_iterations": 5}
+         for i in range(6)],
+        db, "u1", None, None)
     assert result["count"] == 6
     assert result["success"] is True
     assert concurrent["max"] <= 2, "fan-out must respect DELEGATE_MAX_CONCURRENT"

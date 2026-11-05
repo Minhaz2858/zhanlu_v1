@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
+import { appParams } from '@/lib/app-params';
+import { authFetch } from '@/api/authFetch';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useAuth } from '@/lib/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -103,30 +105,31 @@ export default function ProjectsView({ scope = null }) {
     }
   }
 
-  // Per-project counts (agents, KBs, files). Filtered by project_id
-  // (the new FK column) with a graceful fallback to the legacy
-  // `project` name string for older backends.
+  // Per-project counts (agents, KBs, files). KB count uses the project-KB
+  // listing endpoint, which resolves home ∪ legacy-name ∪ shared links
+  // (multi-project sharing, 2026-10-31) — a plain project_id filter would
+  // miss linked KBs. Agents/files keep the FK + legacy-name fallback.
   async function loadCounts(projs) {
     const next = {};
     await Promise.all(projs.map(async (p) => {
+      let kbCount = 0;
       try {
-        const [agents, kbs, files] = await Promise.all([
+        const res = await authFetch(
+          `/api/apps/${appParams.appId}/projects/${p.id}/knowledge-bases?limit=500`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          kbCount = (Array.isArray(data) ? data : data.data || data.items || []).length;
+        }
+      } catch { /* fall through to 0 */ }
+      try {
+        const [agents, files] = await Promise.all([
           base44.entities.AgentApp.filter({ project_id: p.id }, '-updated_date', 1),
-          base44.entities.KnowledgeBase.filter({ project_id: p.id }, '-updated_date', 1),
           base44.entities.UserFile.filter({ project_id: p.id }, '-updated_date', 1),
         ]);
-        next[p.id] = { agents: agents.length, kb: kbs.length, files: files.length };
+        next[p.id] = { agents: agents.length, kb: kbCount, files: files.length };
       } catch {
-        try {
-          const [agents, kbs, files] = await Promise.all([
-            base44.entities.AgentApp.filter({ project: p.name }, '-updated_date', 1),
-            base44.entities.KnowledgeBase.filter({ project: p.name }, '-updated_date', 1),
-            base44.entities.UserFile.filter({ project: p.name }, '-updated_date', 1),
-          ]);
-          next[p.id] = { agents: agents.length, kb: kbs.length, files: files.length };
-        } catch {
-          next[p.id] = { agents: 0, kb: 0, files: 0 };
-        }
+        next[p.id] = { agents: 0, kb: kbCount, files: 0 };
       }
     }));
     setCounts(next);
@@ -365,6 +368,15 @@ export default function ProjectsView({ scope = null }) {
               </span>
             </button>
           )}
+          <Button
+            size="sm"
+            onClick={() => setCreateOpen(true)}
+            className="gap-1.5 sm:ml-auto"
+            aria-label={isEn ? 'Create new project' : '新建项目'}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {isEn ? 'New Project' : '新建项目'}
+          </Button>
         </div>
       )}
 
@@ -379,7 +391,12 @@ export default function ProjectsView({ scope = null }) {
           onCreate={() => setCreateOpen(true)}
         />
       ) : visible.length === 0 ? (
-        <NoResults query={query} isEn={isEn} onClear={() => setQuery('')} />
+        <NoResults
+          query={query}
+          isEn={isEn}
+          onClear={() => setQuery('')}
+          onCreate={() => setCreateOpen(true)}
+        />
       ) : (
         <div className="space-y-8">
           {/* ── COMPANY PROJECTS ── */}
@@ -844,16 +861,24 @@ function EmptyState({ isEn, onCreate }) {
  * NoResults — when search returns 0 hits. Smaller, focused
  * affordance to clear the query.
  */
-function NoResults({ query, isEn, onClear }) {
+function NoResults({ query, isEn, onClear, onCreate }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/60 bg-card/40 px-6 py-12 text-center">
       <Search className="mb-3 h-6 w-6 text-muted-foreground" />
       <h3 className="font-display text-sm font-medium text-foreground">
         {isEn ? `No projects match "${query}"` : `未找到与"${query}"匹配的项目`}
       </h3>
-      <Button variant="ghost" size="sm" onClick={onClear} className="mt-2 text-primary">
-        {isEn ? 'Clear search' : '清除搜索条件'}
-      </Button>
+      <div className="mt-3 flex items-center gap-2">
+        <Button variant="ghost" size="sm" onClick={onClear} className="text-primary">
+          {isEn ? 'Clear search' : '清除搜索条件'}
+        </Button>
+        {onCreate && (
+          <Button size="sm" onClick={onCreate} className="gap-1.5">
+            <Plus className="h-3.5 w-3.5" />
+            {isEn ? 'New Project' : '新建项目'}
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Send, Square, X, Wrench, Bot, Folder, FileText, FileSpreadsheet, Image as ImageIcon, File, Database, Search } from 'lucide-react';
+import { Send, Square, X, Wrench, Bot, Folder, Building2, FileText, FileSpreadsheet, Image as ImageIcon, File, Database, Search } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { isSystemAgent } from '@/lib/systemAgents';
 import { isUngroupedProjectName } from '@/lib/projectGrouping';
@@ -69,6 +69,8 @@ export default function ChatInput({
   // existing by-session poll.
   onStopAutomation,
   pendingProject, onClearProject,
+  departments = [], pendingDepartment = null, onClearDepartment,
+  onSelectDepartment,
   inheritedKbCount = 0,
   pendingProjectId = null,
   researchConfig = null,
@@ -263,6 +265,9 @@ export default function ChatInput({
                 onSelectAgent={onSelectAgent}
                 onSelectWorkflow={onSelectWorkflow}
                 onSelectProject={onSelectProject}
+                onSelectDepartment={onSelectDepartment}
+                departments={departments}
+                activeDepartment={pendingDepartment}
                 activeSkill={activeSkill}
                 activeAgent={activeAgent}
                 activeProject={pendingProject}
@@ -284,7 +289,7 @@ export default function ChatInput({
               {pendingProject && !isUngroupedProjectName(pendingProject) && (
                 <span
                   title={lang === 'en' ? `New chats will be created in "${pendingProject}"` : `新聊天将创建于"${pendingProject}"`}
-                  className="inline-flex max-w-[14rem] items-center gap-1.5 rounded-full border border-amber-500/50 bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-300"
+                  className="inline-flex max-w-[14rem] items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-2.5 py-1 text-xs font-medium text-foreground"
                 >
                   <Folder className="h-3 w-3 shrink-0" />
                   <span className="truncate">{pendingProject}</span>
@@ -305,7 +310,7 @@ export default function ChatInput({
                           : `正在从"${pendingProject}"继承 ${inheritedKbCount} 个数据源`
                       }
                       data-testid="inherited-kb-badge"
-                      className="inline-flex items-center gap-1 rounded-full border border-amber-700/40 bg-amber-700/10 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums"
+                      className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-muted-foreground"
                     >
                       <Database className="h-2.5 w-2.5" />
                       {inheritedKbCount}
@@ -315,7 +320,7 @@ export default function ChatInput({
                     <button
                       type="button"
                       onClick={() => onClearProject()}
-                      className="shrink-0 rounded-full p-0.5 transition-colors hover:bg-amber-500/20"
+                      className="shrink-0 rounded-full p-0.5 transition-colors hover:bg-secondary"
                       aria-label={lang === 'en' ? `Clear project (return to default)` : `清除项目（返回默认）`}
                     >
                       <X className="h-3 w-3" />
@@ -323,14 +328,39 @@ export default function ChatInput({
                   )}
                 </span>
               )}
+              {/* Department chip (P2 orchestration): scoped via the +
+                  menu. Unlike the project chip, a department is a pure
+                  routing hint for the general assistant's specialist
+                  discovery — it never gates data access — so it renders
+                  in a neutral blue, not the amber used for data-bearing
+                  project context. */}
+              {pendingDepartment && (
+                <span
+                  title={lang === 'en' ? `Orchestrating within the "${pendingDepartment}" department — specialists there are preferred, data access is unchanged` : `编排范围限定为"${pendingDepartment}"部门 — 优先该部门专家，数据权限不变`}
+                  className="inline-flex max-w-[14rem] items-center gap-1.5 rounded-full border border-sky-500/50 bg-sky-500/15 px-2.5 py-1 text-xs font-medium text-sky-700 dark:text-sky-300"
+                >
+                  <Building2 className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{pendingDepartment}</span>
+                  {onClearDepartment && (
+                    <button
+                      type="button"
+                      onClick={() => onClearDepartment()}
+                      className="shrink-0 rounded-full p-0.5 transition-colors hover:bg-sky-500/20"
+                      aria-label={lang === 'en' ? 'Clear department' : '清除部门'}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </span>
+              )}
               {activeAgent && !isSystemAgent(activeAgent) && (
-                <span className="inline-flex max-w-[14rem] items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+                <span className="inline-flex max-w-[14rem] items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-2.5 py-1 text-xs font-medium text-foreground">
                   <Bot className="h-3 w-3 shrink-0" />
                   <span className="truncate">{activeAgent.name}</span>
                   <button
                     type="button"
                     onClick={onRemoveAgent}
-                    className="shrink-0 transition-colors hover:text-primary/70"
+                    className="shrink-0 transition-colors hover:text-foreground"
                     aria-label={lang === 'en' ? 'Remove agent' : '移除 Agent'}
                   >
                     <X className="h-3 w-3" />
@@ -352,7 +382,7 @@ export default function ChatInput({
                     type="button"
                     onClick={() => setPreviewIdx(i)}
                     title={lang === 'en' ? 'Preview file' : '预览文件'}
-                    className="inline-flex max-w-[10rem] items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-2.5 py-1 text-xs text-foreground transition-colors hover:border-primary/40 hover:bg-secondary"
+                    className="inline-flex max-w-[10rem] items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-2.5 py-1 text-xs text-foreground transition-colors hover:border-foreground/25 hover:bg-secondary"
                   >
                     <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
                     <span className="truncate">{a.name}</span>

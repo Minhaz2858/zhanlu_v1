@@ -312,6 +312,7 @@ def should_force_create_file(
     dashboard_forced: bool = False,
     pptx_forced: bool = False,
     output_format: str | None = None,
+    automation_setup: bool = False,
 ) -> bool:
     """T-3 window forcing decision.
 
@@ -319,8 +320,17 @@ def should_force_create_file(
     file artifact exists yet + ``create_artifact`` is available + the
     dashboard/pptx guard is NOT forcing + the loop is within
     ``FILE_FORCE_WINDOW`` of the cap.
+
+    ``automation_setup`` (lifecycle separation, 2026-11-03): True when the
+    turn is an automation CONFIGURATION turn (the conversation rebound to
+    automation_agent on the setup header). A file-format keyword in such a
+    message is the automation DEFINITION's output_format — it controls the
+    format of future EXECUTION deliverables and must never force a chat
+    artifact now.
     """
     if not getattr(settings, "FILE_TURN_GUARD_ENABLED", False):
+        return False
+    if automation_setup:
         return False
     if dashboard_forced or pptx_forced or not has_artifact_tool:
         return False

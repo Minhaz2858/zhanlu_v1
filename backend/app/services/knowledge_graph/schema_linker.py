@@ -66,10 +66,27 @@ def _resolve_table_allowlist_for_kb(db: Session, kb_ids: list[str]) -> list[str]
             # matching on it alone silently disables the allowlist.)
             bound = set(app.knowledge_bases or [])
             if app.project_id:
+                # Home project OR legacy name OR explicit share link
+                # (multi-project sharing, 2026-10-31).
+                from sqlalchemy import or_ as _or
+
+                from app.services.project_kb_membership import (
+                    project_kb_link_subquery,
+                )
+
                 proj_kbs = (
                     db.query(KnowledgeBase.id)
                     .filter(
-                        KnowledgeBase.project_id == app.project_id,
+                        _or(
+                            KnowledgeBase.project_id == app.project_id,
+                            KnowledgeBase.id.in_(
+                                project_kb_link_subquery(
+                                    app.project_id,
+                                    org_id=getattr(app, "org_id", None),
+                                    app_id=getattr(app, "app_id", None),
+                                )
+                            ),
+                        ),
                         KnowledgeBase.is_deleted == False,  # noqa: E712
                     )
                     .all()
@@ -391,6 +408,8 @@ def _enrich_tables(db: Session, tables: list[dict], top_k: int) -> list[dict]:
                     "is_primary_key": c.is_primary_key,
                     "description_zh": c.description_zh,
                     "description_en": c.description_en,
+                    # P0-4: provenance feeds the [desc: ...] markers.
+                    "description_source": getattr(c, "description_source", None),
                     "semantic_type": getattr(c, "semantic_type", None),
                     "enum_values": getattr(c, "enum_values", None),
                     # The measured distribution (slice 2). Rendered into the
@@ -511,6 +530,13 @@ def _render_table_chunk(t: dict, *, detail: str = "full") -> str:
         annotations: list[str] = []
         if c.get("description_zh"):
             annotations.append(str(c["description_zh"]))
+        elif c.get("description_en"):
+            annotations.append(str(c["description_en"]))
+        # P0-4: column-description provenance — visible next to the text it
+        # describes, so a guessed meaning can never impersonate a verified one.
+        _cprov = description_provenance_tag(c.get("description_source"))
+        if _cprov and (c.get("description_zh") or c.get("description_en")):
+            annotations.append(f"[desc: {_cprov}]")
         stype = c.get("semantic_type")
         unit = c.get("unit")
         if stype and stype not in ("unknown", "identifier"):
@@ -542,8 +568,15 @@ def _render_table_chunk(t: dict, *, detail: str = "full") -> str:
     # summed together with a per-month rollup).
     if t.get("grain"):
         chunk += f"  -- grain: {t['grain']}"
-    if t.get("description_zh"):
-        chunk += f"  -- {t['description_zh']}"
+    _table_desc = t.get("description_zh") or t.get("description_en")
+    if _table_desc:
+        chunk += f"  -- {_table_desc}"
+        # P0-4: table-description provenance, same rule as column level.
+        _tprov = t.get("description_provenance") or description_provenance_tag(
+            t.get("description_source")
+        )
+        if _tprov:
+            chunk += f" [desc: {_tprov}]"
     if t.get("row_count"):
         chunk += f"  -- ~{t['row_count']:,} rows"
     # Data-freshness marker (generic): a STALE table has no recent
@@ -558,6 +591,26 @@ def _render_table_chunk(t: dict, *, detail: str = "full") -> str:
             f"{_cov['max_date']}"
         )
     return chunk
+
+
+# ── description provenance (P0-4, 2026-10-30 audit D3) ─────────────────────
+# Descriptions come from four sources with very different trust: a human
+# curator, the connected database's own comments, and the indexer's LLM.
+# Until now the LLM saw them all as identical text. These tags make the
+# distinction survive into SQL generation — an inferred description must
+# NEVER read as verified knowledge.
+_DESCRIPTION_PROVENANCE_TAGS = {
+    "human": "human-verified",
+    "source_comment": "source-comment",
+    "llm": "ai-inferred",
+}
+
+
+def description_provenance_tag(source) -> str:
+    """Map a ``description_source`` value to its prompt-visible tag."""
+    if not source:
+        return ""
+    return _DESCRIPTION_PROVENANCE_TAGS.get(str(source).lower(), "")
 
 
 def _format_slice(
@@ -683,6 +736,11 @@ def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
             # table whose English description happened to be filled in.
             "description_zh": r.description_zh or "",
             "description_en": r.description_en or "",
+            # P0-4: provenance travels with the description so the selector
+            # knows whether it is reading verified knowledge or a guess.
+            "description_provenance": description_provenance_tag(
+                getattr(r, "description_source", None)
+            ),
             "row_count": r.row_count,
             "date_column": cov.get("date_column", ""),
             "max_date": cov.get("max_date", ""),
@@ -780,6 +838,11 @@ def _toc_line(t: dict, *, compact: bool = False) -> str:
         parts.append(f"~{rows_n:,} rows")
     if desc and not compact:
         parts.append(desc[:60])
+        # P0-4: provenance rides with the description on the selector line —
+        # an ai-inferred guess must never read like verified knowledge.
+        _prov = t.get("description_provenance")
+        if _prov:
+            parts.append(f"desc:{_prov}")
     if role and role != "unknown" and not compact:
         parts.append(f"role={role}")
     # P-SV: grain on the selector line — a compact but decisive hint that
@@ -970,6 +1033,8 @@ def get_selected_tables_ddl(
             "row_count": m.row_count,
             "description_zh": m.description_zh,
             "description_en": m.description_en,
+            # P0-4: provenance feeds the DDL chunk's [desc: ...] markers.
+            "description_source": getattr(m, "description_source", None),
             "coverage_json": m.coverage_json or {},
             "domain_name": getattr(m, "domain_name", None),
             "rrf_score": 1.0,
@@ -981,6 +1046,8 @@ def get_selected_tables_ddl(
                     "is_primary_key": c.is_primary_key,
                     "description_zh": c.description_zh,
                     "description_en": c.description_en,
+                    # P0-4: provenance feeds the [desc: ...] markers.
+                    "description_source": getattr(c, "description_source", None),
                     "semantic_type": getattr(c, "semantic_type", None),
                     "enum_values": getattr(c, "enum_values", None),
                     # The measured distribution (slice 2). Rendered into the

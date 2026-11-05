@@ -1937,6 +1937,12 @@ def _persist_relations(db: Session, kb_id: str, tables: list[dict]) -> None:
                     relation_type="FK",
                     source_columns=[fk.get("column", "")],
                     target_columns=[fk.get("ref_column", "")],
+                    # P0-6: a declared FK is by definition many(child)→
+                    # one(parent) — stamp it so the execution gate's fanout
+                    # check never has to guess (engine-agnostic: any
+                    # connector that exposes declared FKs).
+                    source_cardinality="many",
+                    target_cardinality="one",
                     confidence=1.0,
                     description=f"{t['table_name']}.{fk.get('column')} → {ref_table}.{fk.get('ref_column')}",
                 )
@@ -1959,6 +1965,53 @@ def _persist_join_edges(db: Session, kb_id: str, tables: list[dict]) -> None:
     name_to_id = {t["table_name"]: t.get("_meta_id") for t in tables}
     added = 0
     skipped = 0
+
+    def _edge_cardinality(e: dict) -> tuple[str | None, str | None]:
+        """P0-6: derive (source, target) cardinality from structural signals.
+
+        Uses the join columns' key roles (PRI/UNI/MUL) and the indexed row
+        counts via ``join_cardinality.derive_cardinality`` — generic on every
+        engine; returns (None, None) when the evidence is insufficient, which
+        the fanout consumer treats as unknown, never as safe.
+        """
+        from app.services.knowledge_graph.join_cardinality import (
+            derive_cardinality,
+        )
+
+        src_id = name_to_id.get(e["source_table"])
+        tgt_id = name_to_id.get(e["target_table"])
+        roles: dict[tuple[str, str], list[str]] = {}
+        counts: dict[str, Any] = {}
+        try:
+            for tid in (src_id, tgt_id):
+                if not tid:
+                    continue
+                meta = db.get(KBTableMeta, tid)
+                if meta is not None:
+                    counts[tid] = meta.row_count
+                cols = (
+                    db.query(KBColumnMeta)
+                    .filter(KBColumnMeta.table_meta_id == tid)
+                    .all()
+                )
+                for c in cols:
+                    roles.setdefault(tid, [])
+                    role = str(getattr(c, "key_role", "") or "").upper()
+                    name_l = str(c.column_name or "").lower()
+                    if role and name_l in {s.lower() for s in (
+                        e["source_columns"] if tid == src_id else e["target_columns"]
+                    )}:
+                        roles[tid].append(role)
+        except Exception:  # pragma: no cover — metadata optional
+            return (None, None)
+        return derive_cardinality(
+            e.get("kind"),
+            source_key_roles=roles.get(src_id, []),
+            target_key_roles=roles.get(tgt_id, []),
+            source_row_count=counts.get(src_id),
+            target_row_count=counts.get(tgt_id),
+        )
+
     for e in edges:
         src_id = name_to_id.get(e["source_table"])
         tgt_id = name_to_id.get(e["target_table"])
@@ -1999,9 +2052,14 @@ def _persist_join_edges(db: Session, kb_id: str, tables: list[dict]) -> None:
             existing.source_columns = e["source_columns"]
             existing.target_columns = e["target_columns"]
             existing.confidence = e["confidence"]
+            _src_card, _tgt_card = _edge_cardinality(e)
+            if _src_card and _tgt_card:
+                existing.source_cardinality = _src_card
+                existing.target_cardinality = _tgt_card
             existing.description = json.dumps(e.get("evidence", {}), ensure_ascii=False)
             added += 1
         else:
+            _src_card, _tgt_card = _edge_cardinality(e)
             db.add(KBTableRelation(
                 id=str(uuid.uuid4()),
                 kb_id=kb_id,
@@ -2010,6 +2068,8 @@ def _persist_join_edges(db: Session, kb_id: str, tables: list[dict]) -> None:
                 relation_type=e["kind"],
                 source_columns=e["source_columns"],
                 target_columns=e["target_columns"],
+                source_cardinality=_src_card,
+                target_cardinality=_tgt_card,
                 confidence=e["confidence"],
                 description=json.dumps(e.get("evidence", {}), ensure_ascii=False),
             ))

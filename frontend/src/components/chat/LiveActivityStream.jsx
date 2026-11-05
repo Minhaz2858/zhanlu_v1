@@ -30,14 +30,15 @@
  *   reasoning    — model chain-of-thought (optional)
  *   isStreaming  — true while the SSE turn is still live
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Sparkles, Loader2, Check, ShieldCheck, AlertTriangle, XCircle,
-  ListChecks, ChevronDown, ChevronUp, Brain, Timer, Rows3, FileStack,
-  Plug, PlugZap, Database, ClipboardList, Search, Table2,
+  ListChecks, ChevronDown, ChevronUp, Timer, Rows3, FileStack,
+  Plug, PlugZap, Database, ClipboardList, Target,
 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { pickEvents } from './LiveActivityStream.legacyAdapter';
+import { TimelineCollapseContext } from './TaskExecutionTimeline';
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -335,16 +336,77 @@ export function collapsedChipSummary(ev) {
   return parts.join(' · ');
 }
 
-function mergeEvents(events) {
+/**
+ * P2 Phase 4 — duplicate-event prevention + deterministic ordering.
+ *
+ * SSE frames may be redelivered (reconnect) or briefly out of order. We dedupe
+ * by event `id`, keeping the LAST occurrence (later frames such as
+ * `subagent_returned` carry merged lifecycle data). Id-less frames are deduped
+ * by a stable type+params key so identical re-emissions don't double-render.
+ * The result is ordered by `ts` (ISO) with `id` as a stable tiebreak, so the
+ * pairing loops in `mergeEvents` never mis-pair started/finished or
+ * invoked/returned events.
+ */
+export function dedupeAndSortEvents(events) {
+  if (!Array.isArray(events)) return [];
+  // Terminal event types: once seen for an operation identity, a later
+  // (stale / replayed) non-terminal frame must NOT overwrite them — this is
+  // the "Running vs Cancelled" inconsistency guard (unified timeline,
+  // 2026-11-01). Terminal states are sticky.
+  const TERMINAL_TYPES = new Set([
+    'tool_call_finished', 'tool_call_failed', 'subagent_returned',
+    'agent_completed', 'agent_failed', 'plan_step_completed',
+    'finalize_done', 'verify_passed', 'verify_failed',
+  ]);
+  const byKey = new Map();
+  for (const ev of events) {
+    if (!ev || typeof ev !== 'object') continue;
+    const id = ev.id != null ? String(ev.id) : null;
+    const key = id ?? `no-id:${ev.type}:${JSON.stringify(ev.params || {})}`;
+    const existing = byKey.get(key);
+    if (
+      existing &&
+      TERMINAL_TYPES.has(existing.type) &&
+      !TERMINAL_TYPES.has(ev.type)
+    ) {
+      continue; // sticky terminal — never regress to running
+    }
+    byKey.set(key, ev); // last wins
+  }
+  const list = Array.from(byKey.values());
+  list.sort((a, b) => {
+    const ta = a.ts ? Date.parse(a.ts) : 0;
+    const tb = b.ts ? Date.parse(b.ts) : 0;
+    if (ta !== tb) return ta - tb;
+    return String(a.id ?? '').localeCompare(String(b.id ?? ''));
+  });
+  return list;
+}
+
+export function mergeEvents(events) {
   const out = [];
-  const openStarted = []; // stack of tool row indices awaiting finish
+  // Unified timeline (2026-11-01): tool rows pair by OPERATION IDENTITY
+  // (tool_name), not by a blind LIFO stack — with concurrent same-name
+  // tools a blind pop mispairs, and a replayed start would become a phantom
+  // duplicate running row. One operation = one row.
+  const openByName = new Map(); // tool_name -> stack of row indices
   const openInvoked = []; // stack of subagent row indices awaiting return
-  for (const ev of events || []) {
+  const _toolKey = (ev) =>
+    ev.params?.tool_name || ev.params?.tool_label || '';
+  // P2 Phase 4: duplicate-event prevention + deterministic ordering before
+  // pairing. Out-of-order / redelivered frames must never mis-pair
+  // tool_call_started/finished or subagent_invoked/returned.
+  const evs = dedupeAndSortEvents(events);
+  for (const ev of evs) {
     if (ev.type === 'tool_call_started') {
       out.push({ ...ev, status: 'running' });
-      openStarted.push(out.length - 1);
+      const k = _toolKey(ev);
+      if (!openByName.has(k)) openByName.set(k, []);
+      openByName.get(k).push(out.length - 1);
     } else if (ev.type === 'tool_call_finished' || ev.type === 'tool_call_failed') {
-      const idx = openStarted.pop();
+      const k = _toolKey(ev);
+      const stack = openByName.get(k);
+      const idx = stack && stack.length ? stack.pop() : null;
       if (idx != null) {
         out[idx] = {
           ...out[idx],
@@ -353,6 +415,8 @@ function mergeEvents(events) {
         };
         // A data_offer may follow in the stream — wait until next iter to attach.
       } else {
+        // Terminal without a seen start (dropped frame) — still render the
+        // honest terminal state, never a fabricated running row.
         out.push({
           ...ev,
           status: ev.type === 'tool_call_finished' ? 'done' : 'failed',
@@ -363,6 +427,9 @@ function mergeEvents(events) {
       openInvoked.push(out.length - 1);
     } else if (ev.type === 'subagent_returned') {
       const idx = openInvoked.pop();
+      // Chat-experience repair: outcome=interrupted (backend terminal-event
+      // guarantee) is honest — the delegation did NOT complete.
+      const retStatus = ev.params?.outcome === 'interrupted' ? 'interrupted' : 'done';
       if (idx != null) {
         // Preserve the invoked row's params (target badge) and append the
         // returned row's metadata (duration, row_count) into them so the
@@ -371,10 +438,10 @@ function mergeEvents(events) {
           ...out[idx],
           ...ev,
           params: { ...(out[idx].params || {}), ...(ev.params || {}) },
-          status: 'done',
+          status: retStatus,
         };
       } else {
-        out.push({ ...ev, status: 'done' });
+        out.push({ ...ev, status: retStatus });
       }
     } else if (ev.type === 'data_offer') {
       // Attach inline preview to the most recent matching tool row (last
@@ -396,6 +463,12 @@ function mergeEvents(events) {
       // Plan checklist metadata — rendered by PlanChecklist, not as a row.
       // Skipped here so persisted live_events don't double-render the plan
       // as both a checklist and a generic feed row.
+    } else if (ev.type === 'plan_meta') {
+      // Phase 1.5: ONE compact plan summary row per turn. A later (richer)
+      // emission replaces the earlier one instead of stacking duplicates.
+      const idx = out.findIndex((r) => r.type === 'plan_meta');
+      if (idx >= 0) out[idx] = { ...ev, status: 'done' };
+      else out.push({ ...ev, status: 'done' });
     } else if (ev.type === 'finalize_done') {
       // Completion marker for the finalize phase: flip EVERY still-running
       // finalize_started / artifact_progress row to done (the backend can
@@ -411,6 +484,19 @@ function mergeEvents(events) {
     }
   }
   return out;
+}
+
+/**
+ * Unified timeline (2026-11-01): end-of-stream reconciliation for residual
+ * running rows. The agent execution tree reports orphans as CANCELLED — the
+ * live feed must use the SAME terminal vocabulary (the old 'interrupted'
+ * label was the "Running here, Cancelled there" inconsistency). A real
+ * failure keeps 'failed'; cancellation is never masked as failure.
+ */
+export function finalizeResidualRows(rows) {
+  return (rows || []).map((r) =>
+    r && r.status === 'running' ? { ...r, status: 'cancelled' } : r,
+  );
 }
 
 /**
@@ -438,11 +524,21 @@ function applyRetryIndent(rows) {
 }
 
 /** Resolve a human label for an event from the localized template map. */
-function resolveLabel(ev, le) {
+function resolveLabel(ev, le, isEn = true) {
   const p = ev.params || {};
   if (ev.type === 'phase_enter') {
     const state = String(ev.label_key || '').replace('phase_enter.', '') || 'working';
     return le.phase_enter?.[state] || ev.label_key || 'Working';
+  }
+  if (ev.type === 'plan_meta') {
+    // Phase 1.5: compact plan summary — structured intent/strategy/risk
+    // only. NEVER renders chain-of-thought or free text (params are
+    // server-scrubbed keys, not model prose).
+    return planMetaLabel(p, isEn);
+  }
+  if (ev.type === 'failure_classified' || ev.type === 'execution_decision') {
+    // Phase 2.8: recovery observability — structured fields only.
+    return recoveryEventLabel(ev, isEn) || ev.label_key || ev.type;
   }
   let tmpl = le[ev.label_key];
   if (ev.label_key === 'tool_call_finished' && !('row_count' in p)) {
@@ -450,6 +546,38 @@ function resolveLabel(ev, le) {
   }
   if (!tmpl) tmpl = ev.label_key || ev.type;
   return formatTemplate(tmpl, p);
+}
+
+/**
+ * Phase 1.5 (Gap 3) — compact one-line plan_meta summary.
+ * Exported for tests. Only known keys, only counts for list fields.
+ */
+export function planMetaLabel(p = {}, isEn = true) {
+  const bits = [];
+  if (p.intent_type) bits.push(String(p.intent_type).replace(/_/g, ' '));
+  if (p.execution_strategy) bits.push(String(p.execution_strategy).replace(/_/g, ' '));
+  if (p.risk_level) bits.push(`${p.risk_level} risk`);
+  const nCriteria = Array.isArray(p.acceptance_criteria) ? p.acceptance_criteria.length : 0;
+  if (nCriteria > 0) bits.push(`${nCriteria} ${isEn ? 'criteria' : '条标准'}`);
+  if (p.required_approvals) bits.push(isEn ? 'approval required' : '需审批');
+  return bits.length ? `Plan · ${bits.join(' · ')}` : 'Plan';
+}
+
+/**
+ * Phase 2.8 — compact recovery observability labels for `failure_classified`
+ * and `execution_decision` events. STRUCTURED server fields only — the
+ * scrubber already removed model-echoed identifiers upstream; any unexpected
+ * key (e.g. reasoning) is ignored, never rendered. Exported for tests.
+ */
+export function recoveryEventLabel(ev, isEn = true) {
+  const p = ev?.params || {};
+  const bits = [];
+  if (p.tool_label) bits.push(String(p.tool_label));
+  if (p.category) bits.push(String(p.category).replace(/_/g, ' '));
+  if (p.decision) bits.push(String(p.decision).replace(/_/g, ' '));
+  if (p.recovery) bits.push(String(p.recovery));
+  if (p.action) bits.push(String(p.action));
+  return bits.join(' · ');
 }
 
 /** Status metadata rendered on the right of each row. */
@@ -633,7 +761,13 @@ function PlanSummaryRow({ ev, le, isEn }) {
 function SubagentRow({ ev, le, isEn, t }) {
   const status = ev.status || 'done';
   const Icon = status === 'running' ? Plug : PlugZap;
-  const colorCls = status === 'running' ? 'text-blue-500' : 'text-emerald-500';
+  // Chat-experience repair: interrupted delegations are honest amber, not
+  // fake-green "done" and not an eternal blue spinner.
+  const colorCls = status === 'running'
+    ? 'text-blue-500'
+    : status === 'interrupted'
+      ? 'text-amber-500'
+      : 'text-emerald-500';
   return (
     <div
       className={`flex items-center gap-2 rounded-md border border-dashed border-blue-300/60 bg-blue-50/40 px-2 py-1 text-[11px] dark:bg-blue-900/10`}
@@ -685,7 +819,7 @@ function TypedRow({ ev, le, isLive, isEn, isStickyRunning, collapsed: collapsedP
     );
   }
   const indent = ev.indent || 0;
-  const label = resolveLabel(ev, le);
+  const label = resolveLabel(ev, le, isEn);
   const meta = eventMeta(ev, isEn);
   const p = ev.params || {};
 
@@ -696,6 +830,10 @@ function TypedRow({ ev, le, isLive, isEn, isStickyRunning, collapsed: collapsedP
       : 'bg-blue-50/60 dark:bg-blue-900/20',
     done: '',
     failed: 'bg-red-50/60 dark:bg-red-900/20',
+    interrupted: 'bg-amber-50/60 dark:bg-amber-900/20',
+    // 2026-11-02: cancelled rows previously rendered with the default (done)
+    // styling — indistinguishable from success. Honest muted look instead.
+    cancelled: 'opacity-70',
   };
   const indentCls =
     indent === 1 ? 'ml-4' : indent === 2 ? 'ml-8' : '';
@@ -705,12 +843,20 @@ function TypedRow({ ev, le, isLive, isEn, isStickyRunning, collapsed: collapsedP
     icon = <Sparkles className="h-3 w-3 shrink-0 text-amber-500" />;
   } else if (ev.type === 'plan_preview') {
     icon = <ListChecks className="h-3 w-3 shrink-0 text-violet-500" />;
+  } else if (ev.type === 'plan_meta') {
+    icon = <Target className="h-3 w-3 shrink-0 text-violet-500" />;
+  } else if (ev.type === 'failure_classified') {
+    icon = <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />;
+  } else if (ev.type === 'execution_decision') {
+    icon = <Target className="h-3 w-3 shrink-0 text-blue-500" />;
   } else if (isRunning) {
     icon = <Loader2 className="h-3 w-3 shrink-0 animate-spin text-blue-500" />;
   } else if (ev.type === 'verify_passed') {
     icon = <ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" />;
   } else if (status === 'failed') {
     icon = <XCircle className="h-3 w-3 shrink-0 text-red-500" />;
+  } else if (status === 'interrupted') {
+    icon = <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />;
   } else if (ev.type === 'retry') {
     icon = <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />;
   } else if (ev.type === 'artifact_progress') {
@@ -937,10 +1083,13 @@ function PlanChecklist({ steps, isEn }) {
   );
 }
 
-export default function LiveActivityStream({ events, legacySteps, phase, reasoning, isStreaming, streamingSearchQueries, streamingPlanSteps, streamingDataPreviews, streamingReasoning, streamingAction }) {
+export default function LiveActivityStream({ events, legacySteps, phase, reasoning, isStreaming, streamingSearchQueries, streamingPlanSteps, streamingDataPreviews, streamingReasoning, streamingAction, suppressExecutionRows, embedded = false }) {
   const { lang, t } = useLanguage();
   const isEn = lang === 'en';
   const le = t?.chat?.liveEvent || {};
+  // Parent Task Execution card's collapse control (non-null only when the
+  // feed is embedded inside it — see TimelineCollapseContext default).
+  const timelineCollapse = useContext(TimelineCollapseContext);
 
   // Pick the best source: live_events wins; fall back to synthesized legacy.
   const effectiveEvents = useMemo(
@@ -948,7 +1097,21 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
     [events, legacySteps],
   );
   const hasEvents = Array.isArray(effectiveEvents) && effectiveEvents.length > 0;
-  const merged = useMemo(() => (hasEvents ? mergeEvents(effectiveEvents) : []), [effectiveEvents, hasEvents]);
+  const isLive = Boolean(isStreaming);
+  // Chat-experience repair (Part F): once the stream has ENDED, no row may
+  // keep a spinner. Orphan rows — their terminal event was lost to a crash
+  // or disconnect — become honestly "interrupted", never fake-completed and
+  // never stuck at Running. During the live stream, running rows stay live.
+  const merged = useMemo(() => {
+    if (!hasEvents) return [];
+    const rows = mergeEvents(effectiveEvents);
+    if (isLive) return rows;
+    // Unified timeline (2026-11-01): shared terminal vocabulary with the
+    // agent execution tree — residual running rows are CANCELLED (they were
+    // 'interrupted', which read as a different state than the panel's
+    // 'cancelled' for the same operation).
+    return finalizeResidualRows(rows);
+  }, [effectiveEvents, hasEvents, isLive]);
   // 2026-08-31: plan checklist from PERSISTED events. The backend now emits
   // plan_step_added / plan_step_completed as typed live events (previously
   // raw-SSE only), so a reloaded message can rebuild the exact checklist the
@@ -989,6 +1152,28 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
     return applyRetryIndent(computeCollapseStates(nested));
   }, [merged, hasEvents]);
 
+  // Unified timeline (2026-11-01): when the TaskProgressCard is the primary
+  // execution display, the duplicated tool / delegation / finalize rows and
+  // the plan checklist are removed from this feed. Content sections
+  // (reasoning, search, data previews, quality) are kept.
+  const EXECUTION_ROW_TYPES = new Set([
+    'tool_call_started', 'tool_call_finished', 'tool_call_failed',
+    'subagent_invoked', 'subagent_returned', 'finalize_started',
+    'finalize_done', 'artifact_progress', 'plan_meta', 'plan_summary',
+    'agent_started', 'agent_progress', 'agent_tool_started',
+    'agent_tool_completed', 'agent_completed', 'agent_failed',
+    // 2026-11-02 (dynamic orchestration timeline): the previously-dead
+    // structured events now actually emit — they belong to the timeline /
+    // tree, not the generic feed (they used to leak as anonymous rows).
+    'agent_result_received', 'peer_collaboration_started',
+    'verification_started', 'verification_completed',
+    'agent_retrying', 'plan_updated', 'replanning_started',
+  ]);
+  const visibleRows = useMemo(() => {
+    if (!suppressExecutionRows) return mergedIndented;
+    return mergedIndented.filter((r) => !EXECUTION_ROW_TYPES.has(r.type));
+  }, [suppressExecutionRows, mergedIndented]);
+
   // Headline derivation: latest `phase_enter.*` event wins; fall back to the
   // legacy `phase` prop only when no events exist. This is the single source
   // of truth — there used to be two (phase prop + first phase_enter row) which
@@ -1011,8 +1196,8 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
   // finalize_started / artifact_progress rows are excluded once the stream
   // has ended (they'd keep the highlight + timer alive forever on completed turns).
   const stickyRunningKey = useMemo(() => {
-    for (let i = mergedIndented.length - 1; i >= 0; i--) {
-      const r = mergedIndented[i];
+    for (let i = visibleRows.length - 1; i >= 0; i--) {
+      const r = visibleRows[i];
       if (
         r.status === 'running' &&
         !((r.type === 'finalize_started' || r.type === 'artifact_progress') && !isStreaming)
@@ -1021,7 +1206,7 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
       }
     }
     return -1;
-  }, [mergedIndented, isStreaming]);
+  }, [visibleRows, isStreaming]);
 
   // Stream still live (or never finished, e.g. mid-request) → expanded.
   const [expanded, setExpanded] = useState(() => Boolean(isStreaming));
@@ -1034,17 +1219,32 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
   const [dataPreviewOpen, setDataPreviewOpen] = useState(true);
   const prevStreaming = useRef(isStreaming);
 
-  // Auto-collapse ~1s after the stream finishes, unless the user manually
-  // expanded (ephemeral choice, not persisted).
+  // Auto-collapse ~1s after the AUTHORITATIVE terminal event (2026-11-02,
+  // Phase 7): finalize_done / phase_enter.done — not when an individual
+  // agent or tool finishes. Stream-end remains the fallback trigger for
+  // turns whose terminal event was lost. Manual toggle always wins.
+  const hasTerminalEvent = useMemo(
+    () => (effectiveEvents || []).some(
+      (e) => e?.type === 'finalize_done' || e?.type === 'phase_enter.done',
+    ),
+    [effectiveEvents],
+  );
+  const prevTerminal = useRef(false);
   useEffect(() => {
     const was = prevStreaming.current;
     prevStreaming.current = isStreaming;
-    if (was && !isStreaming && !userToggled) {
+    const terminalArrived = hasTerminalEvent && !prevTerminal.current;
+    prevTerminal.current = hasTerminalEvent;
+    if (
+      (hasTerminalEvent || (was && !isStreaming))
+      && !userToggled
+      && (terminalArrived || (was && !isStreaming))
+    ) {
       const tmr = setTimeout(() => setExpanded(false), 1000);
       return () => clearTimeout(tmr);
     }
     return undefined;
-  }, [isStreaming, userToggled]);
+  }, [isStreaming, userToggled, hasTerminalEvent]);
 
   // Auto-scroll: follow new events unless the user has scrolled up.
   // 2026-08-25: live-streaming spec — also follow streaming content updates
@@ -1064,7 +1264,8 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
     streamingDataPreviews ? Object.keys(streamingDataPreviews).length : 0,
   ]);
 
-  const isLive = Boolean(isStreaming);
+  // (isLive is derived next to `merged` above so end-of-stream
+  // reconciliation shares the same source of truth.)
 
   // 2026-08-31: show a rich placeholder while the stream is live but no events
   // have arrived yet. This eliminates the legacy "Understanding your request"
@@ -1074,7 +1275,13 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
     return (
       <div
         data-testid="live-activity-stream"
-        className="mb-3 animate-slide-up overflow-hidden rounded-xl border border-border/80 bg-gradient-to-b from-slate-50 to-white text-foreground dark:from-slate-900 dark:to-slate-800"
+        className={
+          // embedded (2026-11-02): rendered INSIDE the Task Execution card —
+          // strip the standalone card chrome (border/rounded/gradient/margin).
+          embedded
+            ? 'animate-slide-up text-foreground'
+            : 'mb-3 animate-slide-up overflow-hidden rounded-xl border border-border/80 bg-gradient-to-b from-slate-50 to-white text-foreground dark:from-slate-900 dark:to-slate-800'
+        }
       >
         <LoadingPlaceholder
           phase={phase}
@@ -1094,23 +1301,40 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
   // (collapsed summary implies finalize completed). Orphan running rows from
   // an interrupted turn are still excluded from the completed count.
   const isTerminalRow = (e) => e.status !== 'running' || (e.type === 'finalize_started' && !isLive);
-  const doneCount = mergedIndented.filter(isTerminalRow).length;
+  const doneCount = visibleRows.filter(isTerminalRow).length;
   let totalSeconds = 0;
-  if (mergedIndented.length) {
-    const first = mergedIndented[0]?.ts ? new Date(mergedIndented[0].ts).getTime() : null;
-    const last = mergedIndented[mergedIndented.length - 1]?.ts ? new Date(mergedIndented[mergedIndented.length - 1].ts).getTime() : null;
+  if (visibleRows.length) {
+    const first = visibleRows[0]?.ts ? new Date(visibleRows[0].ts).getTime() : null;
+    const last = visibleRows[visibleRows.length - 1]?.ts ? new Date(visibleRows[visibleRows.length - 1].ts).getTime() : null;
     if (first != null && last != null && last >= first) totalSeconds = Math.round((last - first) / 1000);
   }
-  const summaryLabel = formatTemplate(le.summary || '{n} events · {m} completed · {s}s', {
-    n: mergedIndented.length,
-    m: doneCount,
-    s: totalSeconds,
-  });
+  // Chat-experience repair: the footer describes activity-feed STEPS, not
+  // agent outcomes — the old "N events · M completed" wording sat next to
+  // the Agent Execution panel's per-agent counters and read as a
+  // contradictory summary of the same thing.
+  // 2026-11-02 (Phase 6): business outcome wording, not technical counters —
+  // "Completed / Completed with limitations / Could not be completed".
+  const _failedRows = visibleRows.filter(
+    (r) => r.status === 'failed' || r.status === 'interrupted' || r.status === 'cancelled',
+  ).length;
+  const summaryLabel = !visibleRows.length
+    ? formatTemplate(le.summary || '{n} steps · {m} done · {s}s', {
+        n: visibleRows.length, m: doneCount, s: totalSeconds,
+      })
+    : _failedRows === 0
+      ? (isEn ? `Task completed · ${totalSeconds}s` : `任务完成 · ${totalSeconds}秒`)
+      : _failedRows >= visibleRows.length
+        ? (isEn ? `Task could not be completed · ${totalSeconds}s` : `任务未能完成 · ${totalSeconds}秒`)
+        : (isEn ? `Completed with limitations · ${totalSeconds}s` : `已完成，但有局限 · ${totalSeconds}秒`);
 
   return (
     <div
       data-testid="live-activity-stream"
-      className="mb-3 animate-slide-up overflow-hidden rounded-xl border border-border/80 bg-gradient-to-b from-slate-50 to-white text-foreground dark:from-slate-900 dark:to-slate-800"
+      className={
+        embedded
+          ? 'animate-slide-up text-foreground'
+          : 'mb-3 animate-slide-up overflow-hidden rounded-xl border border-border/80 bg-gradient-to-b from-slate-50 to-white text-foreground dark:from-slate-900 dark:to-slate-800'
+      }
     >
       {expanded ? (
         <>
@@ -1138,20 +1362,20 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
             </div>
           )}
 
-          {/* Plan checklist — 2026-08-27: the agent's live todo list
-              (deterministic plan derived from the user's input, ticked off
-              by tool evidence as the loop executes it). Live steps win;
-              persisted plan_step events rebuild the same checklist after
-              reload (2026-08-31). */}
-          <PlanChecklist steps={planSteps} isEn={isEn} />
+          {/* Plan checklist — hidden when the unified TaskProgressCard is
+              the primary execution display (suppressExecutionRows). */}
+          {!suppressExecutionRows && <PlanChecklist steps={planSteps} isEn={isEn} />}
 
-          {/* Progress bar — 2026-08-25 activity-feed modernization. */}
-          <ProgressBar
-            progress={computeProgress(mergedIndented)}
-            isLive={isLive}
-            isEn={isEn}
-            le={le}
-          />
+          {/* Progress bar — hidden when the unified TaskProgressCard carries
+              the progress display (suppressExecutionRows). */}
+          {!suppressExecutionRows && (
+            <ProgressBar
+              progress={computeProgress(mergedIndented)}
+              isLive={isLive}
+              isEn={isEn}
+              le={le}
+            />
+          )}
 
           {/* Event list (max-height, auto-scroll while live). */}
           <div
@@ -1163,7 +1387,7 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
             data-testid="live-activity-list"
             className="max-h-80 space-y-0.5 overflow-y-auto px-2 py-2 dark:max-h-60"
           >
-            {mergedIndented.map((ev, i) => {
+            {visibleRows.map((ev, i) => {
               if (ev.type === 'plan_summary') {
                 return <PlanSummaryRow key={`${ev.ts}-${i}`} ev={ev} le={le} isEn={isEn} />;
               }
@@ -1201,7 +1425,19 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
             </span>
             <button
               type="button"
-              onClick={() => { setExpanded(false); setUserToggled(true); }}
+              data-testid="live-activity-collapse"
+              onClick={() => {
+                // 2026-11-02: when embedded inside the Task Execution card,
+                // "Collapse" must collapse the WHOLE merged section (plan
+                // stepper + activity) — not just the feed rows. The parent
+                // card exposes its collapse through TimelineCollapseContext.
+                if (embedded && timelineCollapse?.collapseAll) {
+                  timelineCollapse.collapseAll();
+                  return;
+                }
+                setExpanded(false);
+                setUserToggled(true);
+              }}
               className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
             >
               <ChevronUp className="h-3 w-3" />

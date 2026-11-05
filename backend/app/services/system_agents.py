@@ -296,10 +296,14 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
             "status": "active",
             "tool_config": {
                 "enabled_tools": _tools_in_registry(registry, [
-                    "create_automation", "update_automation",
-                    "execute_automation", "list_knowledge_bases",
+                    # Lifecycle separation cutover (2026-11-03): draft path
+                    # only — create_automation/update_automation/
+                    # execute_automation removed (no direct ACTIVE insert,
+                    # no ungated edits, no same-turn runs).
+                    "propose_automation", "update_automation_draft",
+                    "list_knowledge_bases",
                     "list_data_sources", "clarify",
-                    "cronjob", "send_message",
+                    "send_message",
                     # Web collection (no Skill tool — automation_agent must
                     # never RUN a skill to build a deliverable; it only sets
                     # up the automation task. Skill catalog tools below are
@@ -382,6 +386,11 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                     "memory", "todo", "kanban", "session_search",
                     "read_file", "write_file", "image_generation",
                     "execute_code", "delegate_task", "ask_data_agent",
+                    # P1 (2026-10-31): the General Assistant must DISCOVER
+                    # specialists instead of guessing names — capability-based
+                    # routing (docs/architecture/zhanlu-enterprise-agent-
+                    # discovery-and-routing.md §4.2, roadmap Q1).
+                    "list_available_agents",
                     "run_sandbox_skill", "fuzzy_match", "patch_parser",
                     "process_registry_list", "process_registry_tail",
                     "process_registry_kill",

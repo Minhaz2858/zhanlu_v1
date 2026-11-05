@@ -44,9 +44,9 @@ import {
  */
 
 const READINESS_STYLE = {
-  live: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  live: 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50',
   wired: 'bg-sky-50 text-sky-700 border-sky-200',
-  drafted: 'bg-stone-100 text-stone-500 border-stone-200',
+  drafted: 'bg-muted/60 text-muted-foreground border-border',
 };
 const BACKING_ICON = { table: Database, entity: CircleDot, metric: CircleDot, manual: MapPin };
 
@@ -60,7 +60,7 @@ function BackingBadge({ obj }) {
   return (
     <span
       className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border ${
-        isWired ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-stone-200 bg-stone-50 text-stone-400'
+        isWired ? 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700' : 'border-border bg-muted/40 text-muted-foreground/80'
       }`}
       title={obj.backing_ref || 'manual — not yet wired to live data'}
     >
@@ -91,23 +91,23 @@ function CoverageCard({ domain, value, onClick, selected }) {
     <button
       onClick={onClick}
       className={`text-left rounded-xl border px-4 py-3.5 transition-colors ${
-        selected ? 'border-stone-400 bg-stone-50' : 'border-stone-200 bg-white hover:border-stone-300'
+        selected ? 'border-border bg-muted/40' : 'border-border bg-card hover:border-border'
       }`}
     >
       <div className="flex items-center gap-2">
-        <span className="text-[13px] font-medium text-stone-800 truncate">{domain.name}</span>
+        <span className="text-[13px] font-medium text-foreground truncate">{domain.name}</span>
         <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${READINESS_STYLE[readiness]}`}>
           {readiness}
         </span>
       </div>
-      <p className="mt-1 text-[11px] text-stone-400 line-clamp-1">{domain.description}</p>
-      <div className="mt-2 flex items-center gap-3 text-[10px] text-stone-500">
+      <p className="mt-1 text-[11px] text-muted-foreground/80 line-clamp-1">{domain.description}</p>
+      <div className="mt-2 flex items-center gap-3 text-[10px] text-muted-foreground">
         <span>{domain.objects} objects</span>
         <span className="text-emerald-600">{cov.objects_live ?? 0} live</span>
         <span>{cov.actions_executable ?? 0} actions runnable</span>
       </div>
       {value && (value.est_value > 0 || value.agents?.length > 0) && (
-        <div className="mt-1.5 flex items-center gap-3 text-[10px] text-stone-400">
+        <div className="mt-1.5 flex items-center gap-3 text-[10px] text-muted-foreground/80">
           {value.est_value > 0 && <span className="text-amber-700">≈ ${value.est_value.toLocaleString()} est. value</span>}
           {value.agents?.length > 0 && <span>{value.agents.length} agents</span>}
           {value.acceptance_rate != null && <span>{Math.round(value.acceptance_rate * 100)}% accepted</span>}
@@ -130,25 +130,25 @@ function RevisionsFeed() {
   };
   useEffect(() => { if (open && revisions === null) load(); }, [open, revisions]);
   return (
-    <div className="bg-white rounded-lg border border-stone-200">
+    <div className="bg-card rounded-lg border border-border">
       <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-4 py-3 text-left">
-        <History size={14} className="text-stone-500" />
-        <h2 className="text-sm font-semibold text-stone-800">Ontology Revision History</h2>
-        <span className="text-[11px] text-stone-400">append-only — every mutation, who made it, when</span>
-        <span className="ml-auto text-stone-400 text-xs">{open ? 'hide' : 'show'}</span>
+        <History size={14} className="text-muted-foreground" />
+        <h2 className="text-sm font-semibold text-foreground">Ontology Revision History</h2>
+        <span className="text-[11px] text-muted-foreground/80">append-only — every mutation, who made it, when</span>
+        <span className="ml-auto text-muted-foreground/80 text-xs">{open ? 'hide' : 'show'}</span>
       </button>
       {open && (
         <div className="px-4 pb-3 max-h-72 overflow-y-auto">
-          {!revisions && <div className="text-[11px] text-stone-400 py-2">Loading…</div>}
-          {revisions && revisions.length === 0 && <div className="text-[11px] text-stone-400 py-2">No revisions yet.</div>}
+          {!revisions && <div className="text-[11px] text-muted-foreground/80 py-2">Loading…</div>}
+          {revisions && revisions.length === 0 && <div className="text-[11px] text-muted-foreground/80 py-2">No revisions yet.</div>}
           {revisions && revisions.map((r) => (
-            <div key={r.id} className="flex items-center gap-2 py-1.5 border-b border-stone-100 last:border-0 text-[11px]">
-              <span className="font-mono text-stone-400">#{r.revision_no}</span>
-              <span className="px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-600 capitalize">{r.change_kind}</span>
-              <span className="text-stone-600 capitalize">{r.entity_type}</span>
-              <span className="text-stone-400 truncate max-w-[240px]" title={r.entity_id}>{r.entity_id.slice(0, 8)}…</span>
-              <span className="text-stone-400">{r.changed_by || '—'}</span>
-              <span className="ml-auto text-stone-300">{(r.created_date || '').replace('T', ' ').slice(0, 16)}</span>
+            <div key={r.id} className="flex items-center gap-2 py-1.5 border-b border-border/70 last:border-0 text-[11px]">
+              <span className="font-mono text-muted-foreground/80">#{r.revision_no}</span>
+              <span className="px-1.5 py-0.5 rounded-full border border-border bg-muted/40 text-foreground/80 capitalize">{r.change_kind}</span>
+              <span className="text-foreground/80 capitalize">{r.entity_type}</span>
+              <span className="text-muted-foreground/80 truncate max-w-[240px]" title={r.entity_id}>{r.entity_id.slice(0, 8)}…</span>
+              <span className="text-muted-foreground/80">{r.changed_by || '—'}</span>
+              <span className="ml-auto text-muted-foreground/60">{(r.created_date || '').replace('T', ' ').slice(0, 16)}</span>
             </div>
           ))}
         </div>
@@ -171,21 +171,21 @@ function PoDraftsCard({ onExport, exporting }) {
     <div className="mt-6">
       <div className="flex items-center gap-2">
         <ShieldCheck size={15} className="text-emerald-600" />
-        <h2 className="text-sm font-semibold text-stone-800">PO Draft Worklist</h2>
-        <span className="text-[11px] text-stone-400">approval-gated write-backs — every draft came from an approved action</span>
+        <h2 className="text-sm font-semibold text-foreground">PO Draft Worklist</h2>
+        <span className="text-[11px] text-muted-foreground/80">approval-gated write-backs — every draft came from an approved action</span>
         <button onClick={onExport} disabled={exporting}
-          className="ml-auto flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-50 disabled:opacity-50">
+          className="ml-auto flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-md border border-border bg-card text-foreground hover:bg-muted/40 disabled:opacity-50">
           {exporting ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
           Export xlsx
         </button>
       </div>
       {drafts.length === 0 ? (
-        <p className="mt-3 text-[11px] text-stone-400">No PO drafts yet. They are created when an approved ontology write action runs.</p>
+        <p className="mt-3 text-[11px] text-muted-foreground/80">No PO drafts yet. They are created when an approved ontology write action runs.</p>
       ) : (
-        <div className="mt-3 overflow-x-auto rounded-xl border border-stone-200">
+        <div className="mt-3 overflow-x-auto rounded-xl border border-border">
           <table className="min-w-full text-[11px]">
             <thead>
-              <tr className="bg-stone-50 text-stone-500 text-left">
+              <tr className="bg-muted/40 text-muted-foreground text-left">
                 <th className="px-3 py-2 font-medium">Supplier</th>
                 <th className="px-3 py-2 font-medium">Product</th>
                 <th className="px-3 py-2 font-medium text-right">Qty</th>
@@ -194,7 +194,7 @@ function PoDraftsCard({ onExport, exporting }) {
                 <th className="px-3 py-2 font-medium">Created</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-stone-100 text-stone-700">
+            <tbody className="divide-y divide-stone-100 text-foreground">
               {drafts.map((d) => (
                 <tr key={d.id}>
                   <td className="px-3 py-2">{d.supplier_name}</td>
@@ -203,11 +203,11 @@ function PoDraftsCard({ onExport, exporting }) {
                   <td className="px-3 py-2 text-right">{d.currency} {(d.est_amount ?? 0).toLocaleString()}</td>
                   <td className="px-3 py-2">
                     <span className={`px-1.5 py-0.5 rounded-full border text-[10px] ${
-                      d.status === 'approved' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>
+                      d.status === 'approved' ? 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700' : 'border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 text-amber-700'}`}>
                       {d.status}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-stone-400">{d.created_date ? new Date(d.created_date).toLocaleDateString() : '—'}</td>
+                  <td className="px-3 py-2 text-muted-foreground/80">{d.created_date ? new Date(d.created_date).toLocaleDateString() : '—'}</td>
                 </tr>
               ))}
             </tbody>
@@ -257,71 +257,71 @@ function SensorsCard() {
   const stateChip = (s) => {
     let st = {};
     try { st = JSON.parse(s.last_state_json || '{}'); } catch { /* empty */ }
-    if (!s.enabled) return ['paused', 'border-stone-200 bg-stone-50 text-stone-400'];
-    if (st.breached) return ['BREACH', 'border-red-200 bg-red-50 text-red-700'];
-    if (s.last_run_at) return ['watching', 'border-emerald-200 bg-emerald-50 text-emerald-700'];
+    if (!s.enabled) return ['paused', 'border-border bg-muted/40 text-muted-foreground/80'];
+    if (st.breached) return ['BREACH', 'border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30 text-red-700'];
+    if (s.last_run_at) return ['watching', 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700'];
     return ['new', 'border-sky-200 bg-sky-50 text-sky-700'];
   };
   return (
     <div className="mt-6">
       <div className="flex items-center gap-2">
-        <Radar size={15} className="text-stone-600" />
-        <h2 className="text-sm font-semibold text-stone-800">Sensing</h2>
-        <span className="text-[11px] text-stone-400">scheduled watches on your real data — on breach, linked-domain agents are notified</span>
-        <button onClick={() => setShowForm((v) => !v)} className="ml-auto flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-md border border-stone-300 bg-white text-stone-700 hover:bg-stone-50">
+        <Radar size={15} className="text-foreground/80" />
+        <h2 className="text-sm font-semibold text-foreground">Sensing</h2>
+        <span className="text-[11px] text-muted-foreground/80">scheduled watches on your real data — on breach, linked-domain agents are notified</span>
+        <button onClick={() => setShowForm((v) => !v)} className="ml-auto flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-md border border-border bg-card text-foreground hover:bg-muted/40">
           <Plus size={12} /> New sensor
         </button>
       </div>
       {showForm && (
-        <div className="mt-3 rounded-xl border border-stone-200 bg-white p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-[12px]">
-          <input className="border border-stone-200 rounded-md px-2.5 py-1.5" placeholder="Sensor name"
+        <div className="mt-3 rounded-xl border border-border bg-card p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-[12px]">
+          <input className="border border-border rounded-md px-2.5 py-1.5" placeholder="Sensor name"
             value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-          <select className="border border-stone-200 rounded-md px-2.5 py-1.5" value={form.object_name} onChange={(e) => setForm({ ...form, object_name: e.target.value })}>
+          <select className="border border-border rounded-md px-2.5 py-1.5" value={form.object_name} onChange={(e) => setForm({ ...form, object_name: e.target.value })}>
             <option value="">Notify object…</option>
             {data.objects.map((o) => <option key={o.name} value={o.name}>{o.display_name || o.name}</option>)}
           </select>
-          <select className="border border-stone-200 rounded-md px-2.5 py-1.5" value={form.kb_id} onChange={(e) => setForm({ ...form, kb_id: e.target.value })}>
+          <select className="border border-border rounded-md px-2.5 py-1.5" value={form.kb_id} onChange={(e) => setForm({ ...form, kb_id: e.target.value })}>
             <option value="">Data source…</option>
             {data.data_sources.map((k) => <option key={k.id} value={k.id}>{k.name} ({k.db_type || 'database'})</option>)}
           </select>
           <div className="flex items-center gap-2">
-            <select className="border border-stone-200 rounded-md px-2 py-1.5" value={form.op} onChange={(e) => setForm({ ...form, op: e.target.value })}>
+            <select className="border border-border rounded-md px-2 py-1.5" value={form.op} onChange={(e) => setForm({ ...form, op: e.target.value })}>
               {['gt', 'gte', 'lt', 'lte', 'eq'].map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
-            <input type="number" step="any" className="w-24 border border-stone-200 rounded-md px-2.5 py-1.5" value={form.threshold} onChange={(e) => setForm({ ...form, threshold: Number(e.target.value) })} />
-            <select className="border border-stone-200 rounded-md px-2 py-1.5" value={form.schedule_seconds} onChange={(e) => setForm({ ...form, schedule_seconds: Number(e.target.value) })}>
+            <input type="number" step="any" className="w-24 border border-border rounded-md px-2.5 py-1.5" value={form.threshold} onChange={(e) => setForm({ ...form, threshold: Number(e.target.value) })} />
+            <select className="border border-border rounded-md px-2 py-1.5" value={form.schedule_seconds} onChange={(e) => setForm({ ...form, schedule_seconds: Number(e.target.value) })}>
               <option value={300}>every 5 min</option><option value={3600}>every hour</option><option value={21600}>every 6 h</option><option value={86400}>daily</option>
             </select>
           </div>
-          <textarea className="sm:col-span-2 border border-stone-200 rounded-md px-2.5 py-1.5 font-mono text-[11px]" rows={2}
+          <textarea className="sm:col-span-2 border border-border rounded-md px-2.5 py-1.5 font-mono text-[11px]" rows={2}
             placeholder="Watch SQL — must return ONE numeric value" value={form.watch_sql} onChange={(e) => setForm({ ...form, watch_sql: e.target.value })} />
           <div className="sm:col-span-2 flex items-center gap-2">
             <button onClick={create} disabled={creating}
-              className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">
+              className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
               {creating ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />} Create sensor
             </button>
           </div>
         </div>
       )}
       {data.sensors.length === 0 ? (
-        <p className="mt-3 text-[11px] text-stone-400">No sensors yet. A sensor watches a query on a connected data source and notifies bound agents on breach.</p>
+        <p className="mt-3 text-[11px] text-muted-foreground/80">No sensors yet. A sensor watches a query on a connected data source and notifies bound agents on breach.</p>
       ) : (
         <div className="mt-3 space-y-2">
           {data.sensors.map((s) => {
             const [label, cls] = stateChip(s);
             return (
-              <div key={s.id} className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+              <div key={s.id} className="rounded-xl border border-border bg-card px-4 py-3">
                 <div className="flex items-center gap-2">
-                  <span className="text-[13px] font-medium text-stone-800">{s.name}</span>
+                  <span className="text-[13px] font-medium text-foreground">{s.name}</span>
                   <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${cls}`}>{label}</span>
-                  <span className="text-[10px] text-stone-400">watches {s.object_name} · {s.op} {s.threshold} · every {s.schedule_seconds >= 3600 ? `${s.schedule_seconds / 3600}h` : `${s.schedule_seconds / 60}m`}</span>
+                  <span className="text-[10px] text-muted-foreground/80">watches {s.object_name} · {s.op} {s.threshold} · every {s.schedule_seconds >= 3600 ? `${s.schedule_seconds / 3600}h` : `${s.schedule_seconds / 60}m`}</span>
                   <div className="ml-auto flex items-center gap-1.5">
-                    <button onClick={() => runNow(s.id)} className="text-[11px] px-2 py-1 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50">Run now</button>
-                    <button onClick={() => remove(s.id)} className="text-[11px] px-2 py-1 rounded-md border border-stone-200 text-stone-400 hover:bg-red-50 hover:text-red-600">Remove</button>
+                    <button onClick={() => runNow(s.id)} className="text-[11px] px-2 py-1 rounded-md border border-border text-foreground/80 hover:bg-muted/40">Run now</button>
+                    <button onClick={() => remove(s.id)} className="text-[11px] px-2 py-1 rounded-md border border-border text-muted-foreground/80 hover:bg-red-50 dark:hover:bg-red-950/30 hover:text-red-600">Remove</button>
                   </div>
                 </div>
                 {s.recent_runs?.length > 0 && (
-                  <div className="mt-1.5 flex items-center gap-3 text-[10px] text-stone-400">
+                  <div className="mt-1.5 flex items-center gap-3 text-[10px] text-muted-foreground/80">
                     {s.recent_runs.slice(0, 3).map((r, i) => (
                       <span key={i}>{r.ran_at ? new Date(r.ran_at).toLocaleTimeString() : ''}: {r.error ? `error — ${r.error.slice(0, 40)}` : `${r.transition} (value ${r.value})`}</span>
                     ))}
@@ -345,9 +345,9 @@ function MetricCard({ m, kpi }) {
   const trend = kpi?.trend;
   if (loading) {
     return (
-      <div className="rounded-xl border border-stone-200 bg-white px-4 py-3.5">
-        <div className="text-[11px] text-stone-400">{m.name}</div>
-        <Loader2 size={16} className="animate-spin mt-2 text-stone-300" />
+      <div className="rounded-xl border border-border bg-card px-4 py-3.5">
+        <div className="text-[11px] text-muted-foreground/80">{m.name}</div>
+        <Loader2 size={16} className="animate-spin mt-2 text-muted-foreground/60" />
       </div>
     );
   }
@@ -355,8 +355,8 @@ function MetricCard({ m, kpi }) {
     || (compare.current && compare.current.unavailable);
   if (unavail) {
     return (
-      <div className="rounded-xl border border-amber-200 bg-amber-50/40 px-4 py-3.5">
-        <div className="text-[13px] font-medium text-stone-700">{m.name}</div>
+      <div className="rounded-xl border border-amber-200 dark:border-amber-900/50 bg-amber-50/40 dark:bg-amber-950/20 px-4 py-3.5">
+        <div className="text-[13px] font-medium text-foreground">{m.name}</div>
         <p className="mt-1 text-[10px] text-amber-700">Unavailable: {compare?.reason || compare?.current?.reason || 'no data for the current period'}</p>
       </div>
     );
@@ -373,12 +373,12 @@ function MetricCard({ m, kpi }) {
     .map((p) => ({ period: p.period, value: p.value }));
 
   return (
-    <div className="rounded-xl border border-stone-200 bg-white px-4 py-3.5">
+    <div className="rounded-xl border border-border bg-card px-4 py-3.5">
       <div className="flex items-center gap-2">
-        <span className="text-[13px] font-semibold text-stone-800">{m.name}</span>
-        <span className="ml-auto text-[10px] text-stone-400">{compare.current_period || m.unit || ''}</span>
+        <span className="text-[13px] font-semibold text-foreground">{m.name}</span>
+        <span className="ml-auto text-[10px] text-muted-foreground/80">{compare.current_period || m.unit || ''}</span>
       </div>
-      <div className="mt-1 text-2xl font-semibold text-stone-900 tabular-nums">
+      <div className="mt-1 text-2xl font-semibold text-foreground tabular-nums">
         {v == null ? '—' : fmt(v)}
       </div>
       {delta != null && (
@@ -400,13 +400,13 @@ function MetricCard({ m, kpi }) {
           </ResponsiveContainer>
         </div>
       )}
-      <div className="mt-1 text-[10px] text-stone-400">
+      <div className="mt-1 text-[10px] text-muted-foreground/80">
         {cur.provenance?.datasource_name || m.datasource_id}
         {cur.provenance?.base_table ? ` · ${cur.provenance.base_table}` : ''}
       </div>
       <details className="mt-1">
-        <summary className="cursor-pointer text-[10px] text-stone-500 hover:text-stone-700">definition & provenance</summary>
-        <div className="mt-1 text-[10px] text-stone-500 space-y-0.5">
+        <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">definition & provenance</summary>
+        <div className="mt-1 text-[10px] text-muted-foreground space-y-0.5">
           <div>aggregation: {m.aggregation} · v{m.version} · {m.evidence_status}</div>
           <div>prior period: {compare.prior_period || '—'} = {prevVal != null ? fmt(prevVal) : 'n/a'}</div>
           <div className="font-mono break-all">{cur.execution_trace?.sql}</div>
@@ -473,12 +473,12 @@ function ExecutiveOverview() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><Gauge size={15} className="text-stone-600" /> Governed Business KPIs</h2>
-        <span className="text-[11px] text-stone-400">every figure is computed by the governed MetricDefinition (current vs prior period, deterministic) — never estimated, never invented</span>
+        <h2 className="text-sm font-semibold text-foreground flex items-center gap-2"><Gauge size={15} className="text-foreground/80" /> Governed Business KPIs</h2>
+        <span className="text-[11px] text-muted-foreground/80">every figure is computed by the governed MetricDefinition (current vs prior period, deterministic) — never estimated, never invented</span>
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {!metrics && <div className="text-[11px] text-stone-400 py-4"><Loader2 size={14} className="animate-spin inline mr-2" />Loading KPIs…</div>}
+          {!metrics && <div className="text-[11px] text-muted-foreground/80 py-4"><Loader2 size={14} className="animate-spin inline mr-2" />Loading KPIs…</div>}
           {metrics && kpiList.length === 0 && (
-            <div className="col-span-full rounded-xl border border-dashed border-stone-300 bg-white py-8 text-center text-[12px] text-stone-400">
+            <div className="col-span-full rounded-xl border border-dashed border-border bg-card py-8 text-center text-[12px] text-muted-foreground/80">
               No governed, published metrics are configured for this organization yet.
             </div>
           )}
@@ -489,23 +489,23 @@ function ExecutiveOverview() {
       </div>
 
       <div>
-        <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><AlertTriangle size={15} className="text-red-600" /> Business Priorities</h2>
-        <span className="text-[11px] text-stone-400">deterministically detected situations requiring attention — declining profitability (governed gross-margin by segment) and sensing breaches</span>
+        <h2 className="text-sm font-semibold text-foreground flex items-center gap-2"><AlertTriangle size={15} className="text-red-600" /> Business Priorities</h2>
+        <span className="text-[11px] text-muted-foreground/80">deterministically detected situations requiring attention — declining profitability (governed gross-margin by segment) and sensing breaches</span>
         <div className="mt-3 space-y-2">
-          {priorities === undefined && <div className="text-[11px] text-stone-400 py-2"><Loader2 size={14} className="animate-spin inline mr-2" />Analyzing…</div>}
+          {priorities === undefined && <div className="text-[11px] text-muted-foreground/80 py-2"><Loader2 size={14} className="animate-spin inline mr-2" />Analyzing…</div>}
           {priorities && declining.length === 0 && breaches.length === 0 && (
-            <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">No declining profitability or active breaches detected.</div>
+            <div className="rounded-xl border border-border bg-card px-4 py-3 text-[11px] text-muted-foreground/80">No declining profitability or active breaches detected.</div>
           )}
           {declining.map((s) => {
             const pct = s.delta_pct != null ? `${s.delta_pct.toFixed(1)}%` : 'n/a';
             return (
-              <div key={s.segment} className="rounded-xl border border-red-200 bg-red-50/40 px-4 py-3">
+              <div key={s.segment} className="rounded-xl border border-red-200 dark:border-red-900/50 bg-red-50/40 dark:bg-red-950/20 px-4 py-3">
                 <div className="flex items-center gap-2">
                   <TrendingDown size={14} className="text-red-600" />
-                  <span className="text-[13px] font-medium text-stone-800">Vehicle Model {s.segment} profitability declining</span>
+                  <span className="text-[13px] font-medium text-foreground">Vehicle Model {s.segment} profitability declining</span>
                   <span className="ml-auto text-[10px] text-red-600">{pct} vs prior</span>
                 </div>
-                <p className="mt-1 text-[11px] text-stone-600">
+                <p className="mt-1 text-[11px] text-foreground/80">
                   Gross margin fell from <b>{priorities.currency || ''} {Number(s.prior_value).toLocaleString()}</b> to{' '}
                   <b>{priorities.currency || ''} {Number(s.current_value).toLocaleString()}</b> ({priorities.current_period} vs {priorities.prior_period}).
                   Investigate the affected model's sales, component costs, and linked suppliers.
@@ -514,13 +514,13 @@ function ExecutiveOverview() {
             );
           })}
           {breaches.map((s) => (
-            <div key={s.id} className="rounded-xl border border-red-200 bg-red-50/40 px-4 py-3">
+            <div key={s.id} className="rounded-xl border border-red-200 dark:border-red-900/50 bg-red-50/40 dark:bg-red-950/20 px-4 py-3">
               <div className="flex items-center gap-2">
                 <TrendingDown size={14} className="text-red-600" />
-                <span className="text-[13px] font-medium text-stone-800">{s.name}</span>
-                <span className="text-[10px] text-stone-400">watches {s.object_name}</span>
+                <span className="text-[13px] font-medium text-foreground">{s.name}</span>
+                <span className="text-[10px] text-muted-foreground/80">watches {s.object_name}</span>
               </div>
-              <p className="mt-1 text-[11px] text-stone-600">A watched signal for <b>{s.object_name}</b> crossed its threshold ({s.op} {s.threshold}). Investigate the affected business entities and governed metrics.</p>
+              <p className="mt-1 text-[11px] text-foreground/80">A watched signal for <b>{s.object_name}</b> crossed its threshold ({s.op} {s.threshold}). Investigate the affected business entities and governed metrics.</p>
             </div>
           ))}
         </div>
@@ -559,19 +559,19 @@ function BusinessExplorer() {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <Search size={14} className="text-stone-500" />
+        <Search size={14} className="text-muted-foreground" />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search business objects…"
-          className="flex-1 border border-stone-200 rounded-md px-3 py-1.5 text-[12px]" />
+          className="flex-1 border border-border rounded-md px-3 py-1.5 text-[12px]" />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="rounded-xl border border-stone-200 bg-white max-h-[520px] overflow-y-auto">
-          <div className="px-3 py-2 text-[10px] uppercase tracking-wide text-stone-400 border-b border-stone-100">Objects ({filtered.length})</div>
+        <div className="rounded-xl border border-border bg-card max-h-[520px] overflow-y-auto">
+          <div className="px-3 py-2 text-[10px] uppercase tracking-wide text-muted-foreground/80 border-b border-border/70">Objects ({filtered.length})</div>
           <ul className="divide-y divide-stone-100">
             {filtered.map((o) => (
               <li key={o.id}>
-                <button onClick={() => setSelected(o.id)} className={`w-full text-left px-3 py-2 hover:bg-stone-50 flex items-center gap-2 ${selected === o.id ? 'bg-stone-50' : ''}`}>
-                  <Boxes size={12} className="text-stone-400" />
-                  <span className="text-[12px] text-stone-700">{o.display_name || o.name}</span>
+                <button onClick={() => setSelected(o.id)} className={`w-full text-left px-3 py-2 hover:bg-muted/40 flex items-center gap-2 ${selected === o.id ? 'bg-muted/40' : ''}`}>
+                  <Boxes size={12} className="text-muted-foreground/80" />
+                  <span className="text-[12px] text-foreground">{o.display_name || o.name}</span>
                   <EvidenceBadge obj={o} />
                 </button>
               </li>
@@ -579,40 +579,40 @@ function BusinessExplorer() {
           </ul>
         </div>
         <div className="lg:col-span-2 space-y-3">
-          {!sel && <div className="rounded-xl border border-dashed border-stone-300 bg-white py-12 text-center text-[12px] text-stone-400">Select an object to explore its business relationships, governed metrics, and evidence.</div>}
+          {!sel && <div className="rounded-xl border border-dashed border-border bg-card py-12 text-center text-[12px] text-muted-foreground/80">Select an object to explore its business relationships, governed metrics, and evidence.</div>}
           {sel && (
             <>
-              <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-                <div className="text-[13px] font-semibold text-stone-800">{sel.display_name || sel.name}</div>
-                <div className="mt-1 flex items-center gap-2 text-[10px] text-stone-400"><BackingBadge obj={sel} /><EvidenceBadge obj={sel} /></div>
+              <div className="rounded-xl border border-border bg-card px-4 py-3">
+                <div className="text-[13px] font-semibold text-foreground">{sel.display_name || sel.name}</div>
+                <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground/80"><BackingBadge obj={sel} /><EvidenceBadge obj={sel} /></div>
               </div>
-              <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2 flex items-center gap-1"><GitBranch size={11} /> Relationships ({related.length})</div>
-                {related.length === 0 && <div className="text-[11px] text-stone-400">No linked objects.</div>}
+              <div className="rounded-xl border border-border bg-card px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-2 flex items-center gap-1"><GitBranch size={11} /> Relationships ({related.length})</div>
+                {related.length === 0 && <div className="text-[11px] text-muted-foreground/80">No linked objects.</div>}
                 <ul className="space-y-1">
                   {related.map((l, i) => (
-                    <li key={i} className="text-[11px] text-stone-600 flex items-center gap-2">
-                      <span className="capitalize px-1 rounded bg-stone-100">{l.link_type}</span>
+                    <li key={i} className="text-[11px] text-foreground/80 flex items-center gap-2">
+                      <span className="capitalize px-1 rounded bg-muted/60">{l.link_type}</span>
                       {relatedObjs[i]?.display_name || relatedObjs[i]?.name || l.to_object_id}
                     </li>
                   ))}
                 </ul>
               </div>
-              <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2 flex items-center gap-1"><Target size={11} /> Governed metrics</div>
-                {metrics.length === 0 && <div className="text-[11px] text-stone-400">No governed metric backs this object.</div>}
+              <div className="rounded-xl border border-border bg-card px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-2 flex items-center gap-1"><Target size={11} /> Governed metrics</div>
+                {metrics.length === 0 && <div className="text-[11px] text-muted-foreground/80">No governed metric backs this object.</div>}
                 <div className="flex flex-wrap gap-2">
                   {metrics.map((m) => (
-                    <span key={m.id} className="text-[10px] px-2 py-1 rounded-lg border border-stone-200 bg-white">{m.name}</span>
+                    <span key={m.id} className="text-[10px] px-2 py-1 rounded-lg border border-border bg-card">{m.name}</span>
                   ))}
                 </div>
               </div>
-              <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2 flex items-center gap-1"><FileSearch size={11} /> Document evidence ({docEv.length})</div>
-                {docEv.length === 0 && <div className="text-[11px] text-stone-400">none visible to you (per-viewer, fail-closed)</div>}
+              <div className="rounded-xl border border-border bg-card px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-2 flex items-center gap-1"><FileSearch size={11} /> Document evidence ({docEv.length})</div>
+                {docEv.length === 0 && <div className="text-[11px] text-muted-foreground/80">none visible to you (per-viewer, fail-closed)</div>}
                 {docEv.map((d, i) => (
                   <div key={i} className="rounded-lg border border-sky-100 bg-sky-50/50 px-2 py-1.5 mb-1 text-[11px]">
-                    <div className="text-stone-700 italic">“{d.quote}”</div>
+                    <div className="text-foreground italic">“{d.quote}”</div>
                   </div>
                 ))}
               </div>
@@ -629,14 +629,14 @@ function BusinessObjectExplorer() {
   return (
     <div>
       <div className="flex items-center gap-2 mb-3">
-        <Network size={15} className="text-stone-600" />
-        <h2 className="text-sm font-semibold text-stone-800">Business Object Explorer</h2>
+        <Network size={15} className="text-foreground/80" />
+        <h2 className="text-sm font-semibold text-foreground">Business Object Explorer</h2>
         <div className="ml-auto flex items-center gap-1 text-[11px]">
-          <button onClick={() => setMode('business')} className={`px-2.5 py-1.5 rounded-md border ${mode === 'business' ? 'border-stone-400 bg-stone-100 text-stone-700' : 'border-stone-200 text-stone-500'}`}>Business Explorer</button>
-          <button onClick={() => setMode('studio')} className={`px-2.5 py-1.5 rounded-md border ${mode === 'studio' ? 'border-stone-400 bg-stone-100 text-stone-700' : 'border-stone-200 text-stone-500'}`}>Ontology Studio</button>
+          <button onClick={() => setMode('business')} className={`px-2.5 py-1.5 rounded-md border ${mode === 'business' ? 'border-border bg-muted/60 text-foreground' : 'border-border text-muted-foreground'}`}>Business Explorer</button>
+          <button onClick={() => setMode('studio')} className={`px-2.5 py-1.5 rounded-md border ${mode === 'studio' ? 'border-border bg-muted/60 text-foreground' : 'border-border text-muted-foreground'}`}>Ontology Studio</button>
         </div>
       </div>
-      <span className="text-[11px] text-stone-400">
+      <span className="text-[11px] text-muted-foreground/80">
         {mode === 'business'
           ? 'navigate real business relationships resolved from the ontology — edges exist only where the backend links them'
           : 'administration view: domains, objects, links, bindings, governed metrics, revision history'}
@@ -694,72 +694,72 @@ function SituationRoom() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
+      <div className="rounded-xl border border-border bg-card px-4 py-3">
         <div className="flex items-center gap-2">
-          <FileSearch size={14} className="text-stone-600" />
-          <span className="text-[12px] font-medium text-stone-800">Investigate a business question</span>
+          <FileSearch size={14} className="text-foreground/80" />
+          <span className="text-[12px] font-medium text-foreground">Investigate a business question</span>
         </div>
         <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={2}
           placeholder="e.g. Why is Vehicle Model X's profitability declining?"
-          className="mt-2 w-full border border-stone-200 rounded-md px-3 py-2 text-[12px]" />
+          className="mt-2 w-full border border-border rounded-md px-3 py-2 text-[12px]" />
         <div className="mt-2 flex items-center gap-2">
           <button onClick={askAgent} disabled={asking || !question.trim()}
-            className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">
+            className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
             {asking ? <Loader2 size={12} className="animate-spin" /> : <FileSearch size={12} />}
             Ask the Zhanlu Agent
           </button>
           {sel && (
             <button onClick={() => setQuestion(`Why is ${sel.display_name || sel.name}'s profitability declining?`)}
-              className="text-[11px] px-2.5 py-1.5 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50">
+              className="text-[11px] px-2.5 py-1.5 rounded-md border border-border text-foreground/80 hover:bg-muted/40">
               Investigate selected entity
             </button>
           )}
-          <span className="ml-auto text-[10px] text-stone-400">synthesis via the existing Agent Harness</span>
+          <span className="ml-auto text-[10px] text-muted-foreground/80">synthesis via the existing Agent Harness</span>
         </div>
         {answerError && <p className="mt-2 text-[11px] text-red-600">{answerError}</p>}
         {answer && (
-          <div className="mt-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-[11px] space-y-1">
-            <div className="text-stone-700">{answer.answer}</div>
-            {answer.sql && <div className="font-mono text-[10px] text-stone-500 break-all">SQL: {answer.sql}</div>}
+          <div className="mt-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-[11px] space-y-1">
+            <div className="text-foreground">{answer.answer}</div>
+            {answer.sql && <div className="font-mono text-[10px] text-muted-foreground break-all">SQL: {answer.sql}</div>}
             {Array.isArray(answer.rows) && answer.rows.length > 0 && (
-              <div className="text-[10px] text-stone-500">rows: {JSON.stringify(answer.rows)}</div>
+              <div className="text-[10px] text-muted-foreground">rows: {JSON.stringify(answer.rows)}</div>
             )}
           </div>
         )}
-        <p className="mt-1 text-[10px] text-stone-400">
+        <p className="mt-1 text-[10px] text-muted-foreground/80">
           Structured investigation (below) uses the ontology graph, governed metrics and document evidence.
           The agent synthesis above reuses the existing Agent Harness data-agent (scoped to this org's
           bound sources, write-denied, budget-bounded) — no new orchestration framework.
         </p>
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="rounded-xl border border-stone-200 bg-white max-h-[520px] overflow-y-auto">
-          <div className="px-3 py-2 text-[10px] uppercase tracking-wide text-stone-400 border-b">Entities</div>
+        <div className="rounded-xl border border-border bg-card max-h-[520px] overflow-y-auto">
+          <div className="px-3 py-2 text-[10px] uppercase tracking-wide text-muted-foreground/80 border-b">Entities</div>
           <ul className="divide-y divide-stone-100">
             {objects.map((o) => (
-              <li key={o.id}><button onClick={() => setSelected(o.id)} className={`w-full text-left px-3 py-2 hover:bg-stone-50 text-[12px] ${selected === o.id ? 'bg-stone-50' : ''}`}>{o.display_name || o.name}</button></li>
+              <li key={o.id}><button onClick={() => setSelected(o.id)} className={`w-full text-left px-3 py-2 hover:bg-muted/40 text-[12px] ${selected === o.id ? 'bg-muted/40' : ''}`}>{o.display_name || o.name}</button></li>
             ))}
           </ul>
         </div>
         <div className="lg:col-span-2 space-y-3">
-          {!sel && <div className="rounded-xl border border-dashed border-stone-300 bg-white py-12 text-center text-[12px] text-stone-400">Select an entity to investigate.</div>}
+          {!sel && <div className="rounded-xl border border-dashed border-border bg-card py-12 text-center text-[12px] text-muted-foreground/80">Select an entity to investigate.</div>}
           {sel && (
             <>
-              <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wide text-stone-400">Verified findings</div>
+              <div className="rounded-xl border border-border bg-card px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80">Verified findings</div>
                 <ul className="mt-1 space-y-1">
-                  {facts.map((f, i) => <li key={i} className="text-[11px] text-stone-600 flex items-center gap-2"><CheckCircle2 size={12} className="text-emerald-600" />{f}</li>)}
+                  {facts.map((f, i) => <li key={i} className="text-[11px] text-foreground/80 flex items-center gap-2"><CheckCircle2 size={12} className="text-emerald-600" />{f}</li>)}
                 </ul>
               </div>
-              <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wide text-stone-400">Affected business relationships</div>
+              <div className="rounded-xl border border-border bg-card px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80">Affected business relationships</div>
                 <ul className="mt-1 space-y-1">
-                  {related.map((l, i) => <li key={i} className="text-[11px] text-stone-600"><span className="capitalize px-1 rounded bg-stone-100">{l.link_type}</span> {l.to_object_id}</li>)}
+                  {related.map((l, i) => <li key={i} className="text-[11px] text-foreground/80"><span className="capitalize px-1 rounded bg-muted/60">{l.link_type}</span> {l.to_object_id}</li>)}
                 </ul>
               </div>
-              <div className="rounded-xl border border-amber-200 bg-amber-50/40 px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wide text-stone-500">Hypotheses & recommended investigations</div>
-                <p className="mt-1 text-[11px] text-stone-600">Correlation is not causation. Inspect governed metrics for the linked objects, confirm with document evidence, and validate against source data before concluding a driver.</p>
+              <div className="rounded-xl border border-amber-200 dark:border-amber-900/50 bg-amber-50/40 dark:bg-amber-950/20 px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Hypotheses & recommended investigations</div>
+                <p className="mt-1 text-[11px] text-foreground/80">Correlation is not causation. Inspect governed metrics for the linked objects, confirm with document evidence, and validate against source data before concluding a driver.</p>
               </div>
             </>
           )}
@@ -795,20 +795,20 @@ function GovernedActionCard({ a, onExecuted }) {
     } finally { setBusy(false); }
   };
   return (
-    <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 mb-2">
+    <div className="rounded-xl border border-border bg-card px-4 py-3 mb-2">
       <div className="flex items-center gap-2">
-        <ShieldCheck size={14} className={a.risk_level === 'write' ? 'text-amber-600' : 'text-stone-400'} />
-        <span className="text-[13px] font-medium text-stone-800">{a.name}</span>
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">{a.risk_level}</span>
-        {a.tool_name && <span className="text-[10px] text-stone-400">tool: {a.tool_name}</span>}
+        <ShieldCheck size={14} className={a.risk_level === 'write' ? 'text-amber-600' : 'text-muted-foreground/80'} />
+        <span className="text-[13px] font-medium text-foreground">{a.name}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-border bg-muted/40 text-muted-foreground">{a.risk_level}</span>
+        {a.tool_name && <span className="text-[10px] text-muted-foreground/80">tool: {a.tool_name}</span>}
         <button onClick={() => setOpen(!open)}
-          className="ml-auto text-[11px] px-2.5 py-1 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50">
+          className="ml-auto text-[11px] px-2.5 py-1 rounded-md border border-border text-foreground/80 hover:bg-muted/40">
           {open ? 'Close' : 'Execute…'}
         </button>
       </div>
       {open && (
         <div className="mt-2 space-y-2">
-          <p className="text-[10px] text-stone-400">
+          <p className="text-[10px] text-muted-foreground/80">
             A write runs ONLY under an org-scoped approval bound to this exact
             action + tool (governance gate: pending, wrong-org, expired or
             param-drifted approvals are refused — fail closed).
@@ -816,18 +816,18 @@ function GovernedActionCard({ a, onExecuted }) {
           <div className="flex items-center gap-2">
             <input value={approvalId} onChange={(e) => setApprovalId(e.target.value)}
               placeholder="approval id (from the governance review)"
-              className="flex-1 border border-stone-200 rounded-md px-2.5 py-1.5 text-[11px]" />
+              className="flex-1 border border-border rounded-md px-2.5 py-1.5 text-[11px]" />
             <button onClick={execute} disabled={busy || !approvalId.trim()}
-              className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">
+              className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
               {busy ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
               Execute
             </button>
           </div>
           {result && (
             <div className={`rounded-lg px-3 py-2 text-[11px] ${
-              result.success ? 'border border-emerald-200 bg-emerald-50/60 text-emerald-800'
-                : result.blocked ? 'border border-amber-200 bg-amber-50/60 text-amber-800'
-                : 'border border-red-200 bg-red-50/60 text-red-700'}`}>
+              result.success ? 'border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50/60 dark:bg-emerald-950/30 text-emerald-800'
+                : result.blocked ? 'border border-amber-200 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/30 text-amber-800'
+                : 'border border-red-200 dark:border-red-900/50 bg-red-50/60 dark:bg-red-950/30 text-red-700'}`}>
               {result.success
                 ? <span>Executed under approval {result.approval_id} (approved by {result.approved_by || 'admin'}){result.result?.external_ref ? ` — ERP ref ${result.result.external_ref}` : ''} — result recorded.</span>
                 : result.blocked === 'confirmation_required'
@@ -867,41 +867,41 @@ function DecisionCenter() {
   const writeActions = (actions || []).filter((a) => a.risk_level === 'write' && a.is_active !== false);
   return (
     <div className="space-y-4">
-      <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><Workflow size={15} className="text-stone-600" /> Decision & Action Center</h2>
-      <span className="text-[11px] text-stone-400">recommendations surface from sensing breaches; every operational write stays approval-gated via governed actions</span>
+      <h2 className="text-sm font-semibold text-foreground flex items-center gap-2"><Workflow size={15} className="text-foreground/80" /> Decision & Action Center</h2>
+      <span className="text-[11px] text-muted-foreground/80">recommendations surface from sensing breaches; every operational write stays approval-gated via governed actions</span>
       <div>
-        <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Open escalations</div>
-        {!escalations && <div className="text-[11px] text-stone-400"><Loader2 size={14} className="animate-spin inline mr-2" />Loading…</div>}
-        {escalations && escalations.length === 0 && <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">No open escalations.</div>}
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-2">Open escalations</div>
+        {!escalations && <div className="text-[11px] text-muted-foreground/80"><Loader2 size={14} className="animate-spin inline mr-2" />Loading…</div>}
+        {escalations && escalations.length === 0 && <div className="rounded-xl border border-border bg-card px-4 py-3 text-[11px] text-muted-foreground/80">No open escalations.</div>}
         {escalations?.map((e) => (
-          <div key={e.id} className="rounded-xl border border-stone-200 bg-white px-4 py-3 mb-2">
+          <div key={e.id} className="rounded-xl border border-border bg-card px-4 py-3 mb-2">
             <div className="flex items-center gap-2">
               <ShieldAlert size={14} className="text-amber-600" />
-              <span className="text-[13px] font-medium text-stone-800">{e.summary?.slice(0, 70) || e.id}</span>
-              <span className="text-[10px] text-stone-400 ml-auto">{e.status}</span>
+              <span className="text-[13px] font-medium text-foreground">{e.summary?.slice(0, 70) || e.id}</span>
+              <span className="text-[10px] text-muted-foreground/80 ml-auto">{e.status}</span>
             </div>
-            {e.summary && <p className="mt-1 text-[11px] text-stone-600">{e.summary}</p>}
-            {e.context_json && <p className="mt-1 text-[10px] text-stone-400 font-mono break-all">{JSON.stringify(e.context_json).slice(0, 200)}</p>}
+            {e.summary && <p className="mt-1 text-[11px] text-foreground/80">{e.summary}</p>}
+            {e.context_json && <p className="mt-1 text-[10px] text-muted-foreground/80 font-mono break-all">{JSON.stringify(e.context_json).slice(0, 200)}</p>}
             <div className="mt-2 flex items-center gap-2">
-              <span className="text-[10px] text-stone-400">Approval required · execution via governed action</span>
-              <button onClick={() => resolve(e.id)} className="ml-auto text-[11px] px-2.5 py-1 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50">Resolve</button>
+              <span className="text-[10px] text-muted-foreground/80">Approval required · execution via governed action</span>
+              <button onClick={() => resolve(e.id)} className="ml-auto text-[11px] px-2.5 py-1 rounded-md border border-border text-foreground/80 hover:bg-muted/40">Resolve</button>
             </div>
           </div>
         ))}
       </div>
       <div>
-        <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Approval-gated actions (PO drafts)</div>
-        {!drafts && <div className="text-[11px] text-stone-400"><Loader2 size={14} className="animate-spin inline mr-2" />Loading…</div>}
-        {drafts && drafts.length === 0 && <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">No pending actions.</div>}
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-2">Approval-gated actions (PO drafts)</div>
+        {!drafts && <div className="text-[11px] text-muted-foreground/80"><Loader2 size={14} className="animate-spin inline mr-2" />Loading…</div>}
+        {drafts && drafts.length === 0 && <div className="rounded-xl border border-border bg-card px-4 py-3 text-[11px] text-muted-foreground/80">No pending actions.</div>}
         {drafts?.map((d) => (
-          <div key={d.id} className="rounded-xl border border-stone-200 bg-white px-4 py-3 mb-2 flex items-center gap-2">
-            <Activity size={14} className="text-stone-500" />
-            <span className="text-[12px] text-stone-700">{d.supplier_name} · {d.product} · {d.quantity} {d.unit}</span>
-            <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full border ${d.status === 'approved' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-700'}`}>{d.status}</span>
+          <div key={d.id} className="rounded-xl border border-border bg-card px-4 py-3 mb-2 flex items-center gap-2">
+            <Activity size={14} className="text-muted-foreground" />
+            <span className="text-[12px] text-foreground">{d.supplier_name} · {d.product} · {d.quantity} {d.unit}</span>
+            <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full border ${d.status === 'approved' ? 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700' : 'border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 text-amber-700'}`}>{d.status}</span>
           </div>
         ))}
         {drafts && drafts.length > 0 && (
-          <p className="mt-1 text-[10px] text-stone-400">
+          <p className="mt-1 text-[10px] text-muted-foreground/80">
             drafts are born approved — the governing approval already happened before the
             write was allowed; the buyer edits → exports → enters them in the ERP
             (direct ERP writes stay out of scope until a write connector exists).
@@ -909,10 +909,10 @@ function DecisionCenter() {
         )}
       </div>
       <div>
-        <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Governed write actions ({writeActions.length})</div>
-        {!actions && <div className="text-[11px] text-stone-400"><Loader2 size={14} className="animate-spin inline mr-2" />Loading…</div>}
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-2">Governed write actions ({writeActions.length})</div>
+        {!actions && <div className="text-[11px] text-muted-foreground/80"><Loader2 size={14} className="animate-spin inline mr-2" />Loading…</div>}
         {actions && writeActions.length === 0 && (
-          <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">
+          <div className="rounded-xl border border-border bg-card px-4 py-3 text-[11px] text-muted-foreground/80">
             No active write-type actions bound in this organization.
           </div>
         )}
@@ -949,32 +949,32 @@ function OutcomeCard({ o, onChanged }) {
     } catch (e) { toast.error(`${verb} failed: ${e.message || e}`); }
     finally { setBusy(false); }
   };
-  const vBadge = { verified: 'border-emerald-200 bg-emerald-50 text-emerald-700', rejected: 'border-red-200 bg-red-50 text-red-600' }[o.verification_status]
-    || 'border-stone-200 bg-stone-50 text-stone-500';
+  const vBadge = { verified: 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700', rejected: 'border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30 text-red-600' }[o.verification_status]
+    || 'border-border bg-muted/40 text-muted-foreground';
   const good = o.realized_impact != null && o.realized_impact > 0;
   return (
-    <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 mb-2">
+    <div className="rounded-xl border border-border bg-card px-4 py-3 mb-2">
       <div className="flex items-center gap-2">
-        <Target size={14} className="text-stone-500" />
-        <span className="text-[13px] font-medium text-stone-800">{o.metric_name}</span>
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">{o.direction}</span>
+        <Target size={14} className="text-muted-foreground" />
+        <span className="text-[13px] font-medium text-foreground">{o.metric_name}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-border bg-muted/40 text-muted-foreground">{o.direction}</span>
         <span className={`text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${vBadge}`}>{o.verification_status}</span>
-        <span className="ml-auto text-[10px] text-stone-400">{o.baseline_period} → {o.observed_period}</span>
+        <span className="ml-auto text-[10px] text-muted-foreground/80">{o.baseline_period} → {o.observed_period}</span>
       </div>
       <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-stone-400">Expected</div>
-          <div className="text-stone-700">{IMPACT_FMT(o.expected_impact, o.unit)}</div>
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80">Expected</div>
+          <div className="text-foreground">{IMPACT_FMT(o.expected_impact, o.unit)}</div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-stone-400">Measured (realized)</div>
-          <div className={o.realized_impact == null ? 'text-stone-400' : good ? 'text-emerald-700' : 'text-red-600'}>
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80">Measured (realized)</div>
+          <div className={o.realized_impact == null ? 'text-muted-foreground/80' : good ? 'text-emerald-700' : 'text-red-600'}>
             {o.measurement_status === 'pending' ? 'not yet measured' : IMPACT_FMT(o.realized_impact, o.unit)}
           </div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-stone-400">Governed values</div>
-          <div className="text-stone-600">{Number(o.baseline_value).toLocaleString()} → {o.observed_value != null ? Number(o.observed_value).toLocaleString() : '—'}</div>
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80">Governed values</div>
+          <div className="text-foreground/80">{Number(o.baseline_value).toLocaleString()} → {o.observed_value != null ? Number(o.observed_value).toLocaleString() : '—'}</div>
         </div>
       </div>
       {o.verification_status === 'verified' && (
@@ -983,15 +983,15 @@ function OutcomeCard({ o, onChanged }) {
         </p>
       )}
       <div className="mt-2 flex items-center gap-2">
-        <span className="text-[10px] text-stone-400">baseline & observed computed by the governed MetricDefinition — the LLM never calculates impact</span>
+        <span className="text-[10px] text-muted-foreground/80">baseline & observed computed by the governed MetricDefinition — the LLM never calculates impact</span>
         <div className="ml-auto flex items-center gap-1.5">
           {o.measurement_status !== 'measured' && o.verification_status !== 'verified' && (
             <button onClick={() => act('measure')} disabled={busy}
-              className="text-[11px] px-2.5 py-1 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50 disabled:opacity-50">Measure</button>
+              className="text-[11px] px-2.5 py-1 rounded-md border border-border text-foreground/80 hover:bg-muted/40 disabled:opacity-50">Measure</button>
           )}
           {o.measurement_status === 'measured' && o.verification_status !== 'verified' && (
             <button onClick={() => act('verify')} disabled={busy}
-              className="text-[11px] px-2.5 py-1 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">Verify</button>
+              className="text-[11px] px-2.5 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">Verify</button>
           )}
         </div>
       </div>
@@ -1023,14 +1023,14 @@ function LifecycleChain() {
     verification: 'Outcome verified',
   };
   return (
-    <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-      <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Decision lifecycle — trace any decision end to end</div>
+    <div className="rounded-xl border border-border bg-card px-4 py-3">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-2">Decision lifecycle — trace any decision end to end</div>
       <div className="flex items-center gap-2">
         <input value={ref} onChange={(e) => setRef(e.target.value)}
           placeholder="escalation / approval / PO draft / outcome id"
-          className="flex-1 border border-stone-200 rounded-md px-2.5 py-1.5 text-[11px]" />
+          className="flex-1 border border-border rounded-md px-2.5 py-1.5 text-[11px]" />
         <button onClick={load} disabled={busy || !ref.trim()}
-          className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-stone-800 text-white hover:bg-stone-700 disabled:opacity-50">
+          className="flex items-center gap-1.5 text-[11px] px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
           {busy ? <Loader2 size={12} className="animate-spin" /> : <GitBranch size={12} />} Trace
         </button>
       </div>
@@ -1041,13 +1041,13 @@ function LifecycleChain() {
             <div key={stage} className="flex items-center gap-2 text-[11px] py-1">
               {present
                 ? <CheckCircle2 size={12} className="text-emerald-600" />
-                : <span className="w-3 h-3 rounded-full border border-stone-300 inline-block" />}
-              <span className={present ? 'text-stone-700' : 'text-stone-400'}>{STAGE_LABELS[stage] || stage}</span>
-              {!present && <span className="text-[10px] text-stone-400">— no record yet (honest absence)</span>}
+                : <span className="w-3 h-3 rounded-full border border-border inline-block" />}
+              <span className={present ? 'text-foreground' : 'text-muted-foreground/80'}>{STAGE_LABELS[stage] || stage}</span>
+              {!present && <span className="text-[10px] text-muted-foreground/80">— no record yet (honest absence)</span>}
             </div>
           ))}
           {chain.stages.execution?.erp_submissions?.map((x) => (
-            <p key={x.id} className="text-[10px] text-stone-500">
+            <p key={x.id} className="text-[10px] text-muted-foreground">
               ERP: {x.connector_id} · {x.status}{x.external_ref ? ` · ref ${x.external_ref}` : ''}
             </p>
           ))}
@@ -1095,24 +1095,24 @@ function OutcomeTracking() {
   ];
   return (
     <div className="space-y-4">
-      <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><Activity size={15} className="text-stone-600" /> Business Outcome Tracking</h2>
-      <span className="text-[11px] text-stone-400">expected ≠ measured ≠ verified — realized impact is a governed delta, certified by an authorized reviewer</span>
-      <div className="rounded-xl border border-stone-200 bg-white px-4 py-4">
+      <h2 className="text-sm font-semibold text-foreground flex items-center gap-2"><Activity size={15} className="text-foreground/80" /> Business Outcome Tracking</h2>
+      <span className="text-[11px] text-muted-foreground/80">expected ≠ measured ≠ verified — realized impact is a governed delta, certified by an authorized reviewer</span>
+      <div className="rounded-xl border border-border bg-card px-4 py-4">
         {steps.map(([label, state], i) => {
           const done = !['…', 'pending', 'none yet', '—', 'none open'].includes(state);
           return (
             <div key={i} className="flex items-center gap-3 py-2">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] ${done ? 'bg-emerald-100 text-emerald-700' : 'bg-stone-100 text-stone-400'}`}>{i + 1}</div>
-              <span className="text-[12px] text-stone-700">{label}</span>
-              <span className="ml-auto text-[10px] text-stone-400">{state}</span>
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] ${done ? 'bg-emerald-100 text-emerald-700' : 'bg-muted/60 text-muted-foreground/80'}`}>{i + 1}</div>
+              <span className="text-[12px] text-foreground">{label}</span>
+              <span className="ml-auto text-[10px] text-muted-foreground/80">{state}</span>
             </div>
           );
         })}
       </div>
       <div>
-        <div className="text-[10px] uppercase tracking-wide text-stone-400 mb-2">Outcome measurements ({outcomes ? outcomes.length : '…'})</div>
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-2">Outcome measurements ({outcomes ? outcomes.length : '…'})</div>
         {outcomes && outcomes.length === 0 && (
-          <div className="rounded-xl border border-stone-200 bg-white px-4 py-3 text-[11px] text-stone-400">
+          <div className="rounded-xl border border-border bg-card px-4 py-3 text-[11px] text-muted-foreground/80">
             No outcome measurements recorded yet — record one after a governed action executes.
           </div>
         )}
@@ -1131,20 +1131,20 @@ function OperationalHealth({ overview, value, selectedDomain, setSelectedDomain 
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-sm font-semibold text-stone-800 flex items-center gap-2"><ShieldCheck size={15} className="text-stone-600" /> Operational Health & Governance</h2>
-        <span className="text-[11px] text-stone-400">technical administration, consolidated — business impact is shown in the experiences above</span>
+        <h2 className="text-sm font-semibold text-foreground flex items-center gap-2"><ShieldCheck size={15} className="text-foreground/80" /> Operational Health & Governance</h2>
+        <span className="text-[11px] text-muted-foreground/80">technical administration, consolidated — business impact is shown in the experiences above</span>
         <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3">
           {[['Domains', totals?.domains], ['Objects', totals?.objects], ['Objects live', totals?.objects_live], ['Actions', totals?.actions], ['Links', totals?.links]].map(([label, v]) => (
-            <div key={label} className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-              <div className="text-lg font-semibold text-stone-800">{v}</div>
-              <div className="text-[10px] uppercase tracking-wide text-stone-400">{label}</div>
+            <div key={label} className="rounded-xl border border-border bg-card px-4 py-3">
+              <div className="text-lg font-semibold text-foreground">{v}</div>
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground/80">{label}</div>
             </div>
           ))}
         </div>
       </div>
       <div>
-        <h3 className="text-[13px] font-semibold text-stone-800">Coverage Map</h3>
-        <span className="text-[11px] text-stone-400">honest readiness — “live” only counts objects backed by real data + an executable action</span>
+        <h3 className="text-[13px] font-semibold text-foreground">Coverage Map</h3>
+        <span className="text-[11px] text-muted-foreground/80">honest readiness — “live” only counts objects backed by real data + an executable action</span>
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {overview?.domains.map((d) => (
             <CoverageCard key={d.id} domain={d} value={value.find((v) => v.domain_id === d.id)} selected={d.id === selectedDomain} onClick={() => setSelectedDomain(d.id)} />
@@ -1164,7 +1164,7 @@ function OperationalHealth({ overview, value, selectedDomain, setSelectedDomain 
 const DISCOVERY_STATUS_STYLE = {
   documented: 'bg-sky-50 text-sky-700 border-sky-200',
   configured: 'bg-violet-50 text-violet-700 border-violet-200',
-  observed: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  observed: 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/50',
 };
 const ACTIVITY_TYPE_LABEL = {
   start_event: 'Start', end_event: 'End', human_task: 'Human task',
@@ -1216,17 +1216,17 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
   const d = detail;
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="w-full max-w-2xl h-full overflow-y-auto bg-white shadow-xl"
+      <div className="w-full max-w-2xl h-full overflow-y-auto bg-card shadow-xl"
         onClick={(e) => e.stopPropagation()}>
-        <div className="sticky top-0 bg-white/95 backdrop-blur border-b border-stone-200 px-6 py-4 flex items-start gap-3">
+        <div className="sticky top-0 bg-card/95 backdrop-blur border-b border-border px-6 py-4 flex items-start gap-3">
           <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold text-stone-900 truncate">
+            <h2 className="text-[15px] font-semibold text-foreground truncate">
               {d ? d.name : 'Process'}
             </h2>
             {d && (
               <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                 {d.process_family && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-border bg-muted/40 text-muted-foreground">
                     family: {d.process_family}
                   </span>
                 )}
@@ -1238,23 +1238,23 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
                 </span>
                 {onOpenFlow && (
                   <button onClick={() => onOpenFlow(processId)}
-                    className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-300 bg-white text-stone-600 hover:bg-stone-100">
+                    className="text-[10px] px-1.5 py-0.5 rounded-full border border-border bg-card text-foreground/80 hover:bg-muted/60">
                     flow view
                   </button>
                 )}
               </div>
             )}
           </div>
-          <button onClick={onClose} className="ml-auto text-stone-400 hover:text-stone-700 text-lg leading-none px-1">×</button>
+          <button onClick={onClose} className="ml-auto text-muted-foreground/80 hover:text-foreground text-lg leading-none px-1">×</button>
         </div>
 
         {error && (
-          <div className="mx-6 mt-4 text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+          <div className="mx-6 mt-4 text-[12px] text-red-600 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/50 rounded-md px-3 py-2">
             Failed to load process: {error}
           </div>
         )}
         {!d && !error && (
-          <div className="flex items-center justify-center py-20 text-stone-400">
+          <div className="flex items-center justify-center py-20 text-muted-foreground/80">
             <Loader2 size={16} className="animate-spin mr-2" /> Loading…
           </div>
         )}
@@ -1262,8 +1262,8 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
           <div className="px-6 py-5 space-y-6">
             {/* Review actions — org-admin only (server enforces 403) */}
             {isAdmin && (
-              <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
-                <p className="text-[11px] text-stone-500 mb-2.5">
+              <div className="rounded-lg border border-border bg-muted/40 p-4">
+                <p className="text-[11px] text-muted-foreground mb-2.5">
                   Human review: confirm only if the evidence genuinely supports this process.
                 </p>
                 {!showReject ? (
@@ -1273,7 +1273,7 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
                       {busy ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />} Confirm
                     </button>
                     <button onClick={() => setShowReject(true)} disabled={busy}
-                      className="flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md border border-red-200 text-red-600 bg-white hover:bg-red-50 disabled:opacity-50">
+                      className="flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md border border-red-200 text-red-600 bg-card hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50">
                       <AlertTriangle size={12} /> Reject
                     </button>
                   </div>
@@ -1282,14 +1282,14 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
                     <textarea value={reason} onChange={(e) => setReason(e.target.value)}
                       placeholder="Reason for rejection (recorded in the review history)…"
                       rows={2}
-                      className="w-full text-[12px] border border-stone-300 rounded-md px-2.5 py-2 focus:outline-none focus:ring-1 focus:ring-stone-400" />
+                      className="w-full text-[12px] border border-border rounded-md px-2.5 py-2 focus:outline-none focus:ring-1 focus:ring-stone-400" />
                     <div className="flex gap-2">
                       <button onClick={() => review('reject')} disabled={busy}
                         className="text-[12px] px-3 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
                         {busy ? 'Rejecting…' : 'Reject process'}
                       </button>
                       <button onClick={() => { setShowReject(false); setReason(''); }}
-                        className="text-[12px] px-3 py-1.5 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-100">
+                        className="text-[12px] px-3 py-1.5 rounded-md border border-border text-foreground/80 hover:bg-muted/60">
                         Cancel
                       </button>
                     </div>
@@ -1300,47 +1300,47 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
 
             {/* Overview */}
             <section>
-              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">Overview</h3>
+              <h3 className="text-[11px] font-medium text-muted-foreground/80 uppercase tracking-wide mb-2">Overview</h3>
               <dl className="grid grid-cols-1 gap-2 text-[12px]">
                 {[['Purpose', d.purpose], ['Trigger event', d.trigger_event],
                   ['Objective', d.objective], ['Start condition', d.start_condition],
                   ['Completion condition', d.completion_condition]].map(([k, v]) => (
                   v ? (
                     <div key={k} className="flex gap-2">
-                      <dt className="w-36 shrink-0 text-stone-400">{k}</dt>
-                      <dd className="text-stone-700">{v}</dd>
+                      <dt className="w-36 shrink-0 text-muted-foreground/80">{k}</dt>
+                      <dd className="text-foreground">{v}</dd>
                     </div>
                   ) : null
                 ))}
                 {!d.purpose && !d.trigger_event && !d.objective && (
-                  <p className="text-stone-400">No overview fields were discovered from evidence.</p>
+                  <p className="text-muted-foreground/80">No overview fields were discovered from evidence.</p>
                 )}
               </dl>
             </section>
 
             {/* Activity sequence */}
             <section>
-              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">
+              <h3 className="text-[11px] font-medium text-muted-foreground/80 uppercase tracking-wide mb-2">
                 Activity sequence ({d.activities.length})
               </h3>
               {d.activities.length === 0 ? (
-                <p className="text-[12px] text-stone-400">No activities discovered yet.</p>
+                <p className="text-[12px] text-muted-foreground/80">No activities discovered yet.</p>
               ) : (
                 <ol className="space-y-1.5">
                   {d.activities.map((a, i) => (
-                    <li key={`${a.seq}-${a.name}`} className="flex items-start gap-3 rounded-lg border border-stone-200 px-3 py-2">
-                      <span className="mt-0.5 w-6 h-6 shrink-0 rounded-full bg-stone-100 text-stone-600 text-[11px] flex items-center justify-center">{a.seq}</span>
+                    <li key={`${a.seq}-${a.name}`} className="flex items-start gap-3 rounded-lg border border-border px-3 py-2">
+                      <span className="mt-0.5 w-6 h-6 shrink-0 rounded-full bg-muted/60 text-foreground/80 text-[11px] flex items-center justify-center">{a.seq}</span>
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[12px] font-medium text-stone-800">{a.name}</span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">
+                          <span className="text-[12px] font-medium text-foreground">{a.name}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-border bg-muted/40 text-muted-foreground">
                             {ACTIVITY_TYPE_LABEL[a.activity_type] || a.activity_type}
                           </span>
                           {a.performer && (
-                            <span className="text-[10px] text-stone-400">by {a.performer}</span>
+                            <span className="text-[10px] text-muted-foreground/80">by {a.performer}</span>
                           )}
                         </div>
-                        {a.business_rules && <p className="mt-0.5 text-[11px] text-stone-500">Rule: {a.business_rules}</p>}
+                        {a.business_rules && <p className="mt-0.5 text-[11px] text-muted-foreground">Rule: {a.business_rules}</p>}
                         {a.exception_paths && <p className="text-[11px] text-amber-700">Exception: {a.exception_paths}</p>}
                       </div>
                     </li>
@@ -1351,30 +1351,30 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
 
             {/* Evidence / provenance */}
             <section>
-              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">
+              <h3 className="text-[11px] font-medium text-muted-foreground/80 uppercase tracking-wide mb-2">
                 Evidence ({d.evidence.length})
               </h3>
               {d.evidence.length === 0 ? (
-                <p className="text-[12px] text-stone-400">No evidence rows recorded.</p>
+                <p className="text-[12px] text-muted-foreground/80">No evidence rows recorded.</p>
               ) : (
                 <ul className="space-y-1.5">
                   {d.evidence.map((e) => (
-                    <li key={e.id} className="rounded-lg border border-stone-200 px-3 py-2">
+                    <li key={e.id} className="rounded-lg border border-border px-3 py-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-stone-200 bg-stone-50 text-stone-500">{e.evidence_kind}</span>
-                        <span className="text-[10px] text-stone-400 truncate">{e.source_ref}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-border bg-muted/40 text-muted-foreground">{e.evidence_kind}</span>
+                        <span className="text-[10px] text-muted-foreground/80 truncate">{e.source_ref}</span>
                         {e.evidence_status && (
                           <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${
                             e.evidence_status === 'verified'
-                              ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                              ? 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700'
                               : e.evidence_status === 'rejected'
-                                ? 'border-red-200 bg-red-50 text-red-700'
-                                : 'border-stone-200 bg-stone-50 text-stone-500'}`}>
+                                ? 'border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30 text-red-700'
+                                : 'border-border bg-muted/40 text-muted-foreground'}`}>
                             {e.evidence_status}
                           </span>
                         )}
                       </div>
-                      {e.quote && <p className="mt-1 text-[11px] text-stone-600 italic line-clamp-3">“{e.quote}”</p>}
+                      {e.quote && <p className="mt-1 text-[11px] text-foreground/80 italic line-clamp-3">“{e.quote}”</p>}
                     </li>
                   ))}
                 </ul>
@@ -1384,23 +1384,23 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
             {/* Related processes + ontology connections */}
             <section className="grid grid-cols-1 gap-4">
               <div>
-                <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">Related processes</h3>
+                <h3 className="text-[11px] font-medium text-muted-foreground/80 uppercase tracking-wide mb-2">Related processes</h3>
                 {d.related_processes.length === 0 ? (
-                  <p className="text-[12px] text-stone-400">No discovered handoffs yet.</p>
+                  <p className="text-[12px] text-muted-foreground/80">No discovered handoffs yet.</p>
                 ) : d.related_processes.map((r, i) => (
-                  <p key={i} className="text-[12px] text-stone-700">
-                    <span className="text-stone-400">{r.direction}:</span> {r.peer_name || r.peer_id}
-                    {r.handoff_note && <span className="text-stone-400"> — {r.handoff_note}</span>}
+                  <p key={i} className="text-[12px] text-foreground">
+                    <span className="text-muted-foreground/80">{r.direction}:</span> {r.peer_name || r.peer_id}
+                    {r.handoff_note && <span className="text-muted-foreground/80"> — {r.handoff_note}</span>}
                   </p>
                 ))}
               </div>
               <div>
-                <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">Ontology connections</h3>
+                <h3 className="text-[11px] font-medium text-muted-foreground/80 uppercase tracking-wide mb-2">Ontology connections</h3>
                 {d.ontology_connections.length === 0 ? (
-                  <p className="text-[12px] text-stone-400">None referenced by evidence.</p>
+                  <p className="text-[12px] text-muted-foreground/80">None referenced by evidence.</p>
                 ) : d.ontology_connections.map((c, i) => (
-                  <p key={i} className="text-[12px] text-stone-700">
-                    <span className="text-stone-400">{c.kind}:</span> {c.name || c.link_type || c.id}
+                  <p key={i} className="text-[12px] text-foreground">
+                    <span className="text-muted-foreground/80">{c.kind}:</span> {c.name || c.link_type || c.id}
                   </p>
                 ))}
               </div>
@@ -1408,24 +1408,24 @@ function ProcessDetailDrawer({ processId, onClose, onChanged, isAdmin, onOpenFlo
 
             {/* Review history */}
             <section>
-              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">
+              <h3 className="text-[11px] font-medium text-muted-foreground/80 uppercase tracking-wide mb-2">
                 Review history ({d.review_history.length})
               </h3>
               {d.review_history.length === 0 ? (
-                <p className="text-[12px] text-stone-400">Awaiting first human review.</p>
+                <p className="text-[12px] text-muted-foreground/80">Awaiting first human review.</p>
               ) : (
                 <ul className="space-y-1.5">
                   {d.review_history.map((h, i) => (
                     <li key={i} className="text-[12px] flex items-start gap-2">
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${
-                        h.decision === 'confirmed' ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                          : 'border-red-200 bg-red-50 text-red-700'}`}>
+                        h.decision === 'confirmed' ? 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700'
+                          : 'border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30 text-red-700'}`}>
                         {h.decision}
                       </span>
-                      <span className="text-stone-600">
+                      <span className="text-foreground/80">
                         {h.reviewer_name || h.reviewer_id || 'unknown'}
-                        {h.reason && <span className="text-stone-400"> — {h.reason}</span>}
-                        <span className="text-stone-400 ml-1">{h.at ? new Date(h.at).toLocaleString() : ''}</span>
+                        {h.reason && <span className="text-muted-foreground/80"> — {h.reason}</span>}
+                        <span className="text-muted-foreground/80 ml-1">{h.at ? new Date(h.at).toLocaleString() : ''}</span>
                       </span>
                     </li>
                   ))}
@@ -1478,43 +1478,43 @@ function BusinessProcesses({ onOpenFlow }) {
     <div>
       <div className="flex items-center gap-2 flex-wrap">
         <div className="relative">
-          <Search size={13} className="absolute left-2.5 top-2.5 text-stone-400" />
+          <Search size={13} className="absolute left-2.5 top-2.5 text-muted-foreground/80" />
           <input value={q} onChange={(e) => { setQ(e.target.value); setPage(1); }}
             placeholder="Search processes…"
-            className="text-[12px] pl-8 pr-3 py-2 w-56 border border-stone-300 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-stone-400" />
+            className="text-[12px] pl-8 pr-3 py-2 w-56 border border-border rounded-md bg-card focus:outline-none focus:ring-1 focus:ring-stone-400" />
         </div>
         <select value={family} onChange={(e) => { setFamily(e.target.value); setPage(1); }}
-          className="text-[12px] px-2.5 py-2 border border-stone-300 rounded-md bg-white text-stone-600">
+          className="text-[12px] px-2.5 py-2 border border-border rounded-md bg-card text-foreground/80">
           <option value="">All families</option>
           {(data?.families || []).filter((f) => f.family).map((f) => (
             <option key={f.family} value={f.family}>{f.family} ({f.count})</option>
           ))}
         </select>
         <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}
-          className="text-[12px] px-2.5 py-2 border border-stone-300 rounded-md bg-white text-stone-600 capitalize">
+          className="text-[12px] px-2.5 py-2 border border-border rounded-md bg-card text-foreground/80 capitalize">
           <option value="">All statuses</option>
           <option value="proposed">Needs review</option>
           <option value="verified">Verified</option>
           <option value="rejected">Rejected</option>
         </select>
-        <span className="ml-auto text-[11px] text-stone-400">
+        <span className="ml-auto text-[11px] text-muted-foreground/80">
           {data ? `${data.total} discovered process${data.total === 1 ? '' : 'es'}` : ''}
         </span>
       </div>
 
       {!data ? (
-        <div className="flex items-center justify-center py-20 text-stone-400">
+        <div className="flex items-center justify-center py-20 text-muted-foreground/80">
           <Loader2 size={16} className="animate-spin mr-2" /> Loading processes…
         </div>
       ) : data.error ? (
-        <div className="mt-6 flex items-center gap-2 text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+        <div className="mt-6 flex items-center gap-2 text-[12px] text-amber-700 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 rounded-md px-3 py-2">
           <AlertTriangle size={13} /> Failed to load the process catalogue — run discovery first.
         </div>
       ) : data.total === 0 ? (
-        <div className="mt-6 rounded-xl border border-dashed border-stone-300 bg-white px-6 py-10 text-center">
-          <Workflow size={20} className="mx-auto text-stone-300" />
-          <p className="mt-2 text-[13px] text-stone-500">No business processes discovered yet.</p>
-          <p className="mt-1 text-[11px] text-stone-400">
+        <div className="mt-6 rounded-xl border border-dashed border-border bg-card px-6 py-10 text-center">
+          <Workflow size={20} className="mx-auto text-muted-foreground/60" />
+          <p className="mt-2 text-[13px] text-muted-foreground">No business processes discovered yet.</p>
+          <p className="mt-1 text-[11px] text-muted-foreground/80">
             Run AI discovery from authorized resources — proposed processes appear here for human review.
           </p>
         </div>
@@ -1522,24 +1522,24 @@ function BusinessProcesses({ onOpenFlow }) {
         <div className="mt-5 space-y-6">
           {grouped.map(([fam, items]) => (
             <div key={fam}>
-              <h3 className="text-[11px] font-medium text-stone-400 uppercase tracking-wide mb-2">{fam}</h3>
+              <h3 className="text-[11px] font-medium text-muted-foreground/80 uppercase tracking-wide mb-2">{fam}</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {items.map((p) => (
                   <button key={p.id} onClick={() => setSelected(p.id)}
-                    className="text-left rounded-xl border border-stone-200 bg-white px-4 py-3.5 hover:border-stone-300 transition-colors">
+                    className="text-left rounded-xl border border-border bg-card px-4 py-3.5 hover:border-border transition-colors">
                     <div className="flex items-center gap-2">
-                      <span className="text-[13px] font-medium text-stone-800 truncate">{p.name}</span>
+                      <span className="text-[13px] font-medium text-foreground truncate">{p.name}</span>
                       <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full border capitalize ${DISCOVERY_STATUS_STYLE[p.discovery_status] || DISCOVERY_STATUS_STYLE.documented}`}>
                         {p.discovery_status}
                       </span>
                     </div>
-                    {p.purpose && <p className="mt-1 text-[11px] text-stone-400 line-clamp-1">{p.purpose}</p>}
-                    <div className="mt-2 flex items-center gap-3 flex-wrap text-[10px] text-stone-500">
+                    {p.purpose && <p className="mt-1 text-[11px] text-muted-foreground/80 line-clamp-1">{p.purpose}</p>}
+                    <div className="mt-2 flex items-center gap-3 flex-wrap text-[10px] text-muted-foreground">
                       <span className={`px-1.5 py-0.5 rounded-full border capitalize ${EVIDENCE_BADGE_STYLE[p.evidence_status] || EVIDENCE_BADGE_STYLE.proposed}`}>
                         {p.evidence_status}
                       </span>
                       {p.needs_review && (
-                        <span className="px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700">needs review</span>
+                        <span className="px-1.5 py-0.5 rounded-full border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 text-amber-700">needs review</span>
                       )}
                       <span>{p.evidence_count} evidence</span>
                       <span>{p.activities_count} activities</span>
@@ -1553,12 +1553,12 @@ function BusinessProcesses({ onOpenFlow }) {
             </div>
           ))}
           {totalPages > 1 && (
-            <div className="flex items-center justify-center gap-3 text-[12px] text-stone-500">
+            <div className="flex items-center justify-center gap-3 text-[12px] text-muted-foreground">
               <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)}
-                className="px-2.5 py-1 rounded-md border border-stone-300 bg-white disabled:opacity-40 hover:bg-stone-100">Prev</button>
+                className="px-2.5 py-1 rounded-md border border-border bg-card disabled:opacity-40 hover:bg-muted/60">Prev</button>
               <span>page {data.page} / {totalPages}</span>
               <button disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}
-                className="px-2.5 py-1 rounded-md border border-stone-300 bg-white disabled:opacity-40 hover:bg-stone-100">Next</button>
+                className="px-2.5 py-1 rounded-md border border-border bg-card disabled:opacity-40 hover:bg-muted/60">Next</button>
             </div>
           )}
         </div>

@@ -1174,6 +1174,12 @@ def _extend_with_project_kbs(
     clauses = []
     if project_id:
         clauses.append(KnowledgeBase.project_id == project_id)
+        # Multi-project sharing (2026-10-31): also union KBs explicitly
+        # linked to this project via project_knowledge_bases.
+        from app.services.project_kb_membership import project_kb_link_subquery
+        clauses.append(KnowledgeBase.id.in_(
+            project_kb_link_subquery(project_id, org_id=org_id, app_id=app_id)
+        ))
     if legacy_name:
         clauses.append(func.lower(KnowledgeBase.project) == legacy_name.lower())
 

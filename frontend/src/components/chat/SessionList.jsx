@@ -544,20 +544,22 @@ export default function SessionList() {
         {!searchQuery.trim() && groups.map((g) => (
           <div key={g.project} className="mb-1">
             <div className="group/project flex w-full items-center px-2 pt-3 pb-1">
-              <button onClick={() => toggleCollapse(g.project)} className="flex flex-1 items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-foreground/80 transition-colors hover:text-foreground">
-                <ChevronRight className={`h-3 w-3 transition-transform ${collapsed[g.project] ? '' : 'rotate-90'}`} />
+              <button onClick={() => toggleCollapse(g.project)} title={g.project} className="flex flex-1 items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-foreground/80 transition-colors hover:text-foreground">
+                <ChevronRight className={`h-3 w-3 shrink-0 transition-transform ${collapsed[g.project] ? '' : 'rotate-90'}`} />
                 {/* Project name. The per-group session count used to be
                     rendered here ("UNGROUPED 62" / "TEST 0") — removed:
                     the at-a-glance signal was adding visual noise without
                     telling the user anything they couldn't see by
                     expanding the group. The "See more (+N)" affordance
-                    below still surfaces the hidden count when relevant. */}
-                <span className="flex-1 truncate text-left">{g.project}</span>
+                    below still surfaces the hidden count when relevant.
+                    `title` shows the full name on hover — long project
+                    labels truncate inside a narrow sidebar. */}
+                <span className="min-w-0 flex-1 truncate text-left">{g.project}</span>
               </button>
               <button
                 onClick={() => handleNewChatInGroup(g.project)}
                 title={`${t.sessionList.newTask} — ${g.project}`}
-                className="rounded p-0.5 text-muted-foreground/30 opacity-0 transition-opacity group-hover/project:opacity-100 hover:bg-sidebar-accent/50 hover:text-foreground"
+                className="rounded p-0.5 text-muted-foreground/60 hover:bg-sidebar-accent/50 hover:text-foreground"
               >
                 <Plus className="h-3 w-3" />
               </button>

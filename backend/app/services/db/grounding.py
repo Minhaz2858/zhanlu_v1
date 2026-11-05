@@ -343,6 +343,41 @@ def sql_is_introspection(sql: str | None) -> bool:
     return all(is_metadata_object(r) for r in relations)
 
 
+#: Aggregation / SQL-structure verbs — these name an OPERATION the SQL layer
+#: handles, never a measurement a slot could disclose. Promoting them to
+#: ``metric`` (old rule 7) forced spurious "unsupported slot" directives that
+#: degraded the prompt (audit B6: ``sum`` was disclosed as an unsupported
+#: metric). They are scaffolding, not figures.
+_AGG_VERB_RE = re.compile(
+    r"^(sum|count|total|subtotal|avg|average|mean|max|min|median|"
+    r"sum_of|count_of|group|group_by|distinct|limit|order_by|rank|"
+    r"ratio|percent|percentage|summar|aggregate|stddev|variance)$",
+    re.IGNORECASE,
+)
+
+#: Column / dimension identifier suffixes. A token shaped like ``customer_name``
+#: or ``order_id`` names an ENTITY or ATTRIBUTE, not a measurement. Promoting it
+#: to ``metric`` forced a spurious unsupported-slot disclosure for a column the
+#: catalog has no metric concept for (audit B6).
+_DIMENSION_SUFFIX_RE = re.compile(
+    r"(_id|_ids|_name|_names|_date|_dates|_time|_type|_types|_status|"
+    r"_code|_desc|_description|_category|_kind|_no|_title|_label|_text|"
+    r"_remark|_note)$",
+    re.IGNORECASE,
+)
+
+#: Measure-shaped identifier suffixes the catalog rarely names as a concept
+#: (``order_count``, ``total_quantity``). These are computable via the SQL
+#: layer, so disclosing them as "unsupported" is a false positive that degrades
+#: the prompt (audit B6). Treated as unknown — never a *supported* metric the
+#: disclosure layer can name, but also never an unsupported-slot lie.
+_MEASURE_SUFFIX_RE = re.compile(
+    r"(_count|_cnt|_qty|_quantity|_amount|_sum|_total|_avg|"
+    r"_number|_num|_value|_price|_rate)$",
+    re.IGNORECASE,
+)
+
+
 def classify_unit(
     unit: str,
     *,
@@ -411,7 +446,25 @@ def classify_unit(
         # the user's word is only a COMPONENT of the catalog's phrases: it names
         # the entity those phrases are about, not one measurement
         return "grouping"
+    # Rule 7 (refined, audit B6): a short or identifier-shaped token is a
+    # *candidate* metric name — but only when it plausibly names a MEASURE.
+    # Aggregation / SQL-structure verbs (sum, count, total, avg) name an
+    # operation, not a figure. A dimension identifier (customer_name, order_id,
+    # product_type) names an entity/attribute. A measure-shaped identifier the
+    # catalog has no concept for (order_count, total_quantity) is not a
+    # *supported* metric the disclosure layer can name. Force-promoting any of
+    # these to "metric" produced spurious "unsupported slot" directives that
+    # degraded the prompt.
     if len(text) <= 6 or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        if _AGG_VERB_RE.match(lowered):
+            return "scaffolding"
+        if "_" in lowered and (
+            _DIMENSION_SUFFIX_RE.search(lowered)
+            or _MEASURE_SUFFIX_RE.search(lowered)
+        ):
+            return (
+                "grouping" if _DIMENSION_SUFFIX_RE.search(lowered) else "unknown"
+            )
         return "metric"
     return "unknown"
 

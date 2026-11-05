@@ -903,6 +903,7 @@ async def synthesize_report(
     skill_name: Optional[str] = None,
     skill_methodology: Optional[str] = None,
     datasets: list[dict] | None = None,
+    disclosures: list[str] | None = None,
 ) -> FinalizeResult:
     """Run the synthesis LLM turn and return a FinalizeResult.
 
@@ -910,6 +911,11 @@ async def synthesize_report(
     (kept injected so this module is testable without a live LLM).  It
     is awaited with (system, messages) and must return a dict with
     `content` (the reply text).
+
+    `disclosures` (2026-10-29): reconciliation conflicts and family-grain
+    limitations detected across this turn's queries. They are BINDING on the
+    narrative: the report must qualify or withhold the affected figures — it
+    may not blend incompatible measures into one total.
     """
     user_signal = user_signal or detect_user_signal(user_message)
     task_type = _detect_task_type(user_message)
@@ -920,6 +926,10 @@ async def synthesize_report(
         # (possibly degenerate) dataset.
         rows = merge_answer_rows(datasets)
     warnings: list[str] = []
+    if disclosures:
+        for d in disclosures:
+            if d and d not in warnings:
+                warnings.append(str(d))
 
     if not rows:
         warnings.append("Data agent returned 0 rows — synthesis is based on an empty snapshot.")

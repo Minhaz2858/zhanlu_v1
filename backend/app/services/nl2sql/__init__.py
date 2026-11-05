@@ -153,6 +153,13 @@ class NL2SQLResult:
     unsupported_slots: list[dict[str, Any]] = field(default_factory=list)
     #: the reader-facing sentence for anything unsupported / limited
     disclosure: str = ""
+    #: 2B-3: the scope statement the reader was given ("" when none)
+    scope_disclosure: str = ""
+    #: 2B-3: reader-usable scope-refusal sentences (reroute refusals)
+    scope_refusals: list[str] = field(default_factory=list)
+    #: 2B-3: the execution gate's scope verdict VERBATIM
+    #: (pass / unavailable / not-applicable — degraded never reads verified)
+    scope_check: str = ""
     #: source, SQL fingerprints, tables, requested vs available window
     provenance: dict[str, Any] = field(default_factory=dict)
 
@@ -230,6 +237,8 @@ def ask(
     endpoint: Any = None,
     skip_narrate: bool = False,
     agent_name: str | None = None,
+    conversation_id: str | None = None,
+    turn_id: str | None = None,
 ) -> NL2SQLResult:
     """Answer a question through the CANONICAL grounded path.
 
@@ -303,6 +312,8 @@ def ask(
             endpoint=endpoint,
             skip_narrate=skip_narrate,
             agent_name=agent_name,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
         )
     except Exception as e:  # never raise into a served path
         logger.exception("nl2sql.ask: canonical answer raised: %s", e)
@@ -438,6 +449,12 @@ def _apply_canonical(
         or (result.result_set or {}).get("provenance")
         or {}
     )
+    # 2B-3 (review check 3): scope verdict + disclosure ride the legacy view
+    # too — a caller that reads only NL2SQLResult must not lose the sentence
+    # that says the figures may be partial.
+    result.scope_disclosure = str(canonical.get("scope_disclosure") or "")
+    result.scope_refusals = list(canonical.get("scope_refusals") or [])
+    result.scope_check = str(canonical.get("scope_check") or "")
 
     result.validation = _legacy_validation(canonical, result)
     result.policy = _legacy_policy(canonical, result)

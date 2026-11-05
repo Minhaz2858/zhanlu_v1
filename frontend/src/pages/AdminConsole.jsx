@@ -13,7 +13,7 @@ import { formatAbsoluteTime } from '@/lib/time';
 import {
   Shield, DollarSign, FileText, CheckCircle2, XCircle, Clock,
   Loader2, AlertCircle, ChevronDown, ChevronRight, UserCheck, GitMerge,
-  BookOpen, Pencil,
+  BookOpen, Pencil, Activity,
 } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 
@@ -38,6 +38,7 @@ export default function AdminConsole() {
   const [docHidden, setDocHidden] = useState(0);
   const [docDomains, setDocDomains] = useState([]);
   const [docError, setDocError] = useState(null);
+  const [usage, setUsage] = useState(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState({});
 
@@ -58,6 +59,11 @@ export default function AdminConsole() {
         fetchJSON(`${API_BASE}/ontology/document-evidence`),
         fetchJSON(`${API_BASE}/ontology/domains`),
       ]);
+      // Phase 3.5: org-level usage/observability overview (admin-only).
+      // Loaded separately — a failure here must not blank the other tabs.
+      fetchJSON(`${API_BASE}/usage/overview?days=30`)
+        .then(setUsage)
+        .catch((e) => console.error('usage overview failed:', e));
       setApprovals(apps);
       setCostSummary(cost);
       setCostBreakdown(breakdown);
@@ -179,6 +185,7 @@ export default function AdminConsole() {
     { key: 'identity', label: 'Identity', icon: GitMerge, count: pendingIdentity.length },
     { key: 'docevidence', label: 'Doc Evidence', icon: BookOpen, count: pendingDocProposals.length },
     { key: 'cost', label: 'Cost', icon: DollarSign },
+    { key: 'usage', label: 'Usage', icon: Activity },
     { key: 'audit', label: 'Audit Log', icon: FileText, count: auditLogs.length },
     { key: 'policy', label: 'Policy Decisions', icon: CheckCircle2, count: policyDecisions.length },
   ];
@@ -570,6 +577,98 @@ export default function AdminConsole() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Usage Tab — Phase 3.5 org-level operational overview */}
+      {tab === 'usage' && (
+        <div className="space-y-6">
+          {!usage ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                {[
+                  ['Executions (30d)', usage.total_executions],
+                  ['Avg Duration', usage.avg_duration_ms != null ? `${(usage.avg_duration_ms / 1000).toFixed(1)}s` : '—'],
+                  ['Recoveries', usage.recovery_frequency],
+                  ['Unauthorized Attempts', usage.unauthorized_operation_attempts],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-xl border border-border bg-card p-4">
+                    <p className="text-xs text-muted-foreground">{label}</p>
+                    <p className="mt-1 text-2xl font-bold text-foreground">{value ?? '—'}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="rounded-xl border border-border bg-card p-4">
+                <h3 className="mb-2 text-sm font-medium text-foreground">Tokens (30d)</h3>
+                <p className="text-sm text-muted-foreground">
+                  prompt {usage.token_usage?.prompt_tokens?.toLocaleString?.() ?? 0} ·
+                  completion {usage.token_usage?.completion_tokens?.toLocaleString?.() ?? 0} ·
+                  total {usage.token_usage?.total_tokens?.toLocaleString?.() ?? 0}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Known cost ${usage.known_cost_total} · {usage.unknown_pricing_executions} executions
+                  with unknown model pricing (left unknown, never estimated)
+                </p>
+              </div>
+
+              <div>
+                <h3 className="mb-2 text-sm font-medium text-foreground">By Agent</h3>
+                {(usage.by_agent || []).length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No invocations in this window</p>
+                ) : (
+                  <div className="overflow-hidden rounded-xl border border-border">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-secondary/40 text-xs uppercase text-muted-foreground">
+                        <tr>
+                          <th className="px-3 py-2">Agent</th>
+                          <th className="px-3 py-2">Exec</th>
+                          <th className="px-3 py-2">Success</th>
+                          <th className="px-3 py-2">Avg Time</th>
+                          <th className="px-3 py-2">Tokens</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {usage.by_agent.map((a) => (
+                          <tr key={a.agent} className="border-t border-border">
+                            <td className="px-3 py-2 font-medium text-foreground">{a.agent}</td>
+                            <td className="px-3 py-2">{a.executions}</td>
+                            <td className="px-3 py-2">{(a.success_rate * 100).toFixed(0)}%</td>
+                            <td className="px-3 py-2">
+                              {a.avg_duration_ms != null ? `${(a.avg_duration_ms / 1000).toFixed(1)}s` : '—'}
+                            </td>
+                            <td className="px-3 py-2">
+                              {(a.prompt_tokens + a.completion_tokens).toLocaleString?.() ?? 0}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h3 className="mb-2 text-sm font-medium text-foreground">Tool Failures (30d)</h3>
+                {(usage.tool_failures || []).length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No tool failures in this window</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {usage.tool_failures.map((f) => (
+                      <div key={f.tool_name} className="flex items-center justify-between rounded-lg border border-border bg-card px-3 py-2">
+                        <span className="text-sm text-foreground">{f.tool_name}</span>
+                        <span className="text-sm font-bold text-red-500">{f.failures}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
 

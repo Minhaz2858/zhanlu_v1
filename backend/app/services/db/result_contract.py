@@ -414,6 +414,92 @@ def _normalize_impl(
     )
 
 
+# ── Durable VERIFY verdict (:420 micro-fix) ───────────────────────────────
+
+
+def _load_durable_verification(db: Any, execution_id: str | None) -> dict | None:
+    """Load the FSM VERIFY verdict the execution durably committed.
+
+    The FSM stores ``VerificationResult.to_dict()`` at
+    ``executions.confidence_factors["verification"]`` and commits (synexia/
+    fsm.py, VERIFY state). Must be called while the session is open — the
+    same constraint as the observation recovery above. Returns None when no
+    verdict exists (never ran, execution row gone). A lookup failure is
+    LOGGED and degrades to None — never swallowed silently, never fabricated.
+    """
+    if db is None or not execution_id:
+        return None
+    try:
+        from app.models.execution import Execution
+
+        row = db.query(Execution).filter(Execution.id == execution_id).first()
+        factors = getattr(row, "confidence_factors", None)
+        if isinstance(factors, dict):
+            verdict = factors.get("verification")
+            if isinstance(verdict, dict):
+                return verdict
+    except Exception as exc:  # noqa: BLE001 — degrade, but SAY SO
+        logger.warning(
+            "result_contract: verification lookup failed for execution %s: %s",
+            execution_id, exc,
+        )
+    return None
+
+
+def _attach_durable_verification(normalized: NormalizedQueryResult, db: Any) -> None:
+    """Put the durable VERIFY verdict into provenance (when one exists).
+
+    The key is ABSENT when no verdict was produced — a missing verification
+    stays distinguishable from a failed one downstream.
+    """
+    try:
+        verdict = _load_durable_verification(
+            db, (normalized.provenance or {}).get("execution_id")
+        )
+    except Exception as exc:  # noqa: BLE001 — provenance is never critical
+        logger.warning("result_contract: verification attach failed: %s", exc)
+        return
+    if isinstance(verdict, dict) and isinstance(normalized.provenance, dict):
+        normalized.provenance["verification"] = verdict
+
+
+def project_verification(provenance: dict | None) -> tuple[bool | None, str | None]:
+    """Project the durable VERIFY verdict onto the tool result's
+    ``(verified, verify_detail)`` fields.
+
+    Semantics (the :420 defect contract):
+      * verdict with ``passed=True``  → ``(True, "all checks passed")``
+      * verdict with ``passed=False`` → ``(False, "<failing checks>")`` —
+        a FAILED verification, never a silent pass
+      * no verdict / malformed shape  → ``(None, None)`` — MISSING
+        verification, distinct from both True and False
+    Never raises.
+    """
+    try:
+        if not isinstance(provenance, dict):
+            return (None, None)
+        verdict = provenance.get("verification")
+        if not isinstance(verdict, dict):
+            return (None, None)
+        passed = verdict.get("passed")
+        if passed not in (True, False):
+            # Malformed/legacy shape: "verification happened" is not provable
+            # — treat as missing rather than guessing a verdict.
+            return (None, None)
+        checks = verdict.get("checks")
+        failed = [
+            f"{c.get('check')}: {c.get('detail')}"
+            for c in (checks or [])
+            if isinstance(c, dict) and not c.get("ok")
+        ]
+        if passed is True:
+            return (True, "all checks passed")
+        return (False, "; ".join(failed) or "verification failed")
+    except Exception as exc:  # noqa: BLE001 — projection never breaks the tool
+        logger.warning("result_contract: verification projection failed: %s", exc)
+        return (None, None)
+
+
 def normalize_query_result(
     result: Any,
     db: Any,
@@ -432,6 +518,7 @@ def normalize_query_result(
 
     t0 = started_at if started_at is not None else _time.monotonic()
     normalized = _normalize_impl(result, db, question=question)
+    _attach_durable_verification(normalized, db)
     try:
         total_ms = int((_time.monotonic() - t0) * 1000)
     except Exception:  # noqa: BLE001

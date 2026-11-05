@@ -37,6 +37,7 @@ from app.deps import get_current_user_optional, get_current_user_required
 from app.models.automation_task import AutomationTask
 from app.models.automation_execution import AutomationExecution
 from app.models.automation_file import AutomationFile
+from app.models.audit_event import AuditEvent
 from app.models.user import User
 from app.models.user_file import UserFile
 from app.services.automation_executor import classify_run_failure_reason
@@ -878,10 +879,16 @@ class RunRequest(BaseModel):
 @router.post("/{task_id}/run")
 async def run_now(
     task_id: str,
+    force: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_required),
 ):
-    """Manually trigger an immediate run. Returns the new execution id."""
+    """Manually trigger an immediate run. Returns the new execution id.
+
+    In-flight guard (R1, audit B10): returns HTTP 409 when the task
+    already has a queued/running execution. ``?force=true`` overrides —
+    the override is audited (``automation_run_forced``).
+    """
     task = db.query(AutomationTask).filter(
         AutomationTask.id == task_id,
         AutomationTask.is_deleted == False,
@@ -889,11 +896,45 @@ async def run_now(
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
     _assert_tenant(task, user)
-    from app.services.automation_dispatcher import trigger_now
-    exec_id = await trigger_now(task_id)
+    from app.services.automation_dispatcher import (
+        AutomationRunConflict,
+        trigger_now,
+    )
+    try:
+        exec_id = await trigger_now(task_id, force=force)
+    except AutomationRunConflict as conflict:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "already_running",
+                "execution_id": conflict.execution_id,
+                "message": "An execution is already queued or running for "
+                           "this automation. Use ?force=true to override.",
+            },
+        ) from conflict
     if not exec_id:
         raise HTTPException(status_code=500, detail="Failed to start execution")
-    return {"success": True, "execution_id": exec_id}
+    if force:
+        db.add(
+            AuditEvent(
+                event_type="automation_run_forced",
+                event_source="automation",
+                actor_type="user",
+                actor_id=getattr(user, "id", None),
+                resource_type="automation_task",
+                resource_id=task.id,
+                policy_decision="allow",
+                outcome="success",
+                occurred_at=datetime.now(timezone.utc),
+                detail_json={"forced": True},
+            )
+        )
+        db.commit()
+        logger.warning(
+            "Run-Now forced past in-flight guard: task=%s actor=%s",
+            task.id, getattr(user, "id", None),
+        )
+    return {"success": True, "execution_id": exec_id, "forced": force}
 
 
 # ---------------------------------------------------------------------------
@@ -1335,10 +1376,63 @@ def delete_automation(
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
     _assert_tenant(task, user)
+    # R1 (audit B1): soft delete is expressed by ``is_deleted`` only.
+    # Writing status="deleted" violates the canonical status vocabulary
+    # (AutomationTask.VALID_STATUSES) and the opt-in Postgres CHECK
+    # constraint ``ck_automation_tasks_status_valid``. The lifecycle
+    # status is left as-is (active/paused); scheduling stops because
+    # every dispatch/claim path filters on is_deleted == False.
     task.is_deleted = True
-    task.status = "deleted"
     task.updated_date = datetime.now(timezone.utc)
     db.commit()
+
+    # R1 (audit B8): cancel in-flight executions of the deleted task so a
+    # dead task cannot keep running (or deliver output) after deletion.
+    # CAS per row: only queued|running flip, so a run that terminally
+    # completes concurrently keeps its terminal status (history preserved).
+    cancelled_inflight: list[str] = []
+    try:
+        from app.services.automation_executor import request_cancel
+
+        inflight = (
+            db.query(AutomationExecution)
+            .filter(
+                AutomationExecution.automation_task_id == task_id,
+                AutomationExecution.status.in_(["queued", "running"]),
+            )
+            .all()
+        )
+        for ex in inflight:
+            rc = db.execute(
+                update(AutomationExecution)
+                .where(
+                    AutomationExecution.id == ex.id,
+                    AutomationExecution.status.in_(["queued", "running"]),
+                )
+                .values(
+                    status="cancelled",
+                    error="Cancelled: automation deleted",
+                    completed_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
+            if rc.rowcount == 1:
+                cancelled_inflight.append(ex.id)
+                # Signal the in-process cancel event so the agent loop
+                # bails out at the next checkpoint (no-op if the worker
+                # is on another process — the DB flip is authoritative).
+                try:
+                    request_cancel(ex.id)
+                except Exception:  # noqa: BLE001 — never block deletion
+                    logger.exception(
+                        "request_cancel failed for execution %s", ex.id
+                    )
+    except Exception:  # noqa: BLE001 — cancellation sweep must not undo deletion
+        logger.exception(
+            "in-flight cancellation sweep failed for automation %s", task_id
+        )
+        db.rollback()
+
     # Phase 7C (D2): the dedicated path is the one the UI uses — it must
     # run the same enterprise orphan cleanup as the generic entity DELETE.
     # Fail-open with an honest cleanup_error (deletion is never undone).
@@ -1356,7 +1450,161 @@ def delete_automation(
             "post-delete cleanup failed for automation %s (org %s)",
             task_id, task.org_id)
         cleanup_payload = {"cleanup_error": str(exc)[:300]}
-    return {"success": True, "id": task_id, "cleanup": cleanup_payload}
+    return {
+        "success": True,
+        "id": task_id,
+        "cancelled_inflight": cancelled_inflight,
+        "cleanup": cleanup_payload,
+    }
+
+
+# ══ Control Plane — canonical draft creation lifecycle (R3, TS §4) ════════
+
+from app.services.automation.control_plane import ControlPlaneError
+
+
+class _DraftSpecBody(BaseModel):
+    spec_partial: dict
+    origin_session_id: Optional[str] = None
+    origin_message_id: Optional[str] = None
+
+
+class _ConfirmBody(BaseModel):
+    confirmation_key: str
+    # Lifecycle separation (2026-11-03): the frontend's single
+    # "Confirm & Activate" action — when true the definition is born
+    # active INSIDE the confirmation transaction (no separate toggle,
+    # no execution side effects either way).
+    activate: bool = False
+
+
+def _control_plane_error(exc) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.code, **exc.details},
+    )
+
+
+@router.post("/drafts", status_code=201)
+def create_automation_draft(
+    body: _DraftSpecBody,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Create a server-side draft (LLM propose tool / Center "New").
+
+    The LLM can never create a definition — drafts are cheap and dedupable;
+    only POST /drafts/{id}/confirm creates one (exactly-once, §4.2).
+    """
+    from app.services.automation.control_plane import create_draft
+
+    draft = create_draft(
+        db, user, body.spec_partial,
+        origin_session_id=body.origin_session_id,
+        origin_message_id=body.origin_message_id,
+    )
+    return {
+        "draft_id": draft.id,
+        "version": draft.spec_version,
+        "status": draft.status,
+        "validation": draft.validation,
+        "spec": draft.spec,
+    }
+
+
+@router.get("/drafts/{draft_id}")
+def get_automation_draft(
+    draft_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Read a draft + its validation result (review card renders from this)."""
+    from app.services.automation.control_plane import get_draft
+
+    try:
+        draft = get_draft(db, user, draft_id)
+    except ControlPlaneError as exc:
+        raise _control_plane_error(exc) from exc
+    return {
+        "draft_id": draft.id,
+        "version": draft.spec_version,
+        "status": draft.status,
+        "validation": draft.validation,
+        "spec": draft.spec,
+        "confirmed_definition_id": draft.confirmed_definition_id,
+        "origin_session_id": draft.origin_session_id,
+    }
+
+
+@router.patch("/drafts/{draft_id}")
+def patch_automation_draft(
+    draft_id: str,
+    body: _DraftSpecBody,
+    if_match: int = Query(..., alias="If-Match",
+                          description="Current spec_version (optimistic concurrency)"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Edit a draft's spec: If-Match version, re-validate, version+1."""
+    from app.services.automation.control_plane import patch_draft
+
+    try:
+        draft = patch_draft(db, user, draft_id, if_match=if_match,
+                            spec_patch=body.spec_partial)
+    except ControlPlaneError as exc:
+        raise _control_plane_error(exc) from exc
+    return {
+        "draft_id": draft.id,
+        "version": draft.spec_version,
+        "status": draft.status,
+        "validation": draft.validation,
+        "spec": draft.spec,
+    }
+
+
+@router.post("/drafts/{draft_id}/confirm")
+def confirm_automation_draft(
+    draft_id: str,
+    body: _ConfirmBody,
+    if_match: int = Query(..., alias="If-Match"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Exactly-once confirm (TS §4.2 replay-first transaction).
+
+    201 → definition created; 200 → idempotent replay; 409 → conflict.
+    """
+    from app.services.automation.control_plane import confirm_draft
+
+    try:
+        task, resp = confirm_draft(
+            db, user, draft_id, body.confirmation_key, if_match=if_match,
+            activate=bool(body.activate),
+        )
+    except ControlPlaneError as exc:
+        raise _control_plane_error(exc) from exc
+    return {
+        "definition_id": task.id,
+        "already_confirmed": resp.get("already_confirmed", False),
+        **({"definition_archived": True} if resp.get("definition_archived") else {}),
+        "definition": task.to_dict(),
+    }
+
+
+@router.post("/drafts/{draft_id}/discard")
+def discard_automation_draft(
+    draft_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Discard a draft (terminal; confirm on a discarded draft → 409)."""
+    from app.services.automation.control_plane import discard_draft
+
+    try:
+        draft = discard_draft(db, user, draft_id)
+    except ControlPlaneError as exc:
+        raise _control_plane_error(exc) from exc
+    return {"draft_id": draft.id, "status": draft.status}
 
 
 # ── Nightly forecast bootstrap ─────────────────────────────────────────

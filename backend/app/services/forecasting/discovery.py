@@ -75,6 +75,16 @@ def discover(
     schema_svc = SchemaService(db)
     query_svc = QueryService(db)
 
+    # P0 pilot fix (2026-10-31): identifier quoting + time-bucket expressions
+    # are DIALECT-SPECIFIC. The module previously emitted MySQL backticks and
+    # DATE_TRUNC unconditionally — invalid on postgres (execution gate
+    # correctly refused) and DATE_TRUNC is invalid on MySQL. Derive the
+    # dialect from the KB and pass it down.
+    from app.models.knowledge_base import KnowledgeBase
+
+    kb_row = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
+    db_type = (getattr(kb_row, "db_type", "") or "").lower()
+
     schema = schema_svc.describe_all(kb_id, max_tables=max_tables)
     tables = schema.get("tables", [])
 
@@ -110,6 +120,7 @@ def discover(
                             mc,
                             dim_combo,
                             sample_limit,
+                            db_type=db_type,
                         )
                         if result:
                             candidates.append(result)
@@ -193,17 +204,18 @@ def _materialize_candidate(
     measure_col: dict,
     dim_cols: list[dict],
     sample_limit: int,
+    db_type: str = "mysql",
 ) -> dict | None:
     """Run a time-bucket query and validate the candidate series."""
-    tc_name = _quote(time_col["name"])
-    mc_name = _quote(measure_col["name"])
-    tb_name = _quote(table)
+    tc_name = _quote(time_col["name"], db_type)
+    mc_name = _quote(measure_col["name"], db_type)
+    tb_name = _quote(table, db_type)
 
     # Detect granularity
-    granularity = _detect_granularity(query_svc, kb_id, tb_name, tc_name)
+    granularity = _detect_granularity(query_svc, kb_id, tb_name, tc_name, db_type)
 
     # Build time-bucket expression
-    bucket_expr = _time_bucket_expr(tc_name, granularity)
+    bucket_expr = _time_bucket_expr(tc_name, granularity, db_type)
 
     # Dimension columns in SELECT
     dim_selects = ", ".join(_quote(d["name"]) for d in dim_cols)
@@ -271,6 +283,7 @@ def _detect_granularity(
     kb_id: str,
     table: str,
     time_col: str,
+    db_type: str = "mysql",
 ) -> str:
     """Detect whether the time column is daily, weekly, or monthly."""
     sql = (
@@ -309,10 +322,31 @@ def _detect_granularity(
         return "daily"
 
 
-def _time_bucket_expr(col: str, granularity: str) -> str:
-    """SQL expression to truncate a date/time column to thegiven granularity."""
+def _time_bucket_expr(col: str, granularity: str, db_type: str = "mysql") -> str:
+    """Dialect-aware truncation of a date/time column to the granularity.
+
+    P0 fix (2026-10-31): previously emitted postgres DATE_TRUNC even on
+    MySQL (and backticks on postgres). Resulting expression must be a
+    date-typed value (pandas parses it via to_datetime downstream).
+    """
+    dt = (db_type or "").lower()
+    if dt in _MYSQL_FAMILY:
+        if granularity == "daily":
+            return f"DATE({col})"
+        if granularity == "weekly":
+            # align to the Monday of the week (WEEKDAY(): Mon=0)
+            return f"DATE_SUB(DATE({col}), INTERVAL WEEKDAY({col}) DAY)"
+        return f"DATE_FORMAT({col}, '%Y-%m-01')"
+    if dt == "sqlite":
+        if granularity == "daily":
+            return f"DATE({col})"
+        if granularity == "weekly":
+            return f"DATE({col}, 'weekday 1', '-7 days')"
+        return f"DATE({col}, 'start of month')"
+    # postgres / mssql / others: ANSI-ish
     if granularity == "daily":
-        return f"DATE({col})"
+        return f"DATE_TRUNC('day', {col})" if dt != "mssql" else (
+            f"CAST({col} AS date)")
     if granularity == "weekly":
         return f"DATE_TRUNC('week', {col})"
     return f"DATE_TRUNC('month', {col})"
@@ -330,8 +364,22 @@ def _expected_points(t_series: pd.DatetimeIndex, granularity: str) -> float:
     return float(days / 30 + 1)
 
 
-def _quote(name: str) -> str:
-    """Backtick-quote an identifier for MySQL safety. Idempotent on already-quoted input."""
-    if name.startswith("`") and name.endswith("`"):
-        return name
-    return f"`{name}`"
+_MYSQL_FAMILY = {"mysql", "mariadb"}
+
+
+def _quote(name: str, db_type: str = "mysql") -> str:
+    """Dialect-aware identifier quoting (P0 fix 2026-10-31).
+
+    MySQL/MariaDB use backticks; postgres/mssql/sqlite/oracle use double
+    quotes. Idempotent on already-quoted input. Previously this hardcoded
+    MySQL backticks, which the postgres execution gate correctly rejected —
+    forecast discovery silently found 0 candidates on every non-MySQL source.
+    """
+    name = name.strip()
+    if (name.startswith("`") and name.endswith("`")) or (
+        name.startswith('"') and name.endswith('"')
+    ):
+        name = name[1:-1]
+    if (db_type or "").lower() in _MYSQL_FAMILY:
+        return f"`{name}`"
+    return f'"{name}"'

@@ -223,14 +223,34 @@ async def _query_database(
                 prepare_data_source_runtime,
             )
 
-            agent_app = (
-                db.query(AgentApp)
-                .filter(
-                    AgentApp.name == agent_name,
-                    AgentApp.is_deleted == False,  # noqa: E712
-                )
-                .first()
+            # 2C defect fix (D-5, 2026-10-30): the fallback resolved the
+            # agent app by NAME only — another org's same-named app (and its
+            # bound data sources) could be inherited. Scope to the calling
+            # user's org; only legacy/global rows (org NULL/empty) fall
+            # through. Another org's row is never returned.
+            _qorg = None
+            if user_id:
+                from app.models.user import User as _QUser
+
+                _urow = db.query(_QUser).filter(
+                    _QUser.id == str(user_id)
+                ).first()
+                _qorg = getattr(_urow, "org_id", None)
+            _name_q = db.query(AgentApp).filter(
+                AgentApp.name == agent_name,
+                AgentApp.is_deleted == False,  # noqa: E712
             )
+            if _qorg:
+                agent_app = _name_q.filter(
+                    AgentApp.org_id == _qorg
+                ).first()
+                if agent_app is None:
+                    agent_app = _name_q.filter(
+                        AgentApp.org_id.is_(None)
+                        | (AgentApp.org_id == "")
+                    ).first()
+            else:
+                agent_app = _name_q.first()
             _tools, _prompt, data_ctx_extras = prepare_data_source_runtime(
                 db,
                 agent_app,
@@ -243,6 +263,33 @@ async def _query_database(
             logger.debug("query_database: runtime prep failed (non-fatal): %s", exc)
             if bound_kb_ids:
                 data_ctx_extras = {"bound_kb_ids": bound_kb_ids}
+
+    # Pre-flight (2026-10-30): turn-wide SQL budget availability — READ-ONLY
+    # (reserves nothing; try_acquire inside SQL execution stays the atomic
+    # source of truth). Refusing here costs microseconds; without it, a
+    # guaranteed-refused attempt paid full FSM startup + planner LLM first
+    # (measured: 159s for one refused run in the 2026-10-30 replay).
+    try:
+        from app.services.db import turn_sql_budget as _tsb
+
+        _pf_scope = _tsb.resolve_scope(
+            turn_id=(ctx or {}).get("turn_id"),
+            conversation_id=(ctx or {}).get("conversation_id"),
+        )
+        _pf_base = int(getattr(settings, "NL2SQL_MAX_TURN_SQL_QUERIES", 6) or 0)
+        _pf_window = float(getattr(settings, "NL2SQL_TURN_BUDGET_WINDOW_S", 1800) or 1800)
+        if not _tsb.has_capacity(_pf_scope, _pf_base, _pf_window):
+            logger.warning(
+                "query_database: pre-flight turn SQL budget exhausted "
+                "(scope=%s) — refusing before FSM startup",
+                _pf_scope,
+            )
+            return _tsb.refusal_payload(
+                used=_tsb.count_recent(_pf_scope, _pf_window),
+                max_executions=_tsb.effective_budget(_pf_base, _pf_scope),
+            )
+    except Exception as _pf_err:  # fail-open — the budget must never break queries
+        logger.debug("query_database: pre-flight budget probe skipped: %s", _pf_err)
 
     # Pre-flight: fail in ~2.5s with an honest "unreachable" error when a
     # bound database source cannot be TCP-reached — instead of running the
@@ -279,6 +326,11 @@ async def _query_database(
         mode="dynamic",
         org_id=ctx.get("org_id"),
         app_id=ctx.get("app_id") or "default-app",
+        # Canonical turn identity: one user message = one turn. Every nested
+        # SQL attempt inside this FSM run charges the SAME per-turn budget
+        # (previously each run got a fresh exec-scoped budget, so a ReAct
+        # loop issuing repeated query_database calls was never bounded).
+        turn_id=(ctx or {}).get("turn_id"),
         data_ctx_extras=data_ctx_extras or None,
         endpoint=endpoint,
     )
@@ -292,7 +344,10 @@ async def _query_database(
     # share rows. Same-turn only — the key is dropped when the leader ends,
     # so a later turn always re-reads the database.
     from app.services.db.query_dedup import get_inflight_dedup, request_fingerprint
-    from app.services.db.result_contract import normalize_query_result
+    from app.services.db.result_contract import (
+        normalize_query_result,
+        project_verification,
+    )
 
     async def _run_pipeline():
         """Leader-only work. Owns its session; callers never share it."""
@@ -382,15 +437,17 @@ async def _query_database(
         )
         return tool_result
 
-    verify_passed = None
-    verify_detail = None
-    try:
-        verification = getattr(result, "verification", None) or {}
-        if isinstance(verification, dict):
-            verify_passed = verification.get("ok")
-            verify_detail = verification.get("detail")
-    except Exception:  # noqa: BLE001
-        pass
+    # :420 micro-fix (2026-10-30 review). The previous block read
+    # ``getattr(result, "verification", ...)`` — but ``result`` is a local of
+    # ``_run_pipeline`` and does not exist here: a guaranteed NameError,
+    # silently swallowed by the bare except, so ``verified``/``verify_detail``
+    # were ALWAYS None even when VERIFY had durably committed a real verdict.
+    # The verdict now arrives via the contract, which loads it from
+    # ``executions.confidence_factors["verification"]`` while the session is
+    # still open (normalize_query_result) and exposes it in provenance.
+    # True = verdict passed; False = verdict FAILED (named in verify_detail);
+    # None = no verdict was produced — missing verification, never a pass.
+    verify_passed, verify_detail = project_verification(normalized.provenance)
 
     rows = normalized.rows
     tool_result.update(
@@ -411,6 +468,45 @@ async def _query_database(
             ),
         }
     )
+    # 2B-3 review requirement A: the scope verdict/disclosure must reach the
+    # ORCHESTRATOR's narration input. Without this the observation whitelist
+    # inside the FSM carried it (capability_router scope_disclosure) but the
+    # tool result dropped it — a ReAct turn could narrate a complete-looking
+    # company-wide report from partition data with the qualification lost
+    # between the pipeline and the stream.
+    try:
+        from app.models.execution import ObservationRecord
+
+        _exec_id = (getattr(normalized, "provenance", None) or {}).get(
+            "execution_id"
+        )
+        _scope_data = None
+        if _exec_id:
+            _obs = (
+                db.query(ObservationRecord)
+                .filter(ObservationRecord.execution_id == _exec_id)
+                .order_by(ObservationRecord.seq.desc())
+                .limit(10)
+                .all()
+            )
+            for _o in _obs:
+                _rd = getattr(_o, "result_data", None)
+                if isinstance(_rd, dict) and _rd.get("scope_check"):
+                    _scope_data = _rd
+                    break
+        if _scope_data:
+            if _scope_data.get("scope_disclosure"):
+                tool_result["scope_disclosure"] = str(
+                    _scope_data["scope_disclosure"]
+                )
+            tool_result["scope_check"] = str(_scope_data["scope_check"])
+            tool_result["scope_note"] = (
+                "Include the scope_disclosure in your answer verbatim when "
+                "present — the figures' coverage was qualified by the "
+                "pipeline."
+            )
+    except Exception as _scope_err:  # noqa: BLE001 — never break the tool
+        logger.debug("query_database: scope passthrough skipped: %s", _scope_err)
     return tool_result
 
 

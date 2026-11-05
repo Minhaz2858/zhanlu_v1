@@ -30,6 +30,11 @@ class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000, description="Natural-language question")
     binding_id: str = Field(..., description="AgentDataBinding ID")
     datasource_id: str | None = Field(None, description="Override datasource")
+    # P0-3 (2026-10-30, audit D4): optional turn identity — threads the
+    # per-turn SQL budget scope through to NLAnswerService.answer instead of
+    # letting the budget degrade to conversation scope.
+    conversation_id: str | None = Field(None, description="Conversation scope for planner state")
+    turn_id: str | None = Field(None, description="Turn scope for the per-turn SQL budget")
 
 
 class ColumnSchema(BaseModel):
@@ -105,6 +110,8 @@ def ask_endpoint(req: AskRequest, db: Session = Depends(get_db)) -> dict[str, An
         kb_id=req.datasource_id,
         db=db,
         datasource_config=ds_config,
+        conversation_id=req.conversation_id,
+        turn_id=req.turn_id,
     )
 
     resp: dict[str, Any] = {

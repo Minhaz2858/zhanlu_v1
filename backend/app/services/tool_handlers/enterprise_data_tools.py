@@ -282,7 +282,16 @@ async def _collect_enterprise_data(
 
 registry.register(
     name="collect_enterprise_data",
-    schema=COLLECT_ENTERPRISE_DATA_SCHEMA,
+    # P0 (2026-10-31): wrap the flat schema in the OpenAI envelope at
+    # registration — entry.schema must be provider-valid (test_tool_registry_envelopes).
+    schema={
+        "type": "function",
+        "function": {
+            "name": "collect_enterprise_data",
+            "description": COLLECT_ENTERPRISE_DATA_SCHEMA["description"],
+            "parameters": COLLECT_ENTERPRISE_DATA_SCHEMA["parameters"],
+        },
+    },
     handler=_collect_enterprise_data,
     category="delegation",
     enabled_by_default=False,  # only when ENTERPRISE_PIPELINE_ENABLED + KB bound

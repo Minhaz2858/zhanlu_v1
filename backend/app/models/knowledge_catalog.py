@@ -69,6 +69,21 @@ class KBTableMeta(TimestampedBase):
     # 'authoritative' | 'standard' | 'weak'. NULL = compute from signals
     # (approved metric bindings > fact/entity role > stale/archive).
     authority_override: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # ── Stage 2B-1 dynamic schema classification (2026-10-30) ──────────────
+    # system | business | unknown — how the classifier sees the table.
+    # Populated by the indexer/backfill; NEVER auto-promoted beyond its
+    # confidence; a human overlay override (schema_class_override) always
+    # wins. Named dataset_* to avoid colliding with the overlay's existing
+    # `scope` column (which means table/kb/table_role).
+    schema_class: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schema_class_confidence: Mapped[float | None] = mapped_column(nullable=True)
+    schema_class_signals_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # global | partition:<key_name> | NULL (undetermined). The partition
+    # VALUE stays in dataset_scope_signals_json — the column stores only the
+    # partition key name, so a value rename never rewrites classifications.
+    dataset_scope: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dataset_scope_confidence: Mapped[float | None] = mapped_column(nullable=True)
+    dataset_scope_signals_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     entity_master_hints: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # {"entity_type": str, "filter_columns": list[str], "category_column": str,
     #  "sample_categories": list[str]} — discovered filter metadata for
@@ -293,6 +308,13 @@ class ProjectCatalogOverlay(TimestampedBase):
     grain: Mapped[str | None] = mapped_column(String(200), nullable=True)
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default="table")
     # table / kb / table_role
+    # ── Stage 2B-1 (2026-10-30): human overrides for the schema classifier.
+    # A human verdict ALWAYS beats the auto-inferred kb_table_meta columns —
+    # inferred classifications must never become unquestioned facts.
+    # schema_class_override: system | business | unknown
+    # dataset_scope_override: global | partition:<key_name> | unknown
+    schema_class_override: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    dataset_scope_override: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(

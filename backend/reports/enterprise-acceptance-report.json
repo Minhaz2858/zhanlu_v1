@@ -1,0 +1,109 @@
+{
+  "generated_at": "2026-11-03T08:46:07.739825+00:00",
+  "suite": "test_enterprise_acceptance.py",
+  "validation_mode": "deterministic (mocked external boundaries; NO live provider calls claimed)",
+  "scenarios_total": 11,
+  "scenarios_passed": 11,
+  "scenarios_failed": 0,
+  "results": [
+    {
+      "scenario_id": "project-boundaries-authorization",
+      "expected": "org wall, admin/creator/use-share semantics, view-only denied, fail-closed",
+      "actual": "project owner authorized=True; org admin authorized in own org=True; 'use' share grant authorizes run=True; 'view'-only share does NOT authorize runs=True; cross-org access denied even for a foreign admin=True; cross-org admin cannot run the foreign project either=True; authorization fails CLOSED on lookup errors=True",
+      "passed": true,
+      "evidence": "app/services/project_access.py against sqlite fixture",
+      "failure_category": null,
+      "implementation_location": "app/services/project_access.py"
+    },
+    {
+      "scenario_id": "project-boundaries-kb-membership",
+      "expected": "project A sees only its home KBs + explicitly linked KBs; no foreign-org leak",
+      "actual": "own home KB visible=True; authorized shared KB visible=True; another project's home KB NOT visible=True; foreign-org link row does NOT leak its KB=True",
+      "passed": true,
+      "evidence": "app/services/project_kb_membership.py against sqlite fixture",
+      "failure_category": null,
+      "implementation_location": "app/services/project_kb_membership.py"
+    },
+    {
+      "scenario_id": "project-boundaries-identity",
+      "expected": "reusable specialists across projects; conversations/sessions carry project identity",
+      "actual": "specialist serves both projects (no exclusive ownership)=True; conversation retains project identity=True; chat session retains project identity=True",
+      "passed": true,
+      "evidence": "app/models/project_agent.py, agent_conversation.py, chat_session.py",
+      "failure_category": null,
+      "implementation_location": "app/models/project_agent.py, app/models/agent_conversation.py"
+    },
+    {
+      "scenario_id": "routing-greeting",
+      "expected": "greeting \u2192 direct response, no specialists",
+      "actual": "kind=none strategy=direct_response sel=0",
+      "passed": true,
+      "evidence": "turn_planner.build_turn_plan; semantic_select_specialists",
+      "failure_category": null,
+      "implementation_location": "app/services/turn_planner.py"
+    },
+    {
+      "scenario_id": "routing-simple-lookup",
+      "expected": "bounded question \u2192 direct_tool, \u22641 specialist",
+      "actual": "kind=data strategy=direct_tool sel=['demand_forecasting_agent']",
+      "passed": true,
+      "evidence": "turn_planner.build_turn_plan; semantic_select_specialists",
+      "failure_category": null,
+      "implementation_location": "app/services/turn_planner.py"
+    },
+    {
+      "scenario_id": "A-sales-intelligence",
+      "expected": "single-domain routing, grounded figures, evidence chain, honest disclosure",
+      "actual": "business request gets a plan (never none/direct_response)=True; top specialist is sales-domain=True; selected specialists all serve the Sales project=True; governed result validates=True; evidence registered + resolvable=True; summary figures grounded in tool results=True; missing region disclosed=True; clean review \u2192 complete=True; evidence-gap review never silently passes=True",
+      "passed": true,
+      "evidence": "A_TOOL_RESULT/A_SUMMARY fixture + real planner/selection/evidence pipeline",
+      "failure_category": null,
+      "implementation_location": "app/services/turn_planner.py, semantic_capability_match.py, turn_evidence.py"
+    },
+    {
+      "scenario_id": "B-supplier-risk",
+      "expected": "right departments, bounded recovery, approval gate, measured/predicted split",
+      "actual": "supply-chain specialist selected=True; selected specialists all serve the Supply Chain project=True; inventory joins for material availability=True; timeout classified retryable environmental=True; decision retries within budget=True; budget exhaustion stops retrying=True; write draft pauses for approval=True; approval is authorization-gated=True; permission denial fails honestly at the boundary=True; measured vs predicted separated=True",
+      "passed": true,
+      "evidence": "B_TOOL_RESULT/B_SUMMARY fixture + real classifier/decision pipeline",
+      "failure_category": null,
+      "implementation_location": "app/services/execution_recovery.py, execution_decisions.py"
+    },
+    {
+      "scenario_id": "C-production-inventory",
+      "expected": "right specialists, contradiction surfacing, zero-vs-missing honesty, shared evidence",
+      "actual": "production specialist top=True; inventory joins=True; selected specialists all serve the Manufacturing project=True; maintenance joins when equipment implicated=True; contradiction surfaced for resolution=True; real zero preserved=True; absent row is 'unavailable', not zero=True; multi-department evidence stored=True",
+      "passed": true,
+      "evidence": "C_TOOL_RESULT fixture + real selection/review/evidence pipeline",
+      "failure_category": null,
+      "implementation_location": "app/services/semantic_capability_match.py, agent_collaboration/shared_evidence.py"
+    },
+    {
+      "scenario_id": "D-quality-intelligence",
+      "expected": "quality-first routing, data-justified supplier join, honest causality",
+      "actual": "business request gets a plan (never none/direct_response)=True; quality specialist selected=True; supplier join justified by data=True; correlation vs proven cause separated=True; plan produced for the quality question=True; evidence registered=True; evidence not marked invalid=True",
+      "passed": true,
+      "evidence": "D_TOOL_RESULT/D_SUMMARY fixture + real pipeline",
+      "failure_category": null,
+      "implementation_location": "app/services/turn_evidence.py, semantic_capability_match.py"
+    },
+    {
+      "scenario_id": "E-executive-report",
+      "expected": "report plan, 5 distinct specialists, honest consolidation, grounded figures, export contract",
+      "actual": "report request is classified as a report plan=True; all five domains resolve to a specialist=True; executive specialists all serve the Executive BI project=True; each domain maps to a DISTINCT specialist=True; empty domain disclosed honestly=True; no zero-fill for the empty domain=True; contradictions register present=True; export payload carries artifact + version + urls=True; executive figures grounded=True",
+      "passed": true,
+      "evidence": "E_RESULTS fixture + real planner/selection pipeline",
+      "failure_category": null,
+      "implementation_location": "app/services/turn_planner.py, synexia/finalize.py"
+    },
+    {
+      "scenario_id": "recovery-invariants",
+      "expected": "no duplicate work, bounded recovery, approval never bypassed",
+      "actual": "completed work is not re-executed=True; stale plan not blindly resumed=True; mutating recovery is approval-gated=True; mutating unknown failure not retried=True",
+      "passed": true,
+      "evidence": "real durable_execution + execution_recovery pipeline",
+      "failure_category": null,
+      "implementation_location": "app/services/durable_execution.py, execution_recovery.py"
+    }
+  ]
+}

@@ -90,7 +90,17 @@ class AgentApp(TimestampedBase):
     llm_model: Mapped[Optional["LlmModel"]] = relationship("LlmModel", foreign_keys=[llm_model_id])
 
     # Per-agent tool configuration — controls which tools are available.
-    # Expected shape: {"enabled_tools": ["web_search", "memory", ...], "disabled_tools": [...]}
+    # Expected shape:
+    #   {"enabled_tools": ["web_search", ...],   # preferences / priority head
+    #    "disabled_tools": ["memory", ...],      # hard operator deny
+    #    "strict_tools": false}                  # true => enabled_tools is an
+    #                                            # EXACT allowlist (no discovery)
+    # Default contract (universal access): every eligible child can discover
+    # the shared registry (bounded, task-relevant + search_tools escape
+    # hatch); enabled_tools become the priority head, disabled_tools are
+    # always subtracted. Authorization is still enforced per-invocation by
+    # execute_tool (RBAC, org/project boundaries, data-source policies) —
+    # discovery never grants permission.
     # When null, falls back to agent_name-based defaults.
     tool_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 

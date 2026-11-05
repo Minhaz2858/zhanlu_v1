@@ -21,7 +21,8 @@ const SOURCE = readFileSync(resolve(__dirname, './ChatInput.jsx'), 'utf8');
 
 describe('ChatInput.jsx deep research controls', () => {
   it('declares researchConfig + onResearchChange as props', () => {
-    const propList = SOURCE.match(/function\s+ChatInput\s*\(\s*\{[\s\S]{0,900}?\}\s*\)/);
+    // Window widened (P1 department props lengthened the destructuring).
+    const propList = SOURCE.match(/function\s+ChatInput\s*\(\s*\{[\s\S]{0,1400}?\}\s*\)/);
     expect(propList, 'ChatInput props destructure not found').not.toBeNull();
     expect(propList[0]).toMatch(/\bresearchConfig\b/);
     expect(propList[0]).toMatch(/\bonResearchChange\b/);

@@ -685,13 +685,11 @@ def register_project_kb_router() -> APIRouter:
             )
 
         # 3. Query non-deleted KBs bound to this project.
-        #    Match by exact FK (project_id) OR by legacy project name.
-        from sqlalchemy import or_
+        #    Home project (project_id) OR legacy project name OR an explicit
+        #    link row (multi-project sharing, 2026-10-31) — one shared filter.
+        from app.services.project_kb_membership import project_kb_membership_filter
         q = db.query(KnowledgeBase).filter(
-            or_(
-                KnowledgeBase.project_id == project_id,
-                KnowledgeBase.project == project.name,
-            ),
+            project_kb_membership_filter(project),
             KnowledgeBase.is_deleted == False,
         )
 
@@ -726,5 +724,89 @@ def register_project_kb_router() -> APIRouter:
             }
             for kb in kbs
         ]
+
+    @router.post("/projects/{project_id}/knowledge-bases/{kb_id}")
+    def attach_kb_to_project_endpoint(
+        app_id: str,
+        project_id: str,
+        kb_id: str,
+        db: Session = Depends(get_db),
+        user=Depends(get_current_user_required),
+    ):
+        """Attach an existing KB to a project (multi-project sharing).
+
+        ADDITIVE: creates a link row; never steals the KB from another
+        project (the old 1-to-1 overwrite). Idempotent — re-attach is a
+        no-op, not an error.
+        """
+        from app.services.project_kb_membership import attach_kb_to_project
+
+        project = db.query(Project).filter(
+            Project.id == project_id,
+            Project.is_deleted == False,
+        ).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        kb = db.query(KnowledgeBase).filter(
+            KnowledgeBase.id == kb_id,
+            KnowledgeBase.is_deleted == False,
+        ).first()
+        if not kb:
+            raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+
+        # Tenant guard: caller's org must match the KB's org (fail-closed).
+        kb_org = getattr(kb, "org_id", None)
+        user_org = getattr(user, "org_id", None)
+        if user_org and kb_org and kb_org != user_org:
+            raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+
+        link = attach_kb_to_project(
+            db, kb, project, created_by_id=user.id,
+        )
+        db.commit()
+        return {
+            "id": link.id,
+            "project_id": project.id,
+            "knowledge_base_id": kb.id,
+            "role": link.role,
+            "is_home": kb.project_id == project.id,
+        }
+
+    @router.delete("/projects/{project_id}/knowledge-bases/{kb_id}")
+    def detach_kb_from_project_endpoint(
+        app_id: str,
+        project_id: str,
+        kb_id: str,
+        db: Session = Depends(get_db),
+        user=Depends(get_current_user_required),
+    ):
+        """Remove a KB's membership in a project. If the detached project was
+        the KB's home, the home pointer moves to the first remaining linked
+        project (or becomes None)."""
+        from app.services.project_kb_membership import detach_kb_from_project
+
+        project = db.query(Project).filter(
+            Project.id == project_id,
+            Project.is_deleted == False,
+        ).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        kb = db.query(KnowledgeBase).filter(
+            KnowledgeBase.id == kb_id,
+            KnowledgeBase.is_deleted == False,
+        ).first()
+        if not kb:
+            raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+
+        kb_org = getattr(kb, "org_id", None)
+        user_org = getattr(user, "org_id", None)
+        if user_org and kb_org and kb_org != user_org:
+            raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+
+        removed = detach_kb_from_project(db, kb, project)
+        db.commit()
+        return {"detached": removed, "home_project_id": kb.project_id}
 
     return router

@@ -1,7 +1,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import StreamingMarkdown from './StreamingMarkdown';
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil, Database, Table2, FileText, FileSpreadsheet, Image as ImageIcon, File, ExternalLink, ShieldCheck } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ClarifyOptions from './ClarifyOptions';
@@ -261,11 +261,25 @@ function parseContent(content) {
   return parts;
 }
 
-export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onArtifactPreview, onArtifactEdit, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating, onRegenerate, onPreviewFile }) {
+export default function MessageBubble({ message, isStreaming, conversationId, onSelectOption, onSelectOther, onPreview, onArtifactPreview, onArtifactEdit, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating, onRegenerate, onPreviewFile }) {
   const { lang } = useLanguage();
   const isUser = message.role === 'user';
   const parts = isUser ? null : parseContent(message.content || '');
   const hasReasoning = !isUser && typeof message.reasoning === 'string' && message.reasoning.length > 0;
+  // Unified Agent Execution Timeline (2026-11-01): the turn has execution
+  // content when an actual plan exists (live streaming steps or persisted
+  // plan_step events) or delegated specialists ran (agent / subagent
+  // events). Plain conversational turns keep the existing UI unchanged.
+  const hasExecutionContent = !isUser && (() => {
+    if (Array.isArray(message.streaming_plan_steps) && message.streaming_plan_steps.length > 0) return true;
+    const evs = message.live_events;
+    if (!Array.isArray(evs)) return false;
+    return evs.some((e) => {
+      const t = e?.type || '';
+      return t === 'plan_step_added' || t === 'plan_step_completed'
+        || t === 'agent_started' || t === 'subagent_invoked';
+    });
+  })();
   const htmlMatch = !isUser && !isStreaming ? (message.content || '').match(/```html\s*([\s\S]*?)```/i) : null;
   const hasResult = parts?.some((part) => part.type === 'result');
   // Split artifacts into the two disjoint render surfaces below:
@@ -305,6 +319,32 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
       // Either explicitly typed by the backend, or has the rich payload shape
       return tc.results.type === 'report_card' || (payload.title && (payload.kpis || payload.chart || payload.insights));
     })
+    : null;
+
+  // P1 Phase 4: delegate_task batch payload → evidence inspection card.
+  // The tool result dict {status, summary, results:[{agent_name, status,
+  // task, response, error}]} is persisted in message.tool_calls; this is
+  // the only UI surface that shows per-specialist outcomes post-completion.
+  const delegateBatchResult = !isUser && Array.isArray(message.tool_calls)
+    ? (() => {
+      const tc = message.tool_calls.find((c) => {
+        if (!c || !c.results) return false;
+        const name = c.name || c.tool_name || '';
+        if (name !== 'delegate_task') return false;
+        let r = c.results;
+        // Some persistence paths JSON-encode the tool result — parse defensively.
+        if (typeof r === 'string') {
+          try { r = JSON.parse(r); } catch { return false; }
+        }
+        return r && Array.isArray(r.results) && r.results.length > 0;
+      });
+      if (!tc) return null;
+      let r = tc.results;
+      if (typeof r === 'string') {
+        try { r = JSON.parse(r); } catch { return null; }
+      }
+      return r;
+    })()
     : null;
 
   // Detect a formal file deliverable on this message (docx/pptx/pdf/xlsx/html/md).
@@ -376,9 +416,14 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
       </div>
       {/* min-w-0: CRITICAL — without it the flex item's automatic min-width
           (min-content floor) lets long nowrap content (live reasoning line,
-          long tokens) blow the bubble past max-w-[90%] and overflow the
-          transcript horizontally (horizontal scrollbar + cut-off card). */}
-      <div className={`flex min-w-0 max-w-[90%] flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+          long tokens) blow the bubble past its max width and overflow the
+          transcript horizontally (horizontal scrollbar + cut-off card).
+          Chat-experience repair (Part B): user bubbles stay compact and
+          right-aligned (fit-content, capped at 90% of the column);
+          assistant messages fill the readable transcript column (w-full)
+          so long answers, code blocks, tables and execution panels use the
+          available width instead of shrink-wrapping into narrow cards. */}
+      <div className={`flex min-w-0 flex-col ${isUser ? 'max-w-[90%] items-end' : 'w-full items-start'}`}>
         {isUser ? (
           <div className="group flex items-start gap-2">
             {/* Edit button — appears on hover for user messages with the branching callback.
@@ -477,23 +522,79 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
              cut the LIVE line off with no ellipsis and produced a horizontal
              scrollbar. max-w-full pins it to the column; short messages still
              shrink-wrap. Mirrors the user bubble above. */
-          <div ref={contentRef} className="min-w-0 max-w-full break-words rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
+          <div ref={contentRef} className="min-w-0 w-full break-words rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
+            {/* ── Unified Agent Execution Timeline (2026-11-01) ──
+                ONE primary execution card replacing the three duplicated
+                displays. When the turn has execution content (a plan or
+                delegated agents), the TaskProgressCard becomes the primary
+                display, the duplicated tool/delegation rows and plan
+                checklist are suppressed from the activity feed, and the
+                full AgentExecutionTree moves into the collapsed "Technical
+                Execution Details" section INSIDE the timeline card. */}
+            {hasExecutionContent && (
+              <TaskExecutionTimeline
+                liveEvents={message.live_events}
+                streamingPlanSteps={message.streaming_plan_steps}
+                streaming={isStreaming}
+                activityContent={
+                  /* 2026-11-02: the live activity feed is merged INTO the
+                     Task Execution card (user request: "merge them inside one
+                     section, collapsible") instead of stacking a second card
+                     below. The header click collapses plan + activity
+                     together. */
+                  <LiveActivityStream
+                    events={message.live_events}
+                    legacySteps={message.activity_steps}
+                    phase={message.phase}
+                    reasoning={hasReasoning ? message.reasoning : undefined}
+                    isStreaming={isStreaming}
+                    streamingSearchQueries={message.streaming_search_queries}
+                    streamingPlanSteps={message.streaming_plan_steps}
+                    streamingDataPreviews={message.streaming_data_previews}
+                    streamingReasoning={message.streaming_reasoning}
+                    streamingAction={message.streaming_action}
+                    suppressExecutionRows={hasExecutionContent}
+                    embedded
+                  />
+                }
+                detailsContent={
+                  <AgentExecutionTree
+                    conversationId={conversationId}
+                    executionId={message.phase?.execution_id}
+                    liveEvents={message.live_events}
+                    streaming={isStreaming}
+                    turnStartedAt={
+                      Array.isArray(message.live_events)
+                        ? (message.live_events.find((e) => e && e.ts)?.ts || null)
+                        : null
+                    }
+                  />
+                }
+              />
+            )}
             {/* Unified live activity feed (2026-08-22). The component itself
                 synthesizes `live_events` from legacy `activity_steps` when
                 present, so every assistant message — past or future — renders
-                through this single component with one visual design. */}
-            <LiveActivityStream
-              events={message.live_events}
-              legacySteps={message.activity_steps}
-              phase={message.phase}
-              reasoning={hasReasoning ? message.reasoning : undefined}
-              isStreaming={isStreaming}
-              streamingSearchQueries={message.streaming_search_queries}
-              streamingPlanSteps={message.streaming_plan_steps}
-              streamingDataPreviews={message.streaming_data_previews}
-              streamingReasoning={message.streaming_reasoning}
-              streamingAction={message.streaming_action}
-            />
+                through this single component with one visual design. With the
+                unified timeline active it keeps only the content sections
+                (reasoning, search, data previews) — no duplicated execution
+                rows. Rendered standalone ONLY for turns without execution
+                content (plain chat turns); execution turns embed it inside
+                the Task Execution card above. */}
+            {!hasExecutionContent && (
+              <LiveActivityStream
+                events={message.live_events}
+                legacySteps={message.activity_steps}
+                phase={message.phase}
+                reasoning={hasReasoning ? message.reasoning : undefined}
+                isStreaming={isStreaming}
+                streamingSearchQueries={message.streaming_search_queries}
+                streamingPlanSteps={message.streaming_plan_steps}
+                streamingDataPreviews={message.streaming_data_previews}
+                streamingReasoning={message.streaming_reasoning}
+                streamingAction={message.streaming_action}
+              />
+            )}
             {message.phase?.execution_id && onOpenRun && (
               <button
                 type="button"
@@ -525,6 +626,12 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 source={dataToolResult.results.source_name}
               />
             )}
+            {!isStreaming && delegateBatchResult && (
+              <DelegateBatchCard batch={delegateBatchResult} />
+            )}
+            {/* AgentExecutionTree now renders INSIDE the timeline's
+                "Technical Execution Details" section above (unified
+                timeline, 2026-11-01) — no second top-level mount. */}
             {parts.map((p, i) =>
               p.type === 'clarify_batch' ? (
                 <ClarifyBatchForm key={i} block={p.block} onSubmit={onBatchClarifySubmit} />

@@ -162,7 +162,9 @@ export default function AutomationTasks() {
   return (
     <div className="h-full overflow-y-auto px-8 py-8">
       <PageHeader title={t.automation.title} subtitle={t.automation.subtitle} action={
-        <Button onClick={() => setDialogOpen(true)} className="shrink-0">
+        /* 2026-11-02: full-page creation form (matches the approved mockup)
+           instead of the modal dialog. */
+        <Button onClick={() => navigate('/automation/new')} className="shrink-0">
           <Sparkles className="h-4 w-4" /> {t.automation.newTask}
         </Button>
       } />
@@ -184,7 +186,7 @@ export default function AutomationTasks() {
           <p className="mt-1 text-xs text-muted-foreground">{t.automation.emptyHint}</p>
         </div>
       ) : view === 'month' ? (
-        <MonthCalendar tasks={filteredTasks} onNew={() => setDialogOpen(true)} />
+        <MonthCalendar tasks={filteredTasks} onNew={() => navigate('/automation/new')} />
       ) : view === 'card' ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {filteredTasks.map((item) => (

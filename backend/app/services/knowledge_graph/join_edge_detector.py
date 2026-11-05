@@ -97,6 +97,12 @@ def _detect_value_overlap(
     index: dict[tuple[str, str], list[tuple[str, str]]] = {}
     # (table_name, column_name) -> samples set
     sample_sets: dict[tuple[str, str], set] = {}
+    # 2C defect fix (D-3): PK↔PK overlaps are IDENTITY noise, not join
+    # evidence — every two tables with sampled integer PKs produced a
+    # full-containment edge (confidence 1.0), polluting kb_table_relation
+    # with a mesh of meaningless pairs. PK↔PK column pairs are excluded;
+    # child-FK↔parent-PK overlaps (the informative direction) are kept.
+    pk_flag: dict[tuple[str, str], bool] = {}
     for tname, c in _columns_with_samples(tables):
         bucket = type_bucket(c.get("data_type"))
         if bucket is None:
@@ -104,6 +110,7 @@ def _detect_value_overlap(
         cname = c["column_name"]
         samples = {str(v) for v in (c.get("value_samples") or [])}
         sample_sets[(tname, cname)] = samples
+        pk_flag[(tname, cname)] = bool(c.get("pk"))
         for v in samples:
             index.setdefault((bucket, v), []).append((tname, cname))
 
@@ -114,6 +121,8 @@ def _detect_value_overlap(
             for j in range(i + 1, len(col_pairs)):
                 a, b = col_pairs[i], col_pairs[j]
                 if a[0] == b[0]:
+                    continue
+                if pk_flag.get(a) and pk_flag.get(b):
                     continue
                 if _canonical_pair(a[0], b[0]) in fk_pairs:
                     continue

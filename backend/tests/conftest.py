@@ -1,17 +1,39 @@
-"""Pytest configuration for backend tests — enable async test support."""
+"""Pytest configuration for backend tests — enable async test support.
+
+T1 — test database isolation (2026-10-31, reviewer-approved design):
+
+The previous setup used ONE shared in-memory SQLite database behind
+StaticPool. StaticPool means a single DBAPI connection reused by every
+Session — sessions did not have independent connections, so one test's
+uncommitted writes were visible to (and committable by) another test's
+session, and combined runs could interleave transactions. That was the
+diagnosed root cause of order-dependent combined-run flakiness.
+
+The T1 contract:
+  * INDEPENDENT CONNECTIONS: the test database is a real temp-file
+    SQLite database reached through the app's normal pooled engine —
+    every SessionLocal() gets its own connection with its own
+    transaction, exactly like production. No StaticPool anywhere.
+  * ORDER INDEPENDENCE ACROSS MODULES: an autouse module-scoped fixture
+    truncates every table and re-seeds the admin user before each test
+    module runs, so suite results cannot depend on which modules ran
+    earlier (within a module, tests share the database as before).
+  * The ":memory:" multi-connection pitfall disappears with the file
+    database: tables created in fixtures persist for every connection
+    without shared-cache tricks.
+"""
 import os
+import tempfile
+import shutil
 
 # Must be set BEFORE any app.* imports so that app.config.settings
-# reads SQLite. Pydantic-settings env vars take priority over .env files.
-# Use file::memory:?cache=shared + StaticPool so the in-memory database
-# persists across sessions — without sharing, each SessionLocal() opens
-# a fresh connection and the tables created in _migrate_schema fixtures
-# vanish (the classic SQLite ":memory:" multi-connection pitfall).
-os.environ["DATABASE_URL"] = "sqlite:///file::memory:?cache=shared&uri=true"
+# reads the file-backed SQLite URL. Pydantic-settings env vars take
+# priority over .env files.
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="zhanlu-t1-test-db-")
+_TEST_DB_PATH = os.path.join(_TEST_DB_DIR, "test.db")
+os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH}"
 
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlalchemy import event
 
 pytest_plugins = ("pytest_asyncio",)
 
@@ -19,6 +41,17 @@ pytest_plugins = ("pytest_asyncio",)
 def pytest_configure(config):
     """Register custom markers to silence warnings."""
     config.addinivalue_line("markers", "llm: test requires a live LLM backend (DeepSeek)")
+
+
+def pytest_addoption(parser):
+    """Register the --no-llm switch (Phase 9: it was read via
+    config.getoption in pytest_collection_modifyitems but never
+    registered, so passing --no-llm errored out and marked-LLM tests
+    always attempted live calls)."""
+    parser.addoption(
+        "--no-llm", action="store_true", default=False,
+        help="skip tests marked 'llm' (they need a live LLM backend)",
+    )
 
 
 # --- Synthetic shop-db fixture (real SQLite + catalog/graph mocks) ---------
@@ -61,59 +94,34 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _ensure_shared_sqlite_engine():
-    """Force the global SQLAlchemy engine to use StaticPool so the shared
-    in-memory database is reachable from every SessionLocal() call.
-    Without this, each new SessionLocal() opens a fresh :memory: connection
-    and sees an empty schema (tables created in test fixtures vanish).
+def _ensure_independent_file_db_engine():
+    """Verify the global engine honors the T1 contract (T1, 2026-10-31).
+
+    The engine must be the app's NORMAL pooled engine (independent
+    connection per session) on the temp-file test database — never a
+    StaticPool single-connection swap. The DATABASE_URL env var is set
+    before any app import, so no engine surgery is needed; this fixture
+    fails loudly if that invariant is ever violated again.
     """
-    from app.database import engine  # noqa: F401
-    # Re-create the engine with StaticPool if not already set
-    if not isinstance(engine.pool, StaticPool):
-        from sqlalchemy import create_engine as _ce
-        from app.config import settings
-        new_engine = _ce(
-            settings.DATABASE_URL,
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        # Replace module-level engine + SessionLocal
-        import app.database as _db_mod
-        _db_mod.engine = new_engine
-        _db_mod.SessionLocal = _db_mod.sessionmaker(
-            autocommit=False, autoflush=False, bind=new_engine,
-        )
-        # Re-enable FK pragma on the new engine
-        @event.listens_for(new_engine, "connect")
-        def _set_sqlite_pragma(dbapi_connection, connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
+    from sqlalchemy.pool import StaticPool
+    from app.config import settings
+    from app.database import engine
+
+    assert not isinstance(engine.pool, StaticPool), (
+        "T1 violation: the test engine uses StaticPool (one shared DBAPI "
+        "connection) — sessions no longer have independent connections"
+    )
+    assert settings.DATABASE_URL == os.environ["DATABASE_URL"], (
+        "T1 violation: app settings and the test DATABASE_URL env var "
+        "disagree — app imports happened before the test URL was set"
+    )
     yield
 
 
-# --- App-DB bootstrap for TestClient-driven tests ---------------------------
-# Tests that drive the app through ``fastapi.testclient.TestClient`` (login →
-# endpoint) need the same database the app's own lifespan would build: the full
-# schema plus a seeded admin user. ``TestClient(app)`` used as a plain object
-# does NOT run the lifespan, so ``Base.metadata.create_all`` never fires and the
-# first query (e.g. the login's ``SELECT ... FROM users``) dies with
-# ``sqlite3.OperationalError: no such table: users``. This session-scoped
-# fixture closes that gap once, on the shared engine that ``get_db`` uses.
-@pytest.fixture(autouse=True, scope="session")
-def _bootstrap_app_schema(_ensure_shared_sqlite_engine):
-    """Create the full schema on the shared engine and seed the admin user.
-
-    Depends on ``_ensure_shared_sqlite_engine`` so the StaticPool engine is
-    installed first. Mirrors ``main.lifespan`` (create_all) plus the admin seed
-    the auth tests log in with (admin@zhanlu.dev / admin123).
-    """
-    import app.models  # noqa: F401 — register every mapper on Base.metadata
-    from app.database import Base, SessionLocal, engine
-
-    Base.metadata.create_all(bind=engine)
-
+def _seed_admin_user():
+    """Seed the admin user the auth tests log in with (idempotent)."""
     from app.models.user import User
+    from app.database import SessionLocal
     from app.services.auth_service import auth_service
 
     db = SessionLocal()
@@ -134,7 +142,76 @@ def _bootstrap_app_schema(_ensure_shared_sqlite_engine):
             db.commit()
     finally:
         db.close()
+
+
+def _reset_database():
+    """Truncate every table and re-seed the admin user (T1).
+
+    Runs at MODULE boundaries so test modules cannot observe rows left
+    by earlier modules (order independence). FK enforcement is disabled
+    on the cleanup connection only; every other connection keeps the
+    app.database connect-time ``PRAGMA foreign_keys=ON``.
+
+    Phase 9 reliability fix: models registered lazily by mid-sweep test
+    modules (e.g. app.models.automation_file, imported directly by a
+    later test) appear in Base.metadata only AFTER the session-scoped
+    bootstrap ran create_all — truncating such a table then failed with
+    "no such table" and cascaded ~12k setup errors across the sweep.
+    create_all is idempotent, so re-running it here lets the truncate
+    loop see exactly the tables that exist in the database.
+    """
+    import app.models  # noqa: F401 — register every mapper on Base.metadata
+    from app.database import Base, engine
+
+    Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        try:
+            for table in reversed(Base.metadata.sorted_tables):
+                conn.exec_driver_sql(f'DELETE FROM "{table.name}"')
+        finally:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+    _seed_admin_user()
+
+
+# --- App-DB bootstrap for TestClient-driven tests ---------------------------
+# Tests that drive the app through ``fastapi.testclient.TestClient`` (login →
+# endpoint) need the same database the app's own lifespan would build: the full
+# schema plus a seeded admin user. ``TestClient(app)`` used as a plain object
+# does NOT run the lifespan, so ``Base.metadata.create_all`` never fires and the
+# first query (e.g. the login's ``SELECT ... FROM users``) dies with
+# ``sqlite3.OperationalError: no such table: users``. This session-scoped
+# fixture closes that gap once, on the pooled engine that ``get_db`` uses.
+@pytest.fixture(autouse=True, scope="session")
+def _bootstrap_app_schema(_ensure_independent_file_db_engine):
+    """Create the full schema on the test database and seed the admin user.
+
+    Mirrors ``main.lifespan`` (create_all) plus the admin seed the auth
+    tests log in with (admin@zhanlu.dev / admin123).
+    """
+    import app.models  # noqa: F401 — register every mapper on Base.metadata
+    from app.database import Base, engine
+
+    Base.metadata.create_all(bind=engine)
+    _seed_admin_user()
     yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _fresh_db_per_module(_bootstrap_app_schema):
+    """T1: every test module starts from a truncated, admin-seeded DB.
+
+    Guarantees module-level order independence: what a module sees never
+    depends on which modules ran before it. Within a module, tests share
+    the database exactly as before.
+    """
+    _reset_database()
+    yield
+
+
+def pytest_unconfigure(config):
+    """Remove the T1 temp test database directory."""
+    shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
 
 
 # --- Config-driven domain signals (generic test data) -----------------------
@@ -223,3 +300,31 @@ def domain_signals_config(tmp_path, monkeypatch):
     _ds._SEASONAL_RULES.clear()
     _ep.UPSTREAM_MAP.clear()
     _ep._PRODUCT_LABELS.clear()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 11 (S4) — cross-module GLOBAL state isolation
+# ─────────────────────────────────────────────────────────────────────────────
+# The T1 per-module DB truncation covers database state, but in-process
+# globals survived module boundaries: agent_tools.TOOL_CONTEXT leaked ids
+# (e.g. chat_session_id from automation tests) into later modules — the
+# suspected driver of the full-sweep order-dependent failure clusters.
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _reset_process_globals():
+    from app.services import agent_tools as _at
+
+    def _clear():
+        try:
+            _at.TOOL_CONTEXT.clear()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from app.services.tenant_context import set_tenant_org
+            set_tenant_org(None)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _clear()
+    yield
+    _clear()

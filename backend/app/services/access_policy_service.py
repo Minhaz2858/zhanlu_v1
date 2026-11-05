@@ -165,6 +165,41 @@ def resolve_user_policies(
     return resolved
 
 
+def resolve_policy_from_context(
+    db: Session,
+    user_id: str | None,
+    context: dict | None,
+) -> ResolvedPolicy:
+    """Resolve the current user's data-access policy from a tool context.
+
+    P0-1 (2026-10-30, semantic-store consumption audit D2): the FSM data node
+    and the delegation fastpath previously called ``NLAnswerService.answer``
+    WITHOUT a resolved policy, so user access-policy pre-generation schema
+    filtering was inert on those paths while ``answer_from_database`` and the
+    nl2sql router resolved it correctly. This shared helper mirrors the
+    db_tools resolver (resource scoping injected by
+    ``prepare_data_source_runtime``: ``resource_type``/``resource_id`` plus
+    ``bound_kb_ids``) so EVERY caller resolves policies the same way.
+
+    Returns a full-access policy (``has_policies=False``) when the context
+    lacks resource scoping — policies only apply to shared users of a
+    project/agent, never to unscoped internal callers.
+    """
+    if not context or not user_id:
+        return ResolvedPolicy(has_policies=False)
+    resource_type = context.get("resource_type")
+    resource_id = context.get("resource_id")
+    if not resource_type or not resource_id:
+        return ResolvedPolicy(has_policies=False)
+    return resolve_user_policies(
+        db,
+        user_id=user_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        bound_kb_ids=[k for k in (context.get("bound_kb_ids") or []) if k],
+    )
+
+
 def validate_sql_against_policy(sql: str, policy: ResolvedPolicy, kb_id: str):
     """Validate *sql* against a resolved policy for *kb_id*.
 

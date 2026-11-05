@@ -33,6 +33,10 @@ class QueryService:
         #: is a switch: the gate runs with or without them (see db/execution_gate.py).
         self.policy = policy
         self.plan = plan
+        #: 2B-3 scope context ({"classification_facts", "question_scope"}) the
+        #: gate validates table scope against. None/empty == flag off or the
+        #: loader degraded — the check records not-applicable, never refuses.
+        self.scope_context: dict | None = None
         #: row filters (dicts) the statement must carry for the query to be a
         #: filtered query rather than an unfiltered one. Empty == none configured.
         self.row_filters: list[Any] = []
@@ -136,6 +140,7 @@ class QueryService:
             # back to its own configured-filter lookup rather than skipping the
             # check. ``None`` (not ``[]``) is what keeps that discovery alive.
             row_filters=(list(self.row_filters) if self.row_filters else None),
+            scope_context=self.scope_context,
         )
 
         t0 = time.time()

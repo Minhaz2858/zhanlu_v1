@@ -106,6 +106,9 @@ class TestTemplateCoverage:
             "tool_call_failed": {"tool_label"},
             "artifact_progress": {"artifact_type", "current", "total"},
             "retry": {"target"},
+            # Phase 2.8: recovery observability events.
+            "failure_classified": {"tool_label", "category", "recovery"},
+            "execution_decision": {"decision", "action"},
             "subagent_invoked": {"agent_label", "target"},
             "subagent_returned": {"agent_label", "duration", "row_count", "artifacts"},
             "data_offer": {"tool_label", "row_count", "columns", "sample_rows"},

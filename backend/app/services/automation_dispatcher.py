@@ -352,12 +352,13 @@ async def _tick() -> None:
     # ── Due tasks. ──
     try:
         now = datetime.now(timezone.utc)
-        due: list[AutomationTask] = db.query(AutomationTask).filter(
-            AutomationTask.status == "active",
-            AutomationTask.is_deleted == False,  # noqa: E712
-            AutomationTask.next_run_at.isnot(None),
-            AutomationTask.next_run_at <= now,
-        ).limit(20).all()  # bound per-tick
+        # R5 persisted retries: promote any retry row whose backoff elapsed
+        # (in-memory timers are retired — retries survive process death).
+        try:
+            _promote_due_retries(db, now)
+        except Exception:
+            logger.exception("promote_due_retries failed (non-fatal)")
+        due = _due_tasks(db, now)
 
         if not due:
             return
@@ -388,6 +389,29 @@ async def _tick() -> None:
             pass
 
 
+def _due_tasks(db, now: datetime) -> list[AutomationTask]:
+    """Due-task selection (R4): active, not deleted, past next_run_at —
+    and NOT schedule-degraded (degraded schedules never fire silently;
+    the flag + error are surfaced for the user to fix, audit B12)."""
+    from sqlalchemy import or_
+
+    return (
+        db.query(AutomationTask)
+        .filter(
+            AutomationTask.status == "active",
+            AutomationTask.is_deleted == False,  # noqa: E712
+            AutomationTask.next_run_at.isnot(None),
+            AutomationTask.next_run_at <= now,
+            or_(
+                AutomationTask.schedule_degraded.is_(None),
+                AutomationTask.schedule_degraded == False,  # noqa: E712
+            ),
+        )
+        .limit(20)
+        .all()
+    )
+
+
 async def _fire(db, task: AutomationTask, now: datetime) -> None:
     """Create the execution row, advance next_run_at, spawn the executor.
 
@@ -396,25 +420,59 @@ async def _fire(db, task: AutomationTask, now: datetime) -> None:
     """
     orig_next = task.next_run_at
 
-    # Compute the real next_run_at WITHOUT calling the LLM. The LLM-based
-    # parse is reserved for task creation (API path); the tick only ever
-    # uses the already-persisted cron_expression or a cheap rule-based pass.
+    # R4/R5 trigger fidelity: resolve the effective trigger (legacy rows
+    # default), then apply the deterministic §6.1a FULL-EPISODE collapse
+    # (F-16) — grace measured against the LATEST missed slot, one decision
+    # per downtime episode (not per slot).
+    from app.services.automation.trigger_policy import (
+        collapse_missed_interval as _collapse,
+        resolve_trigger as _resolve_trigger,
+        grace_seconds as _grace_seconds,
+    )
+
+    trigger = _resolve_trigger(task)
+    recurring = trigger == "schedule"
+    due_utc = orig_next if (orig_next and orig_next.tzinfo) else (
+        orig_next.replace(tzinfo=timezone.utc) if orig_next else now
+    )
+
+    # Compute the cron WITHOUT calling the LLM. The LLM-based parse is
+    # reserved for task creation (API path); the tick only ever uses the
+    # already-persisted cron_expression or a cheap rule-based pass.
     cron = task.cron_expression or safe_parse_schedule_rules_only(task.schedule or "")
     cron_to_persist = cron or task.cron_expression
-    if cron:
+    next_run_compute_failed = False
+
+    decision = _collapse(
+        cron=cron if recurring else None,
+        tz=task.timezone or "UTC",
+        next_run_at=orig_next,
+        now=now.replace(tzinfo=None),
+        grace_seconds=_grace_seconds(task),
+        recurring=recurring,
+    )
+    # None ⇒ nothing to collapse (marker missing or not yet due) — the
+    # normal fire path proceeds with a synthetic fire_late decision.
+    if decision is None:
+        decision = type(decision)("fire_late", orig_next, 0, None, False)
+
+    if cron and recurring:
         try:
             real_next = next_run_at(cron, after=now, tz_name=task.timezone)
         except Exception as e:
             logger.warning("dispatcher: next_run_at compute failed for %s: %s", task.id, e)
             real_next = now + _backoff(task)
+            next_run_compute_failed = True
     else:
         real_next = now + _backoff(task)
 
     # Misfire visibility: warn (don't silently skip) when firing late.
+    late_by_flag = False
     try:
         from app.config import settings
-        late_by = (now - orig_next).total_seconds()
-        if late_by > settings.AUTOMATION_MISFIRE_WARN_SECONDS:
+        late_by = (now - due_utc).total_seconds()
+        late_by_flag = late_by > settings.AUTOMATION_MISFIRE_WARN_SECONDS
+        if late_by_flag:
             logger.warning(
                 "automation misfire: task %s '%s' fired %.0fs late (scheduled %s) "
                 "— run was likely delayed by downtime or backlog",
@@ -423,25 +481,147 @@ async def _fire(db, task: AutomationTask, now: datetime) -> None:
     except Exception:
         pass
 
+    # R4/§6.1a collapse: a slot missed beyond grace never fires. Recurring
+    # schedules advance to the next future slot; the whole episode is
+    # recorded as ONE skipped occurrence row (bounded backlog by
+    # construction); once-triggers terminalize unfired.
+    from app.models.automation_scheduling import AutomationOccurrence
+
+    def _record_skipped_occurrence() -> None:
+        db.add(AutomationOccurrence(
+            automation_task_id=task.id,
+            occurrence_key=f"scheduled:{decision.representative.isoformat()}"
+            if decision.representative else f"misfire:{uuid.uuid4().hex}",
+            scheduled_at=decision.representative,
+            status="skipped",
+            cancel_reason="misfire",
+            misfire_collapsed_count=decision.collapsed_count,
+            completed_at=now.replace(tzinfo=None),
+            org_id=task.org_id, app_id=task.app_id,
+            created_by_id=task.created_by_id,
+        ))
+
+    if decision.action == "skip":
+        if decision.catchup:
+            catchup_to = decision.advance_to or (
+                next_run_at(cron, after=now, tz_name=task.timezone)
+                if cron else now + _backoff(task)
+            )
+            _record_skipped_occurrence()
+            db.execute(
+                update(AutomationTask)
+                .where(
+                    AutomationTask.id == task.id,
+                    AutomationTask.next_run_at == orig_next,
+                )
+                .values(
+                    next_run_at=catchup_to,
+                    last_run=now.isoformat(),
+                    last_result=f"misfire skipped (grace {int(_grace_seconds(task))}s "
+                                f"exceeded by {(now - due_utc).total_seconds():.0f}s; "
+                                f"{decision.collapsed_count} slot(s) collapsed)",
+                    cron_expression=cron_to_persist,
+                )
+            )
+            db.commit()
+            logger.warning(
+                "automation misfire collapse: task %s skipped slot %s "
+                "(beyond grace, %d slot(s) collapsed); schedule advanced to %s",
+                task.id, orig_next.isoformat(), decision.collapsed_count,
+                catchup_to.isoformat() if catchup_to else "backoff",
+            )
+            return
+        # once + beyond grace → terminal without firing.
+        _record_skipped_occurrence()
+        db.execute(
+            update(AutomationTask)
+            .where(
+                AutomationTask.id == task.id,
+                AutomationTask.next_run_at == orig_next,
+            )
+            .values(
+                status="completed",
+                next_run_at=None,
+                last_run=now.isoformat(),
+                last_result="once trigger missed beyond grace window — not fired",
+            )
+        )
+        db.commit()
+        logger.warning(
+            "automation misfire: once task %s missed beyond grace — terminalized unfired",
+            task.id,
+        )
+        return
+
+    # Once-trigger fire path: terminal after this single fire.
+    if trigger == "once":
+        real_next = None
+
     # CAS claim: atomically advance next_run_at only if it hasn't changed
     # since we read it. rowcount == 1 ⇒ we won the race; 0 ⇒ another worker
-    # (or a schedule edit) beat us — skip silently.
+    # (or a schedule edit) beat us — skip silently. R4: once-triggers
+    # terminalize in the same CAS (status → completed, no next slot);
+    # a next_run_at compute failure marks the schedule degraded loudly
+    # (audit B12) instead of silently backing off forever.
+    fire_values = {
+        "next_run_at": real_next,
+        "last_run_at": now,
+        "last_run": now.isoformat(),
+        "cron_expression": cron_to_persist,
+    }
+    if trigger == "once":
+        fire_values["status"] = "completed"
+    if next_run_compute_failed:
+        fire_values["schedule_degraded"] = True
+        fire_values["schedule_error"] = (
+            f"next_run_at compute failed at {now.isoformat()}; "
+            "task fires on backoff until the schedule is re-saved"
+        )[:300]
     rc = db.execute(
         update(AutomationTask)
         .where(
             AutomationTask.id == task.id,
             AutomationTask.next_run_at == orig_next,
         )
-        .values(
-            next_run_at=real_next,
-            last_run_at=now,
-            last_run=now.isoformat(),
-            cron_expression=cron_to_persist,
-        )
+        .values(**fire_values)
     )
     db.commit()
     if rc.rowcount != 1:
         logger.info("dispatcher: lost CAS race for task %s — skipping", task.id)
+        return
+
+    # R5 occurrence claim: the UNIQUE (task, occurrence_key) index is the
+    # duplicate-claim arbiter. A lost claim (crash replay, double leader)
+    # means the slot is already owned — no second execution is created.
+    from app.database import SessionLocal
+    from app.services.automation.scheduler_core import (
+        acquire_lease,
+        claim_occurrence,
+        release_lease,
+    )
+
+    if trigger == "once":
+        occ_key = f"manual:{uuid.uuid4().hex}"  # once = unique slot
+    else:
+        # §6.1a: the occurrence represents the LATEST missed slot of the
+        # episode (R), not the stale persisted marker.
+        rep = decision.representative or orig_next or now
+        occ_key = f"scheduled:{rep.replace(tzinfo=None, microsecond=0).isoformat()}"
+    occurrence = claim_occurrence(
+        db,
+        automation_task_id=task.id,
+        occurrence_key=occ_key,
+        scheduled_at=orig_next,
+        org_id=task.org_id,
+        app_id=task.app_id,
+        created_by_id=task.created_by_id,
+        misfire_collapsed_count=decision.collapsed_count if late_by_flag else 0,
+    )
+    if occurrence is None:
+        logger.info(
+            "dispatcher: occurrence %s already claimed for task %s — skipping",
+            occ_key, task.id,
+        )
         return
 
     execution = AutomationExecution(
@@ -449,6 +629,7 @@ async def _fire(db, task: AutomationTask, now: datetime) -> None:
         automation_task_id=task.id,
         status="queued",
         attempt=0,
+        occurrence_id=occurrence.id,
         org_id=task.org_id,
         app_id=task.app_id,
         created_by_id=task.created_by_id,
@@ -458,9 +639,91 @@ async def _fire(db, task: AutomationTask, now: datetime) -> None:
     db.commit()
     db.refresh(execution)
 
+    # R5 lease + launch: acquired at claim; heartbeat-renewed while the
+    # execution is live; released at exit. Fencing-token enforcement of
+    # terminal writes lands with the R6 runner rewrite (executor paths).
+    _launch_with_lease(db, execution.id, occurrence)
+
+
+async def _heartbeat_loop(execution_id: str, tok: Optional[str]) -> None:
+    if not tok:
+        return
+    from app.services.automation.scheduler_core import renew_lease
+
+    while True:
+        await asyncio.sleep(30)
+        try:
+            fresh = SessionLocal()
+            try:
+                row = fresh.query(AutomationExecution).filter(
+                    AutomationExecution.id == execution_id
+                ).first()
+                if row is None or row.status not in ("queued", "running"):
+                    return
+                renew_lease(fresh, execution_id, tok)
+            finally:
+                fresh.close()
+        except Exception as e:  # noqa: BLE001 — heartbeat never kills the run
+            logger.warning("dispatcher: lease heartbeat failed for %s: %s", execution_id, e)
+
+
+def _launch_with_lease(db, execution_id: str, occurrence=None, *,
+                       require_lease: bool = False) -> Optional[str]:
+    """R5 launch path shared by fresh fires AND promoted retry rows:
+    acquire the lease, start the heartbeat, spawn the executor, and on
+    exit release the lease + terminalize the occurrence.
+
+    ``require_lease=True`` (promotion path): a live lease held elsewhere
+    (``acquire_lease`` → None) means another process already launched this
+    retry — spawn NOTHING (multi-process safety). Fresh fires keep the
+    permissive default until the R6 runner rewrite makes fencing
+    unconditional."""
+    from app.services.automation.scheduler_core import (
+        acquire_lease as _acquire,
+        complete_occurrence as _complete_occ,
+        release_lease as _release_tok,
+    )
+
+    token = _acquire(db, execution_id, _worker_id())
+    if require_lease and token is None:
+        logger.info(
+            "launch: lease for %s held elsewhere — not spawning (promotion lock)",
+            execution_id,
+        )
+        return None
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(execution_id, token))
+
+    def _release_lease_on_exit(_task_obj):
+        try:
+            fresh = SessionLocal()
+            try:
+                if token:
+                    _release_tok(fresh, execution_id, token)
+                row = fresh.query(AutomationExecution).filter(
+                    AutomationExecution.id == execution_id
+                ).first()
+                if row is not None and occurrence is not None and occurrence.status == "claimed":
+                    terminal = {
+                        "completed": "completed",
+                        "succeeded": "completed",
+                        "failed": "failed_terminal",
+                        "timed_out": "failed_terminal",
+                        "skipped": "skipped",
+                        "cancelled": "cancelled",
+                    }.get(row.status)
+                    if terminal:
+                        _complete_occ(fresh, occurrence, terminal)
+            finally:
+                fresh.close()
+        except Exception:  # noqa: BLE001
+            logger.exception("dispatcher: lease/occurrence release failed for %s", execution_id)
+
+    run_task = asyncio.create_task(_run_executor(execution_id))
+    run_task.add_done_callback(lambda _t: (_release_lease_on_exit(_t), heartbeat_task.cancel()))
+    return token
+
     # Spawn the executor in the background so multiple tasks can run in
     # parallel (subject to asyncio + LLM provider concurrency).
-    asyncio.create_task(_run_executor(execution.id))
 
 
 async def _run_executor(execution_id: str) -> None:
@@ -475,6 +738,18 @@ async def _run_executor(execution_id: str) -> None:
     global _concurrency_sem
     sem = _concurrency_sem
     try:
+        from app.config import settings
+        if getattr(settings, "AUTOMATION_SUBPROCESS_MODE", False):
+            # §6.5 stage 2 (flag-gated, default OFF): the harness runs in a
+            # child process over the JSONL control pipe; the parent keeps
+            # ALL automation-table ownership and finalizes fenced.
+            if sem is not None:
+                async with sem:
+                    await asyncio.to_thread(
+                        _run_subprocess_stage2, execution_id)
+            else:
+                await asyncio.to_thread(_run_subprocess_stage2, execution_id)
+            return
         from app.services.automation_executor import execute_automation
         if sem is not None:
             async with sem:
@@ -487,6 +762,103 @@ async def _run_executor(execution_id: str) -> None:
         logger.exception("_run_executor: %s failed: %s", execution_id, e)
 
 
+def _run_subprocess_stage2(execution_id: str) -> None:
+    """Stage-2 runner (§6.5/F-22): spawn the child, broker its events, then
+    finalize the execution FENCED as the parent (the child never writes
+    automation state). Outcome mapping:
+    - terminal run_finished → persist output + fenced succeeded
+    - terminal run_failed   → persist partial content + fenced failed
+    - crashed/terminated    → fenced failed(timed_out)/transient per §6.5
+    """
+    from app.database import SessionLocal
+    from app.models.automation_execution import AutomationExecution
+    from app.models.automation_task import AutomationTask
+    from app.services.automation import execution_events as ev
+    from app.services.automation.runner_protocol import (
+        current_token, finalize_terminal, persist_output_and_enter_finalizing,
+    )
+    from app.services.automation.scheduler_core import fenced_status_write
+
+    db = SessionLocal()
+    try:
+        ex = db.get(AutomationExecution, execution_id)
+        if ex is None:
+            logger.error("subprocess stage2: execution %s missing", execution_id)
+            return
+        task = db.get(AutomationTask, ex.automation_task_id)
+        from app.config import settings as _cfg
+        job = {
+            "execution_id": execution_id,
+            "attempt": ex.attempt or 0,
+            "user_id": getattr(task, "created_by_id", None),
+            "org_id": getattr(ex, "org_id", None) or "default-org",
+            "app_id": getattr(task, "app_id", None) or "default-app",
+            "project_id": getattr(task, "project_id", None),
+            "conversation_id": getattr(ex, "conversation_id", None),
+            "automation_task_id": str(ex.automation_task_id),
+            "message": getattr(task, "prompt", "") or "",
+            "force_planning": bool(getattr(_cfg,
+                                           "AUTOMATION_FORCE_PLANNING", True)),
+        }
+        from app.services.automation.subprocess_runner import (
+            launch_subprocess_runner,
+        )
+        summary = launch_subprocess_runner(job)
+
+        token = current_token(db, execution_id, _worker_id())
+        terminal = summary.get("terminal_event") or {}
+        if summary["outcome"] == "completed" and \
+                terminal.get("type") == "run_finished" and token:
+            payload = terminal.get("payload") or {}
+            persist_output_and_enter_finalizing(
+                db, execution_id, token, AutomationExecution,
+                output_text=(payload.get("content") or "")[:200_000],
+            )
+            finalize_terminal(db, execution_id, token, AutomationExecution,
+                              terminal_status="succeeded")
+        elif summary["outcome"] == "completed" and \
+                terminal.get("type") == "run_failed" and token:
+            payload = terminal.get("payload") or {}
+            persist_output_and_enter_finalizing(
+                db, execution_id, token, AutomationExecution,
+                output_text=(payload.get("content") or "")[:200_000],
+            )
+            finalize_terminal(db, execution_id, token, AutomationExecution,
+                              terminal_status="failed",
+                              error=(payload.get("error") or "")[:500])
+        else:
+            # crashed / terminated / protocol violation — §6.5 child-crash
+            # mapping: failed(transient); retry per policy (F-27 barrier
+            # applies before any retry attempt opens).
+            from datetime import datetime, timezone
+
+            if token:
+                fenced_status_write(
+                    db, execution_id, token,
+                    from_statuses=("queued", "running"), to_status="failed",
+                    extra_values={
+                        "error": (f"subprocess {summary['outcome']}"
+                                  f" rc={summary.get('returncode')}")[:500],
+                        "completed_at": datetime.now(timezone.utc),
+                    },
+                    execution_cls=AutomationExecution,
+                )
+            else:
+                logger.warning(
+                    "subprocess stage2: %s %s with no ownable lease — "
+                    "row left for recovery",
+                    execution_id, summary["outcome"])
+        ev.record_telemetry_event(
+            execution_id, "stage2_summary",
+            {k: v for k, v in summary.items() if k != "terminal_event"},
+        )
+    except Exception:
+        logger.exception("subprocess stage2 failed for %s", execution_id)
+        raise
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # Retry scheduling (called from the executor thread + the janitor)
 # ---------------------------------------------------------------------------
@@ -494,25 +866,19 @@ async def _run_executor(execution_id: str) -> None:
 def schedule_retry(
     task_id: str, prev_execution_id: str, prev_attempt: int, error: str
 ) -> Optional[str]:
-    """Create a retry execution row (attempt + 1, queued) and schedule its run.
+    """Create a PERSISTED retry execution row (attempt + 1, queued, with a
+    persisted ``next_attempt_at`` backoff) — roadmap R5: retries survive
+    process death because the run-when lives in the DB, not on an event
+    loop. The next tick's ``_promote_due_retries`` runs it when due.
 
-    Called from the executor THREAD (via ``asyncio.to_thread``) and from the
-    janitor. The actual run is scheduled on the main event loop via
-    ``run_coroutine_threadsafe`` with exponential backoff.
+    Called from the executor THREAD (via ``asyncio.to_thread``) and from
+    the janitor. No in-memory timer exists anymore (``_delayed_run`` is
+    retired) — a retry row is always promotable by ANY dispatcher process
+    after a restart.
 
     Returns the new execution id, or ``None`` if ``max_retries`` is
-    exhausted or no running main loop is available (in the latter case no
-    row is created, so we don't strand an un-runnable retry).
+    exhausted.
     """
-    # Don't create a doomed retry row if there's no loop to run it on.
-    loop = _main_loop
-    if loop is None or not loop.is_running():
-        logger.warning(
-            "schedule_retry: no running main loop — retry for %s not created",
-            prev_execution_id,
-        )
-        return None
-
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -532,12 +898,19 @@ def schedule_retry(
             return None
 
         backoff = min(60 * (2 ** prev_attempt), 1800)  # 60s, 120s, 240s… cap 30m
+        prev = db.query(AutomationExecution).filter(
+            AutomationExecution.id == prev_execution_id
+        ).first()
         exec_id = str(uuid.uuid4())
         execution = AutomationExecution(
             id=exec_id,
             automation_task_id=task.id,
             status="queued",
             attempt=next_attempt,
+            occurrence_id=prev.occurrence_id if prev else None,
+            retry_of_execution_id=prev_execution_id,
+            next_attempt_at=datetime.now(timezone.utc).replace(tzinfo=None)
+            + timedelta(seconds=backoff),
             org_id=task.org_id,
             app_id=task.app_id,
             created_by_id=task.created_by_id,
@@ -545,10 +918,9 @@ def schedule_retry(
         )
         db.add(execution)
         db.commit()
-
-        asyncio.run_coroutine_threadsafe(_delayed_run(exec_id, backoff), loop)
         logger.info(
-            "schedule_retry: task %s retry #%d queued (%.0fs backoff) exec=%s (prev=%s)",
+            "schedule_retry: task %s retry #%d PERSISTED (next attempt in %.0fs) "
+            "exec=%s (prev=%s)",
             task_id, next_attempt, backoff, exec_id, prev_execution_id,
         )
         return exec_id
@@ -562,13 +934,38 @@ def schedule_retry(
             pass
 
 
-async def _delayed_run(execution_id: str, delay: float) -> None:
-    """Sleep ``delay`` then run the executor. Scheduled on the main loop."""
-    try:
-        await asyncio.sleep(delay)
-        await _run_executor(execution_id)
-    except Exception as e:
-        logger.exception("_delayed_run %s failed: %s", execution_id, e)
+def _promote_due_retries(db, now: datetime) -> int:
+    """R5: run persisted retries whose backoff elapsed. The lease is the
+    promotion lock — exactly one process launches each retry; crash-safety
+    comes from the row itself (a restart re-promotes any un-launched row)."""
+    from app.models.automation_scheduling import AutomationOccurrence
+
+    due = (
+        db.query(AutomationExecution)
+        .filter(
+            AutomationExecution.status == "queued",
+            AutomationExecution.retry_of_execution_id.isnot(None),
+            AutomationExecution.next_attempt_at.isnot(None),
+            AutomationExecution.next_attempt_at <= now,
+        )
+        .limit(20)
+        .all()
+    )
+    launched = 0
+    for ex in due:
+        occ = (
+            db.query(AutomationOccurrence)
+            .filter(AutomationOccurrence.id == ex.occurrence_id)
+            .first()
+        ) if ex.occurrence_id else None
+        token = _launch_with_lease(db, ex.id, occ, require_lease=True)
+        if token is not None:
+            launched += 1
+        logger.info(
+            "promote_due_retries: launched persisted retry exec=%s attempt=%d",
+            ex.id, ex.attempt,
+        )
+    return launched
 
 
 # ---------------------------------------------------------------------------
@@ -665,15 +1062,68 @@ async def _reap_stale_executions(force_all_active: bool = False) -> int:
 
 
 async def reap_on_startup() -> int:
-    """Startup hook: ensure schema, then reap all mid-flight executions.
+    """Startup hook (§6.3, R5): NON-DESTRUCTIVE recovery.
 
-    Called from ``main.py`` startup. Any execution left ``queued``/``running``
-    from a previous process is a zombie (the in-process executor died with
-    the old container). Mark them failed and retry if attempts remain —
-    otherwise they'd sit in "running" forever (the original P0 bug).
+    - Expired-lease executions → ``recover_expired_leases``: output
+      present ⇒ finalize-replay (idempotent); no output ⇒ F-27
+      reconciliation barrier (unknown non-idempotent ⇒ BLOCKED, never
+      auto-retried); otherwise a new attempt under the same occurrence.
+    - Orphaned occurrence claims (leader died pre-execution) →
+      ``recover_stuck_claims`` → back to ``pending``.
+    - Unexpired leases owned elsewhere are NEVER touched (audit B4).
+
+    Escape hatch ``AUTOMATION_FORCE_REAP_ON_STARTUP`` (default false) keeps
+    the old destructive force-reap for single-instance emergencies only.
     """
     _ensure_schema()
-    return await _reap_stale_executions(force_all_active=True)
+    from app.config import settings
+
+    if getattr(settings, "AUTOMATION_FORCE_REAP_ON_STARTUP", False):
+        logger.warning("AUTOMATION_FORCE_REAP_ON_STARTUP=true — destructive force-reap engaged")
+        return await _reap_stale_executions(force_all_active=True)
+
+    from app.database import SessionLocal
+    from app.services.automation.scheduler_core import (
+        recover_expired_leases as _recover_leases,
+        recover_stuck_claims as _recover_claims,
+    )
+
+    db = SessionLocal()
+    try:
+        stats = _recover_leases(
+            db, execution_cls=AutomationExecution, owner=_worker_id(),
+            finalize_replay=_runner_replay,
+            new_attempt=_recovery_new_attempt,
+        )
+        stuck = _recover_claims(db, execution_cls=AutomationExecution)
+        logger.info(
+            "startup recovery (§6.3): finalized=%d retried=%d blocked=%d stuck_claims_reopened=%d",
+            stats["finalized"], stats["retried"], stats["blocked"], stuck,
+        )
+        return stats["retried"] + stats["blocked"] + stuck
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _runner_replay(db, execution) -> bool:
+    """Finalize-replay via the R6 runner protocol (idempotent steps 1–5)."""
+    from app.services.automation.runner_protocol import finalize_replay
+
+    return finalize_replay(db, execution, AutomationExecution)
+
+
+def _recovery_new_attempt(db, execution) -> None:
+    """Open the next attempt for a recovered execution: a persisted retry
+    row (attempt+1, same occurrence) promotable by any process's tick —
+    the F-27 barrier has already cleared at this point."""
+    schedule_retry(
+        execution.automation_task_id, execution.id,
+        getattr(execution, "attempt", 0) or 0,
+        error="lease_expired_recovered",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -786,8 +1236,31 @@ def compute_execution_depth(db, execution_id: Optional[str]) -> int:
     return depth
 
 
+class AutomationRunConflict(Exception):
+    """Raised when a run-now request hits a task that already has a
+    non-terminal execution (R1 P0 in-flight guard, audit B10).
+
+    ``execution_id`` carries the in-flight execution for the 409 payload.
+    """
+
+    def __init__(self, execution_id: Optional[str] = None):
+        self.execution_id = execution_id
+        super().__init__(
+            f"automation task already has an in-flight execution "
+            f"({execution_id or 'unknown'})"
+        )
+
+
+# Non-terminal execution statuses used by the R1 in-flight guard and the
+# delete-path cancellation sweep.
+_NON_TERMINAL_EXECUTION_STATUSES = ("queued", "running")
+
+
 async def trigger_now(
-    task_id: str, parent_execution_id: Optional[str] = None
+    task_id: str,
+    parent_execution_id: Optional[str] = None,
+    *,
+    force: bool = False,
 ) -> Optional[str]:
     """Force an immediate run of the given task. Returns the execution id.
 
@@ -796,6 +1269,12 @@ async def trigger_now(
     top-level manual/scheduled triggers). The depth cap itself is enforced by
     the caller (``execute_automation_tool``) before spawning; this function
     only records the parent so the chain can be walked later.
+
+    In-flight guard (R1, audit B10): when the task already has a queued or
+    running execution, raises :class:`AutomationRunConflict` unless
+    ``force=True``. The check runs under a ``SELECT ... FOR UPDATE`` lock on
+    the task row so two concurrent triggers serialize (SQLite ignores the
+    lock; PostgreSQL multi-process runs serialize on the task row).
     """
     from app.database import SessionLocal
     db = SessionLocal()
@@ -803,9 +1282,23 @@ async def trigger_now(
         task = db.query(AutomationTask).filter(
             AutomationTask.id == task_id,
             AutomationTask.is_deleted == False,  # noqa: E712
-        ).first()
+        ).with_for_update().first()
         if not task:
             return None
+        if not force:
+            inflight = (
+                db.query(AutomationExecution)
+                .filter(
+                    AutomationExecution.automation_task_id == task.id,
+                    AutomationExecution.status.in_(
+                        _NON_TERMINAL_EXECUTION_STATUSES
+                    ),
+                )
+                .first()
+            )
+            if inflight is not None:
+                db.rollback()  # release the task lock
+                raise AutomationRunConflict(inflight.id)
         execution = AutomationExecution(
             id=str(uuid.uuid4()),
             automation_task_id=task.id,

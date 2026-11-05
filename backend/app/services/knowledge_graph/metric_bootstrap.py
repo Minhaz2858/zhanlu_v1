@@ -9,6 +9,7 @@ prompts (platform convention: prompts stay domain-free).
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any
@@ -168,6 +169,118 @@ async def bootstrap_project_metrics(
             project_id, kb_id, len(created),
         )
     return created
+
+
+def promote_to_metric_definition(
+    db: Session, pm: Any, *, require_approved: bool = True
+) -> dict:
+    """Upsert the enforced ``MetricDefinition`` for a human-approved metric.
+
+    P0-6 promotion bridge (2026-10-30 audit): the two metric stores never
+    met — approving a ProjectMetric only flipped its status field, so the
+    NL2SQL contract (which reads ``MetricDefinition`` via
+    ``query_contract.datasource_metric_bindings``) never saw a metric the
+    Data Map UI called "verified". Approval was cosmetic w.r.t. enforcement.
+
+    Governance (reviewer boundary, Phase B): promotion happens ONLY as the
+    consequence of a human approval event — an LLM-proposed row stays out
+    of the enforced contract until a person approves it. This function is
+    called from the approval transition in the catalog-metrics API, never
+    from the bootstrap.
+
+    Field mapping (the models overlap ~70% but differ in shape):
+      bindings[0].table          → base_table
+      bindings[0].measure_columns[0] → base_column
+      default_aggregation        → aggregation (fallback "sum")
+      aliases                    → synonyms
+      sql_expression             → base_sql
+      name / definition / unit   → name / description / unit
+
+    Idempotent: an existing (datasource_id, name) row is updated in place,
+    never duplicated. The KB Metrics editor's own rows are also human-
+    authored — an approval consciously overwrites the same-named row.
+    """
+    from app.models.metric_definition import MetricDefinition
+
+    kb_id = getattr(pm, "kb_id", None)
+    if not kb_id:
+        return {"promoted": False, "reason": "metric is not bound to a knowledge base"}
+    if require_approved and str(getattr(pm, "status", "") or "") != "approved":
+        return {
+            "promoted": False,
+            "reason": f"metric status is {pm.status!r}, not approved",
+        }
+
+    name = str(getattr(pm, "name", "") or "").strip()
+    if not name:
+        return {"promoted": False, "reason": "metric has no name"}
+
+    bindings = getattr(pm, "bindings", None)
+    if isinstance(bindings, str):
+        try:
+            bindings = json.loads(bindings)
+        except Exception:
+            bindings = []
+    first_binding = (bindings or [{}])[0] if isinstance(bindings, list) else {}
+    measure_columns = first_binding.get("measure_columns") or []
+    base_table = str(first_binding.get("table") or "").strip()
+    base_column = str(
+        measure_columns[0] if measure_columns else ""
+    ).strip()
+    if not base_table or not base_column:
+        return {
+            "promoted": False,
+            "reason": "approved metric has no resolvable table/column binding",
+        }
+
+    aliases = getattr(pm, "aliases", None)
+    if isinstance(aliases, str):
+        try:
+            aliases = json.loads(aliases)
+        except Exception:
+            aliases = []
+
+    existing = (
+        db.query(MetricDefinition)
+        .filter(
+            MetricDefinition.datasource_id == kb_id,
+            MetricDefinition.name == name,
+            MetricDefinition.is_deleted.is_(False),
+        )
+        .first()
+    )
+    if existing is None:
+        existing = MetricDefinition(
+            id=str(uuid.uuid4()),
+            datasource_id=kb_id,
+            name=name,
+        )
+        db.add(existing)
+        created = True
+    else:
+        created = False
+
+    existing.display_name = name
+    existing.description = getattr(pm, "definition", None)
+    existing.base_table = base_table
+    existing.base_column = base_column
+    existing.aggregation = (
+        str(getattr(pm, "default_aggregation", "") or "").strip().lower() or "sum"
+    )
+    existing.synonyms = [str(a) for a in (aliases or []) if str(a).strip()]
+    existing.unit = getattr(pm, "unit", None)
+    existing.base_sql = getattr(pm, "sql_expression", None)
+    existing.is_enabled = True
+    db.commit()
+    logger.info(
+        "metric_promotion: %s MetricDefinition %r for kb=%s (project metric %s)",
+        "created" if created else "updated", name, kb_id, getattr(pm, "id", "?"),
+    )
+    return {
+        "promoted": True,
+        "created": created,
+        "metric_definition_id": existing.id,
+    }
 
 
 def _metric_to_dict(m: Any) -> dict:

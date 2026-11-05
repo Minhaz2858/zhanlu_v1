@@ -96,6 +96,8 @@ def assemble_context(
     user_message: str,
     task_spec: dict,
     attachments: Optional[list] = None,
+    org_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> dict:
     """Assemble the ContextManifest for an execution.
 
@@ -105,6 +107,14 @@ def assemble_context(
             text extracted via ``document_ingestion.service.prepare_for_context``.
             Image files with no OCR text are flagged as multimodal inputs
             (the caller forwards them as image content blocks separately).
+        org_id: the requesting organization (IC-3, FSM tenant isolation).
+            Agent config, tool config and memories are resolved with
+            STRICT org equality. WITHOUT an org context NO tenant-
+            specific configuration is returned (agent config/tool
+            surface → None, memories → [] — fail closed; closure check
+            C). 'default-org' callers resolve within default-org
+            explicitly (the compatibility policy).
+        agent_id: the resolved AgentApp PK (preferred over agent_name).
 
     Returns a dict with:
         items: list of context items (each with type, content, source)
@@ -137,7 +147,7 @@ def assemble_context(
         _rag_on = False
 
     # 1. Agent configuration
-    agent_config = _get_agent_config(db, agent_name)
+    agent_config = _get_agent_config(db, agent_name, org_id=org_id, agent_id=agent_id)
     if agent_config:
         items.append({
             "type": "agent_config",
@@ -377,7 +387,9 @@ def assemble_context(
         token_estimate += _estimate_tokens(str(conv_ctx))
 
     # 3. Agent memory
-    memories = _get_agent_memories(db, agent_name, user_message)
+    memories = _get_agent_memories(
+        db, agent_name, user_message, org_id=org_id, agent_id=agent_id,
+    )
     if memories:
         items.append({
             "type": "memory",
@@ -388,7 +400,9 @@ def assemble_context(
         token_estimate += _estimate_tokens(str(memories))
 
     # 4. Available tools and skills
-    available_tools = _get_available_tools(db, agent_name)
+    available_tools = _get_available_tools(
+        db, agent_name, org_id=org_id, agent_id=agent_id,
+    )
     available_skills = _get_available_skills(db, agent_name)
 
     items.append({
@@ -453,11 +467,33 @@ def render_attachment_items(context_manifest: Optional[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def _get_agent_config(db: Session, agent_name: str) -> Optional[dict]:
-    """Get agent configuration from the database."""
+def _get_agent_config(
+    db: Session,
+    agent_name: str,
+    org_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Get agent configuration from the database.
+
+    FSM tenant isolation (IC-3, 2026-10-31): when an org context is
+    provided, the row is resolved with STRICT org equality — another
+    org's identically named agent can no longer donate its configuration.
+    Without an org context the historical name-only behaviour is kept
+    (single-tenant/local compatibility).
+    """
     try:
-        from app.models.agent_app import AgentApp
-        agent = db.query(AgentApp).filter(AgentApp.name == agent_name, AgentApp.is_deleted == False).first()
+        # Closure check C (reviewer, 2026-10-31): a MISSING org must not
+        # silently become an unrestricted name lookup — no tenant-
+        # specific configuration is returned without an org context.
+        # 'default-org' callers resolve within default-org explicitly
+        # (the compatibility policy); any other org resolves within
+        # itself; unknown/foreign → None (fail closed).
+        if not org_id:
+            return None
+        from app.services.synexia.identity import resolve_agent_in_org
+        agent = resolve_agent_in_org(
+            db, agent_id=agent_id, agent_name=agent_name, org_id=org_id,
+        )
         if agent:
             return {
                 "name": agent.name,
@@ -706,32 +742,46 @@ def _get_prior_datasets(db: Session, conversation_id: str) -> list[dict] | None:
         return None
 
 
-def _get_agent_memories(db: Session, agent_name: str, user_message: str) -> list:
-    """Get query-relevant agent memories, scoped to the agent.
+def _get_agent_memories(
+    db: Session,
+    agent_name: str,
+    user_message: str,
+    org_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> list:
+    """Get query-relevant agent memories, scoped to the agent AND org.
 
-    Previously this fetched the global top-5 memories by importance —
-    ignoring both the user's message and the agent scope, so every agent
-    saw every other agent's notes. Now it resolves the agent's app id
-    (matching the convention in routers/agents.py: ``agent_app.id if
-    agent_app else agent_name``) and delegates to memory_advanced's
-    semantic/lexical search with the user message as the query.
+    FSM tenant isolation (IC-2, 2026-10-31): the agent row is resolved
+    with STRICT org equality (synexia.identity.resolve_agent_in_org) —
+    a name collision in another organization can no longer leak its
+    memories. Reads use the resolved agent's PK, plus the legacy
+    bare-name bridge for default-org callers only, and results are
+    confined to ``AgentMemory.org_id == org_id``. Without an org context
+    this returns [] (fail closed).
     """
     try:
-        from app.models.agent_app import AgentApp
         from app.services.memory_advanced import search_memories
+        from app.services.synexia.identity import (
+            memory_read_keys,
+            resolve_agent_in_org,
+        )
 
-        agent_app = db.query(AgentApp).filter(
-            AgentApp.name == agent_name,
-            AgentApp.is_deleted == False,
-        ).first()
-        agent_app_id = agent_app.id if agent_app else agent_name
+        agent_app = resolve_agent_in_org(
+            db, agent_id=agent_id, agent_name=agent_name, org_id=org_id,
+        )
+        keys = memory_read_keys(
+            agent_row=agent_app, agent_name=agent_name, org_id=org_id,
+        )
+        if not keys:
+            return []
 
         results = search_memories(
             db,
-            agent_app_id=agent_app_id,
+            agent_app_id=keys,
             query=user_message,
             limit=5,
             min_score=0.05,  # lenient — prefer recall; the FSM budget enforces size
+            org_id=org_id,
         )
         return [
             {
@@ -746,7 +796,12 @@ def _get_agent_memories(db: Session, agent_name: str, user_message: str) -> list
     return []
 
 
-def _get_available_tools(db: Session, agent_name: str) -> list:
+def _get_available_tools(
+    db: Session,
+    agent_name: str,
+    org_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> list:
     """Get the REAL registered tool names for the agent.
 
     Environment gate: when ``WEB_TOOLS_ENABLED`` is False (offline
@@ -784,7 +839,12 @@ def _get_available_tools(db: Session, agent_name: str) -> list:
         try:
             _known = set(known)
             scoped = [
-                n for n in (resolve_tools_for_agent(agent_name, _get_agent_tool_config(db, agent_name)) or [])
+                n for n in (resolve_tools_for_agent(
+                    agent_name,
+                    _get_agent_tool_config(
+                        db, agent_name, org_id=org_id, agent_id=agent_id,
+                    ),
+                ) or [])
                 if n in _known
             ]
             if scoped:
@@ -808,15 +868,28 @@ def _get_available_tools(db: Session, agent_name: str) -> list:
         return []
 
 
-def _get_agent_tool_config(db: Session, agent_name: str) -> Optional[dict]:
-    """Read ``AgentApp.tool_config`` so the tool list can be scoped to the agent."""
-    try:
-        from app.models.agent_app import AgentApp
+def _get_agent_tool_config(
+    db: Session,
+    agent_name: str,
+    org_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Read ``AgentApp.tool_config`` so the tool list can be scoped to the agent.
 
-        agent = (
-            db.query(AgentApp)
-            .filter(AgentApp.name == agent_name, AgentApp.is_deleted == False)
-            .first()
+    FSM tenant isolation (IC-3, 2026-10-31): with an org context the row
+    is resolved with STRICT org equality — tool configuration cannot
+    cross organization boundaries.
+    """
+    try:
+        # Closure check C (reviewer, 2026-10-31): a MISSING org must not
+        # silently become an unrestricted name lookup — no tool surface
+        # is returned without an org context. 'default-org' callers
+        # resolve within default-org explicitly (compatibility policy).
+        if not org_id:
+            return None
+        from app.services.synexia.identity import resolve_agent_in_org
+        agent = resolve_agent_in_org(
+            db, agent_id=agent_id, agent_name=agent_name, org_id=org_id,
         )
         return getattr(agent, "tool_config", None) if agent else None
     except Exception:

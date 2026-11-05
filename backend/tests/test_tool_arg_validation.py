@@ -53,6 +53,73 @@ def test_get_tool_schema_unknown_returns_none():
     assert get_tool_schema("__nonexistent_tool_xyz__") is None
 
 
+# ── Numeric-string coercion (2026-11-02) ─────────────────────────────────
+# qwen3.5-omni-plus sent {"sketch_index": "0"} for fusion360_extrude; the
+# strict schema check rejected "'0' is not of type 'integer'", and the turn
+# burned reflexion round-trips (and a DashScope 429) retrying the same
+# unambiguous mistake. A numeric string under an integer/number schema is a
+# serialization quirk, not a reasoning error — coerce it. Non-numeric
+# strings and non-numeric declared types are left strictly untouched.
+
+def test_numeric_string_coerced_to_integer_in_place():
+    from app.services.tool_arg_validator import validate_tool_args
+    schema = {
+        "type": "object",
+        "properties": {"sketch_index": {"type": "integer"}},
+        "required": ["sketch_index"],
+    }
+    args = {"sketch_index": "0"}
+    assert validate_tool_args(args, schema) is None
+    assert args["sketch_index"] == 0  # handler receives the int
+
+
+def test_numeric_string_coerced_to_number():
+    from app.services.tool_arg_validator import validate_tool_args
+    schema = {
+        "type": "object",
+        "properties": {"distance_mm": {"type": "number"}},
+    }
+    args = {"distance_mm": "12.5"}
+    assert validate_tool_args(args, schema) is None
+    assert args["distance_mm"] == 12.5
+
+
+def test_negative_integer_string_coerced():
+    from app.services.tool_arg_validator import validate_tool_args
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    args = {"n": "-3"}
+    assert validate_tool_args(args, schema) is None
+    assert args["n"] == -3
+
+
+def test_non_numeric_string_still_rejected():
+    from app.services.tool_arg_validator import validate_tool_args
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    args = {"n": "not-a-number"}
+    assert validate_tool_args(args, schema) is not None
+
+
+def test_union_type_string_value_untouched():
+    """'distance_mm': {'type': ['number', 'string']} — a string value is
+    already valid; coercion must not rewrite it to float."""
+    from app.services.tool_arg_validator import validate_tool_args
+    schema = {
+        "type": "object",
+        "properties": {"distance_mm": {"type": ["number", "string"]}},
+    }
+    args = {"distance_mm": "20mm from edge"}
+    assert validate_tool_args(args, schema) is None
+    assert args["distance_mm"] == "20mm from edge"
+
+
+def test_garbage_number_string_still_rejected():
+    from app.services.tool_arg_validator import validate_tool_args
+    schema = {"type": "object", "properties": {"v": {"type": "number"}}}
+    # float() would happily parse 'nan'/'inf' — only plain numerics coerce.
+    args = {"v": "nan"}
+    assert validate_tool_args(args, schema) is not None
+
+
 # ── LoopState contextvar ─────────────────────────────────────────────────
 
 def test_loop_state_contextvar_default_none():

@@ -31,6 +31,12 @@ export default function StarterPrompts({ onPick }) {
     return () => { cancelled = true; };
   }, []);
 
+  // Disabled (2026-10-31): the "Try asking — the first ones are questions
+  // that already worked here" chip strip was removed from the UI by user
+  // request. The component still returns null so Chat.jsx needs no edit,
+  // and the implementation is kept intact below in case it is re-enabled.
+  return null;
+
   if (starters.length === 0) return null;
 
   return (

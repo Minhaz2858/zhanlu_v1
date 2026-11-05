@@ -183,6 +183,65 @@ class SQLiteConnector:
             )
         return out
 
+    def get_foreign_keys(self, table: str) -> list[dict]:
+        """FK constraints from ``PRAGMA foreign_key_list`` — the SAME contract
+        as the MySQL connector's ``get_foreign_keys``. SQLite has no schemas,
+        so ``ref_schema`` is "".
+
+        2C defect fix (D-1, 2026-10-30): this method did not exist, so the
+        catalog indexer's declared-FK discovery silently degraded to [] on
+        SQLite — Tier-A acceptance surfaced it (a synthetic schema's inline
+        REFERENCES were never indexed).
+
+        When the constraint references the parent's PRIMARY KEY implicitly
+        (``to`` is NULL in the pragma), the parent's declared PK column is
+        resolved and used — that is what the constraint states, not an
+        inference about the data.
+        """
+        assert self._conn is not None
+        out: list[dict] = []
+        try:
+            rows = self._conn.execute(
+                f'PRAGMA foreign_key_list("{table}")'
+            ).fetchall()
+        except Exception:
+            logger.debug(
+                "sqlite: foreign_key_list unavailable for %s", table,
+                exc_info=True,
+            )
+            return out
+        parent_pk: dict[str, str] = {}
+        for r in rows or []:
+            ref_table = str(r[2] or "")
+            ref_column = r[4]
+            if not ref_column:
+                pk = parent_pk.get(ref_table)
+                if pk is None:
+                    try:
+                        prow = self._conn.execute(
+                            f'PRAGMA table_info("{ref_table}")'
+                        ).fetchall()
+                        pk = next(
+                            (str(p[1]) for p in prow if p[5]), ""
+                        )  # p[5] is the pk flag
+                    except Exception:
+                        logger.debug(
+                            "sqlite: parent PK lookup failed for %s",
+                            ref_table, exc_info=True,
+                        )
+                        pk = ""
+                    parent_pk[ref_table] = pk
+                ref_column = pk
+            out.append(
+                {
+                    "column": str(r[3] or ""),
+                    "ref_schema": "",
+                    "ref_table": ref_table,
+                    "ref_column": str(ref_column or ""),
+                }
+            )
+        return out
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------

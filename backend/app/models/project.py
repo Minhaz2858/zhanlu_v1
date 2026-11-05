@@ -41,11 +41,19 @@ class Project(TimestampedBase):
     )
     llm_model: Mapped[Optional["LlmModel"]] = relationship("LlmModel", foreign_keys=[llm_model_id])
 
+    # P1 (2026-10-31): department LABEL on the project container — feeds
+    # agent-discovery scoping ONLY (docs/architecture/
+    # zhanlu-enterprise-agent-discovery-and-routing.md §4.1). Never used for
+    # data authorization: KB/RLS/policy scoping is unchanged.
+    department: Mapped[Optional[str]] = mapped_column(
+        String(120), nullable=True, index=True,
+    )
+
     # P1B.3 (2026-11-01): optional link to the AUTHORITATIVE department
     # model (OrgUnit, unit_type department|team). Plain id, no hard FK —
     # org consistency and unit_type are validated by the entity API when
-    # linking. Never auto-assigned; never used for authorization (any
-    # legacy free-text label stays separate and untouched).
+    # linking. Never auto-assigned; never used for authorization (the
+    # legacy `department` label stays for discovery-routing compat).
     department_org_unit_id: Mapped[Optional[str]] = mapped_column(
         String(36), nullable=True, index=True,
     )

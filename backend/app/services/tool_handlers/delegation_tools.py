@@ -29,6 +29,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -103,6 +104,23 @@ _DATA_AGENT_DENIED = {
     "create_agent", "update_agent", "create_skill", "update_skill",
     "create_automation", "update_automation",
 }
+
+
+def _data_agent_allowed_tools() -> set[str]:
+    """The toolset the Data Agent sub-loop may actually execute.
+
+    Universal Tool Access (multi-agent milestone §4): the fixed data toolset
+    plus — when ``AGENT_UNIVERSAL_TOOL_ACCESS`` — the rest of the shared
+    registry (minus delegation/meta tools). Governance stays in the
+    governed execute_tool layer; this only widens DISCOVERY/allow-listing.
+    """
+    allowed = set(_DATA_AGENT_TOOLS)
+    if getattr(settings, "AGENT_UNIVERSAL_TOOL_ACCESS", True):
+        try:
+            allowed |= set(registry.list_available()) - _DATA_AGENT_DENIED
+        except Exception:  # noqa: BLE001 — fall back to the fixed data toolset
+            pass
+    return allowed
 
 # ── Trivial-probe / garbage-data detection ──────────────────────────────────
 # Patterns that indicate a schema probe rather than a real business query.
@@ -254,6 +272,10 @@ async def _run_swarm_data_agent(
     sub_context["bound_kb_ids"] = bound_kb_ids
     if preferred_kb:
         sub_context["data_source_id"] = preferred_kb
+    # P0-2 (2026-10-30): the question travels with the context so the
+    # execution-time source-verification check in _execute_query can judge
+    # detail/forecast intent (same gate the NLAnswerService funnel runs).
+    sub_context["question"] = question
     sub_context["schema_validator_enabled"] = True
     sub_context["did_you_mean_enabled"] = True
     sub_context["schema_linking_enabled"] = True
@@ -272,7 +294,7 @@ async def _run_swarm_data_agent(
         }
 
     async def _dispatch(name: str, call_args: dict, _db, _uid, _ctx) -> dict:
-        if name not in _DATA_AGENT_TOOLS:
+        if name not in _data_agent_allowed_tools():
             return {"success": False, "error": f"Tool '{name}' not allowed for data-analyst"}
         call_args = dict(call_args or {})
         # Fix the classic "internal tool requires data_source_id" failure at
@@ -343,7 +365,179 @@ def _swarm_capture_state(state: dict, tool_name: str, result: dict) -> None:
             state["source_name"] = src.get("name") or result.get("source_name")
 
 
+def _agent_exec_emit(context: dict | None, event_type: str, params: dict) -> None:
+    """Append one structured agent-execution SSE frame to the caller's
+    progress channel (multi-agent orchestration milestone, 2026-11-01).
+
+    The v3 router passes ``context["progress_emitter"]`` (a list of
+    pre-rendered SSE frames) into long-running tool handlers; the router's
+    heartbeat drains it LIVE while the delegation runs, so the Agent
+    Execution panel updates in real time. No-op for non-streaming callers
+    (tests, batch jobs) — never raises.
+    """
+    try:
+        from app.services.agent_loop.sse_builders import (
+            append_agent_execution_event,
+        )
+
+        append_agent_execution_event(
+            (context or {}).get("progress_emitter"), event_type, params)
+    except Exception:  # noqa: BLE001 — observability must never break execution
+        pass
+
+
+def _begin_data_agent_execution(
+    db: Session, user_id: str | None, context: dict, question: str,
+) -> dict:
+    """Give the Data Agent sub-loop an independent execution identity.
+
+    Mirrors ``delegate_tool._run_sub_agent``: one ``AgentInvocation`` row
+    recorded AT START as ``running`` (open invocation) and finalized by the
+    caller — so the specialist appears in the authoritative execution tree
+    AND in the live event stream with the SAME ``agent_execution_id``.
+    The row binds to the host app (schema FK requirement) while
+    ``output_json.agent_name`` carries the distinct ``data_agent`` identity
+    — the same override mechanism ``_row_to_node`` uses for named children.
+    """
+    agent_execution_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
+    invocation_id = None
+    try:
+        from app.services.agent_invocations import record_invocation
+
+        invocation_id = record_invocation(
+            db,
+            conversation_id=(context or {}).get("conversation_id"),
+            user_id=user_id,
+            invocation_type="sub_agent",
+            trigger="supervisor",
+            input_message=question[:2000],
+            status="running",
+            open_invocation=True,
+            started_at=started_at,
+            parent_invocation_id=(context or {}).get("parent_invocation_id"),
+            trace_id=(context or {}).get("trace_id"),
+            delegation_mode="supervisor",
+            route="data_agent",
+        )
+    except Exception as _inv_err:  # noqa: BLE001 — non-fatal
+        logger.debug("ask_data_agent: invocation start record failed: %s", _inv_err)
+    identity = {
+        "agent_execution_id": invocation_id or agent_execution_id,
+        "invocation_id": invocation_id,
+        "started_at": started_at,
+        "agent_name": "data_agent",
+    }
+    _agent_exec_emit(context, "agent_started", {
+        "agent_execution_id": identity["agent_execution_id"],
+        "parent_agent_execution_id": (context or {}).get("parent_invocation_id"),
+        "agent_name": "data_agent",
+        "agent_label": "Data Agent",
+        "task_id": (context or {}).get("turn_id"),
+        "conversation_id": (context or {}).get("conversation_id"),
+        "status": "running",
+        "delegation_mode": "supervisor",
+        "task": question[:200],
+    })
+    return identity
+
+
+def _finish_data_agent_execution(
+    identity: dict | None, db: Session, context: dict, *,
+    success: bool, duration_ms: int, row_count: int = 0,
+    error: str | None = None, evidence_ids: list | None = None,
+    iterations: int | None = None,
+) -> None:
+    """Emit the terminal agent-execution event + finalize the invocation row."""
+    if not identity:
+        return
+    status = "completed" if success else "failed"
+    params = {
+        "agent_execution_id": identity["agent_execution_id"],
+        "agent_name": "data_agent",
+        "agent_label": "Data Agent",
+        "status": status,
+        "duration_ms": duration_ms,
+        "row_count": row_count,
+        "delegation_mode": "supervisor",
+    }
+    if error:
+        params["error"] = str(error)[:300]
+    if evidence_ids:
+        params["evidence_ids"] = evidence_ids[:20]
+        params["evidence_count"] = len(evidence_ids)
+    if iterations is not None:
+        params["iterations"] = iterations
+    _agent_exec_emit(
+        context, "agent_completed" if success else "agent_failed", params)
+    if identity.get("invocation_id"):
+        try:
+            from app.services.agent_invocations import update_invocation_terminal
+
+            update_invocation_terminal(
+                db,
+                identity["invocation_id"],
+                status=status,
+                output_json={
+                    "agent_name": "data_agent",
+                    "row_count": row_count,
+                    "evidence_ids": evidence_ids or [],
+                    "iterations": iterations,
+                    "error": (str(error)[:500] if error else None),
+                },
+                error_message=(str(error)[:2000] if error else None),
+                completed_at=datetime.now(timezone.utc),
+                duration_ms=duration_ms,
+            )
+        except Exception as _inv_err:  # noqa: BLE001 — non-fatal
+            logger.debug("ask_data_agent: invocation finalize failed: %s", _inv_err)
+
+
 async def _ask_data_agent(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """Managed entry: give the Data Agent sub-loop an independent execution
+    identity (invocation row + structured agent-execution events), then run
+    the unchanged specialist loop in ``_ask_data_agent_inner``.
+
+    A tool call is not an agent execution — but this IS a real specialist
+    agent: it runs its own LLM tool loop, so it dispatches, executes and
+    terminates as a first-class agent execution with its own identity,
+    status, inputs, outputs and trace.
+    """
+    question = (args.get("question") or "").strip()
+    if not question:
+        return {"success": False, "error": "question is required"}
+
+    ctx = dict(context or {})
+    identity = _begin_data_agent_execution(db, user_id, ctx, question)
+    # The inner loop reads this to emit per-tool events under THIS identity.
+    ctx["_data_agent_execution"] = identity
+    _t0 = time.monotonic()
+    try:
+        result = await _ask_data_agent_inner(args, db, user_id, ctx)
+    except Exception as exc:
+        _finish_data_agent_execution(
+            identity, db, ctx, success=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            error=str(exc),
+        )
+        raise
+    _finish_data_agent_execution(
+        identity, db, ctx,
+        success=bool(result.get("success")),
+        duration_ms=int((time.monotonic() - _t0) * 1000),
+        row_count=len(result.get("rows") or []) if isinstance(result, dict) else 0,
+        error=(result or {}).get("error") if isinstance(result, dict) else None,
+        iterations=(result or {}).get("iterations") if isinstance(result, dict) else None,
+    )
+    return result
+
+
+async def _ask_data_agent_inner(
     args: dict,
     db: Session,
     user_id: str | None,
@@ -408,6 +602,61 @@ async def _ask_data_agent(
             ),
         }
 
+    # ── B-2 (enterprise reliability audit, 2026-11-01): single bound
+    # database KB → auto-resolve it as the sub-loop's data source when the
+    # caller passed none. The sub-loop's execute_query hard-fails without an
+    # explicit source ("data_source_id is required"), which used to burn one
+    # of the 4 iterations on a deterministic error. With exactly ONE bound
+    # DB KB there is nothing to choose — prefill it. File/memory KBs are
+    # left alone (execute_query is not their path).
+    if not preferred_kb and len(bound_kb_ids) == 1:
+        try:
+            from app.models.knowledge_base import KnowledgeBase as _KB
+
+            _kb_row = (
+                db.query(_KB)
+                .filter(_KB.id == bound_kb_ids[0], _KB.is_deleted == False)  # noqa: E712
+                .first()
+            )
+            if _kb_row is not None and str(
+                getattr(_kb_row, "source_kind", "") or ""
+            ) == "database":
+                preferred_kb = bound_kb_ids[0]
+                logger.info(
+                    "ask_data_agent: auto-resolved single bound database "
+                    "KB %s as the data source", preferred_kb,
+                )
+        except Exception as _kb_exc:  # noqa: BLE001 — resolve is best-effort
+            logger.debug(
+                "ask_data_agent: single-KB auto-resolve skipped: %s", _kb_exc
+            )
+
+    # ── B-1 (enterprise reliability audit, 2026-11-01): pre-flight
+    # warehouse probe — the SAME guard query_database has always had. A dead
+    # warehouse must fail fast HERE instead of burning the sub-loop's LLM
+    # pipeline (up to 4 iterations × 3-5 LLM calls) against connection
+    # timeouts. Host-less (file) KBs are skipped by the shared probe; probe
+    # infrastructure errors fail open (the loop below still runs).
+    if getattr(settings, "NL2SQL_PREFLIGHT_PROBE_ENABLED", True):
+        _probe_ids = [preferred_kb] if preferred_kb else bound_kb_ids
+        if _probe_ids:
+            _probe_result = None
+            try:
+                from app.services.tool_handlers.query_database_tool import (
+                    _preflight_bound_datasources,
+                )
+
+                _probe_result = _preflight_bound_datasources(
+                    db, [k for k in _probe_ids if k], question
+                )
+            except Exception as _probe_exc:  # noqa: BLE001 — fail open
+                logger.debug(
+                    "ask_data_agent: preflight probe skipped: %s", _probe_exc
+                )
+            if _probe_result is not None:
+                _probe_result["error_kind"] = "datasource_unreachable"
+                return _probe_result
+
     # ── Fast path (flag-gated): a single bound database source goes
     # through the one-shot NL2SQL pipeline (2 LLM calls) instead of the
     # iterative sub-agent loop (3-5 calls). Returns None on any failure
@@ -417,6 +666,8 @@ async def _ask_data_agent(
             question, preferred_kb, bound_kb_ids, db, endpoint=endpoint,
             skip_narrate=bool((context or {}).get("main_agent_will_synthesize")),
             agent_name=(context or {}).get("agent_name") or (context or {}).get("caller"),
+            context=context,
+            user_id=user_id,
         )
         if fastpath_result is not None:
             return fastpath_result
@@ -508,6 +759,31 @@ async def _ask_data_agent(
     _progress_timings: dict[str, float] = {}
     _progress_done: set[str] = set()
 
+    # ── Live per-tool events under THIS specialist's execution identity ──
+    # (multi-agent milestone): each internal tool call emits
+    # agent_tool_started / agent_tool_completed frames so the Agent
+    # Execution panel renders the specialist's own tool loop live.
+    _IDENT = (context or {}).get("_data_agent_execution") or {}
+
+    def _tool_event(event_type: str, tn: str, status: str = "running",
+                    duration_ms: int | None = None, rows: int = 0,
+                    error: str | None = None) -> None:
+        if not _IDENT:
+            return
+        params = {
+            "agent_execution_id": _IDENT.get("agent_execution_id"),
+            "parent_agent_execution_id": (context or {}).get("parent_invocation_id"),
+            "agent_name": "data_agent",
+            "tool_name": tn,
+            "status": status,
+            "row_count": rows,
+        }
+        if duration_ms is not None:
+            params["duration_ms"] = duration_ms
+        if error:
+            params["error"] = str(error)[:200]
+        _agent_exec_emit(context, event_type, params)
+
     def _prog_begin(key: str, label: str) -> None:
         if _progress is None or _progress_step_ctr is None or key in _progress_done:
             return
@@ -542,6 +818,7 @@ async def _ask_data_agent(
         bound_kb_ids,
         preferred_kb,
         caller=(context or {}).get("agent_name"),
+        db=db,
     )
     tool_schemas = _build_sub_agent_tool_schemas()
 
@@ -564,6 +841,9 @@ async def _ask_data_agent(
     # not a gate — it never blocks valid SQL.
     sub_context["schema_validator_enabled"] = True
     sub_context["did_you_mean_enabled"] = True
+    # P0-2 (2026-10-30): thread the question so the execution-time
+    # source-verification check in _execute_query can judge intent.
+    sub_context["question"] = question
     # Enable schema linker + schema graph for the Data Agent so it gets
     # join edges + FK relationships automatically.  These are agent-level
     # opt-ins (NOT global flag flips) — _describe_schema checks context
@@ -659,7 +939,26 @@ async def _ask_data_agent(
 
         _llm_t0 = time.monotonic()
         try:
-            llm_response = await _call_llm_with_retry(messages, tool_schemas, endpoint=endpoint)
+            # Enterprise reliability audit A-1 (2026-11-01): the inner LLM
+            # call is now bounded by the REMAINING wall-clock budget. The
+            # iteration-start check (above) only fires BEFORE the call — a
+            # hung LLM call used to bypass the cap entirely (161s observed).
+            # On budget exhaustion we set `_truncated` (the same honest
+            # partial-result semantics as the loop-level breach) instead of
+            # a hard failure, so already-captured rows are still returned.
+            _remaining_budget = _budget_s - (time.monotonic() - _delegation_start)
+            llm_response = await asyncio.wait_for(
+                _call_llm_with_retry(messages, tool_schemas, endpoint=endpoint),
+                timeout=max(1.0, _remaining_budget),
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "ask_data_agent inner LLM call exceeded the remaining "
+                "wall-clock budget (%.1fs left) — truncating with captured data",
+                _remaining_budget,
+            )
+            _truncated = True
+            break
         except Exception as e:
             logger.warning("ask_data_agent LLM call failed on iter %d: %s", iteration, e)
             # Hard failure ONLY when no data has been captured yet (the
@@ -756,10 +1055,27 @@ async def _ask_data_agent(
                 _gd = guard_ctrl.before_call(tn, ta)
                 if not _gd.allows_execution:
                     return json.loads(synthetic_blocked_result(_gd))
-                if tn not in _DATA_AGENT_TOOLS:
+                if tn not in _data_agent_allowed_tools():
                     return {"success": False, "error": f"Tool {tn!r} is not available to the Data Agent."}
                 from app.services.agent_tools import execute_tool
-                return await execute_tool(tn, ta, db, uid, context=ctx)
+                _tt0 = time.monotonic()
+                _tool_event("agent_tool_started", tn)
+                try:
+                    _res = await execute_tool(tn, ta, db, uid, context=ctx)
+                except Exception as _te:
+                    _tool_event("agent_tool_completed", tn, status="failed",
+                                duration_ms=int((time.monotonic() - _tt0) * 1000),
+                                error=str(_te))
+                    raise
+                _ok = bool(_res.get("success")) if isinstance(_res, dict) else True
+                _tool_event(
+                    "agent_tool_completed", tn,
+                    status="completed" if _ok else "failed",
+                    duration_ms=int((time.monotonic() - _tt0) * 1000),
+                    rows=len(_res.get("rows") or []) if isinstance(_res, dict) else 0,
+                    error=(None if _ok else (_res or {}).get("error")),
+                )
+                return _res
 
             _coros = [_run_one(tn, ta, db, user_id, sub_context) for tn, ta, _ in _parsed_calls]
             _sql_t0 = time.monotonic()
@@ -801,7 +1117,7 @@ async def _ask_data_agent(
                 _gd = guard_ctrl.before_call(tool_name, tool_args)
                 if not _gd.allows_execution:
                     result = json.loads(synthetic_blocked_result(_gd))
-                elif tool_name not in _DATA_AGENT_TOOLS:
+                elif tool_name not in _data_agent_allowed_tools():
                     result = {
                         "success": False,
                         "error": f"Tool {tool_name!r} is not available to the Data Agent.",
@@ -811,10 +1127,20 @@ async def _ask_data_agent(
                     # — so permissions, hooks, and logging all work uniformly.
                     from app.services.agent_tools import execute_tool
                     _sql_t0 = time.monotonic()
+                    _tool_event("agent_tool_started", tool_name)
                     result = await execute_tool(
                         tool_name, tool_args, db, user_id, context=sub_context
                     )
+                    _tool_dur = int((time.monotonic() - _sql_t0) * 1000)
                     _sql_total_s += time.monotonic() - _sql_t0
+                    _tool_ok = bool(result.get("success")) if isinstance(result, dict) else True
+                    _tool_event(
+                        "agent_tool_completed", tool_name,
+                        status="completed" if _tool_ok else "failed",
+                        duration_ms=_tool_dur,
+                        rows=len(result.get("rows") or []) if isinstance(result, dict) else 0,
+                        error=(None if _tool_ok else (result or {}).get("error")),
+                    )
                     _maybe_capture_execute_result(tool_name, result, state)
 
                 # P0: Layer 2 per-result persistence (large results → disk preview)
@@ -918,6 +1244,8 @@ async def _ask_data_agent(
             _nl2sql_result = await _try_nl_fastpath(
                 question, preferred_kb, bound_kb_ids, db, endpoint=endpoint,
                 skip_narrate=bool((context or {}).get("main_agent_will_synthesize")),
+                user_id=user_id,
+                context=context,
             )
             if _nl2sql_result is not None and _nl2sql_result.get("success"):
                 _nl2sql_rows = _nl2sql_result.get("rows") or []
@@ -1094,7 +1422,13 @@ async def _ask_data_agent(
     # representative sample to synthesize a report; sending the full result
     # set (which can be 10k+ rows) just bloats the context window and slows
     # the next LLM turn. The condensed LLM view (~5 rows) is unaffected.
+    # B-3 (enterprise reliability audit, 2026-11-01): the slice used to be
+    # SILENT — the caller had no way to know rows were clipped. We now flag
+    # it in data_quality (result_truncated + total/returned counts).
     ASK_DATA_MAX_RETURN_ROWS = 200
+    _total_rows_captured = (
+        len(state["last_rows"]) if state.get("last_rows") else 0
+    )
     if state.get("last_rows") and len(state["last_rows"]) > ASK_DATA_MAX_RETURN_ROWS:
         state["last_rows"] = state["last_rows"][:ASK_DATA_MAX_RETURN_ROWS]
 
@@ -1104,6 +1438,11 @@ async def _ask_data_agent(
         "trivial_probe_detected": state.get("trivial_probe_detected", False),
         "garbage_rows_detected": state.get("garbage_rows_detected", False),
         "row_count": len(state["last_rows"]) if state.get("last_rows") else 0,
+        "total_row_count": _total_rows_captured,
+        "returned_row_count": (
+            len(state["last_rows"]) if state.get("last_rows") else 0
+        ),
+        "result_truncated": _total_rows_captured > ASK_DATA_MAX_RETURN_ROWS,
     }
 
     # Derive column names from row dicts so downstream consumers
@@ -1142,6 +1481,8 @@ async def _try_nl_fastpath(
     endpoint=None,
     skip_narrate: bool = False,
     agent_name: str | None = None,
+    context: dict | None = None,
+    user_id: str | None = None,
 ) -> dict | None:
     """One-shot NL2SQL fast path for a single bound database source.
 
@@ -1150,6 +1491,10 @@ async def _try_nl_fastpath(
     Returns None when the fast path does not apply or fails — the caller
     then falls back to the iterative sub-agent loop, which can self-correct
     SQL across iterations.
+
+    EXCEPTION: a per-turn SQL budget refusal (``turn_sql_budget_exhausted``)
+    is returned AS the result, not swallowed — falling back to the
+    iterative loop would defeat the budget by executing more SQL.
     """
     kb_id = preferred_kb or (bound_kb_ids[0] if len(bound_kb_ids) == 1 else None)
     if not kb_id:
@@ -1167,12 +1512,32 @@ async def _try_nl_fastpath(
 
     try:
         from app.services.db import NLAnswerService
-        result = await NLAnswerService(db).answer(kb_id, question, endpoint=endpoint, skip_narrate=skip_narrate, agent_name=agent_name)
+        # P0-1 (2026-10-30, audit D2): resolve the user's data-access policy
+        # like every other NLAnswerService caller — previously None here left
+        # pre-generation policy filtering inert on the delegation fastpath.
+        from app.services.access_policy_service import resolve_policy_from_context
+
+        result = await NLAnswerService(db).answer(
+            kb_id, question, endpoint=endpoint, skip_narrate=skip_narrate,
+            agent_name=agent_name,
+            conversation_id=(context or {}).get("conversation_id"),
+            turn_id=(context or {}).get("turn_id"),
+            resolved_policy=resolve_policy_from_context(db, user_id, context),
+        )
     except Exception as e:
         logger.warning("ask_data_agent fast path raised (falling back to loop): %s", e)
         return None
 
     if not result.get("success"):
+        if result.get("error_kind") == "turn_sql_budget_exhausted":
+            # Terminal: the turn's SQL budget is spent. Do NOT fall back to
+            # the iterative loop — it would run more warehouse queries and
+            # defeat the budget. Surface the honest refusal to the caller.
+            logger.info(
+                "ask_data_agent fast path: turn SQL budget exhausted (source %s)",
+                kb_id,
+            )
+            return result
         logger.info(
             "ask_data_agent fast path failed (falling back to loop): %s",
             result.get("error"),
@@ -1306,6 +1671,7 @@ def _build_sub_agent_prompt(
     bound_kb_ids: list[str],
     preferred_kb: str | None,
     caller: str | None = None,
+    db: Session | None = None,
 ) -> str:
     """Compose the system prompt the Data Agent sub-loop runs with."""
     from app.services.agent_definitions import DATA_AGENT_PROMPT
@@ -1321,6 +1687,41 @@ def _build_sub_agent_prompt(
             bound_section += f"\nThe caller suggested source: {preferred_kb!r}."
 
     prompt = DATA_AGENT_PROMPT + bound_section
+
+    # P0-2 (2026-10-30, audit D1): generation-time semantic parity. The
+    # NLAnswerService funnel injects the verified metric contract block into
+    # every SQL-generation prompt; the sub-loop authored SQL blind to it.
+    # Inject the SAME block (same source, same wording) so a measure bound to
+    # a specific column cannot be re-derived from a sibling column here.
+    if db is not None and bound_kb_ids:
+        try:
+            from app.models.knowledge_base import KnowledgeBase
+            from app.services.db.query_contract import (
+                contract_prompt_block,
+                datasource_metric_bindings,
+            )
+
+            _db_kb_ids = [
+                k.id for k in db.query(KnowledgeBase).filter(
+                    KnowledgeBase.id.in_(list(bound_kb_ids)),
+                    KnowledgeBase.is_deleted == False,  # noqa: E712
+                ).all()
+                if (k.source_kind or "database").lower() == "database"
+            ]
+            _bindings = []
+            for _kid in _db_kb_ids:
+                _bindings.extend(datasource_metric_bindings(db, _kid))
+            if _bindings:
+                prompt = (
+                    prompt
+                    + "\n\nThe following are BINDING measure definitions from "
+                    "the data source's verified catalog — obey them exactly "
+                    "when writing SQL:\n"
+                    + contract_prompt_block(_bindings)
+                    + "\n"
+                )
+        except Exception as e:  # noqa: BLE001 — semantic hint must never break the loop
+            logger.debug("_build_sub_agent_prompt: metric block skipped: %s", e)
 
     # P4: if the caller embedded a compact `[schema: ...]` block in the
     # question (see _build_schema_slice in data_source_runtime), surface it
@@ -1398,12 +1799,34 @@ def _build_sub_agent_prompt(
 
 
 def _build_sub_agent_tool_schemas() -> list[dict]:
-    """Return the OpenAI-format tool schemas for the 4 DB tools."""
+    """Return the OpenAI-format tool schemas for the Data Agent sub-loop.
+
+    Universal Tool Access (multi-agent milestone §4, 2026-11-01): the Data
+    Agent's data tools stay FIRST (its primary responsibility), but under
+    ``AGENT_UNIVERSAL_TOOL_ACCESS`` it can also discover the rest of the
+    shared registry (file tools, web, reporting, analytics, …) — minus the
+    delegation/meta tools in ``_DATA_AGENT_DENIED``. Governance is unchanged:
+    every call still flows through the governed execute_tool layer, and the
+    sub-loop's allow-check (``tn not in _DATA_AGENT_TOOLS``) is widened to
+    the same computed catalog so a discovered tool can actually execute.
+    Rollback: AGENT_UNIVERSAL_TOOL_ACCESS=false restores the fixed data
+    toolset byte-for-byte.
+    """
     out: list[dict] = []
+    seen: set[str] = set()
     for name in _DATA_AGENT_TOOLS:
         entry = registry.get_entry(name)
         if entry and entry.schema:
             out.append(entry.schema)
+            seen.add(name)
+    if getattr(settings, "AGENT_UNIVERSAL_TOOL_ACCESS", True):
+        for name in registry.list_available():
+            if name in seen or name in _DATA_AGENT_DENIED:
+                continue
+            entry = registry.get_entry(name)
+            if entry and entry.schema:
+                out.append(entry.schema)
+                seen.add(name)
     return out
 
 

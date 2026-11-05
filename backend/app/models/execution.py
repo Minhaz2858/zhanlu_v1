@@ -160,5 +160,8 @@ class ObservationRecord(TimestampedBase):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     artifact_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Phase 3.1: durable evidence-registry references (restorable provenance
+    # after a restart — no re-query needed). Migration 115.
+    evidence_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     execution: Mapped["Execution"] = relationship(back_populates="observations")

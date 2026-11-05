@@ -63,9 +63,12 @@ EXECUTION_CHECKS = (
     "table_existence",
     "column_existence",
     "join_reachability",
+    "join_fanout",
     "policy",
     "row_filter",
+    "scope_authorization",
     "metric_contract",
+    "metric_binding",
 )
 
 #: Statements that speak to the engine's own objects. They are read-only by
@@ -259,6 +262,7 @@ def enforce(
     policy: Any = None,
     plan: Any = None,
     row_filters: Sequence[Any] | None = None,
+    scope_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run every execution check. Raises :class:`ExecutionValidationError` on any broken one.
 
@@ -327,6 +331,59 @@ def enforce(
         }
         tables = sorted(t for t in _extract_tables(parsed) if t.lower() not in cte_names)
         detail["tables"] = tables
+
+        # ── Verified metric binding (2026-10-29 root-cause fix) ─────────────
+        # The datasource catalog's metric definitions are CONSTRAINTS, not
+        # suggestions. An output alias claiming a verified concept (revenue,
+        # net_revenue, …) but computing it from a different column is refused
+        # BEFORE execution — the incident class where one node summed the net
+        # amount and another the tax-inclusive amount and synthesis blended
+        # them. Generic: bindings come from THIS datasource's catalog rows;
+        # no column names in code. Runs regardless of catalog introspection
+        # coverage (a fresh source with no described tables still has its
+        # metric definitions).
+        from app.config import settings as _gate_settings
+
+        if not getattr(_gate_settings, "METRIC_BINDING_ENFORCEMENT_ENABLED", True):
+            checks["metric_binding"] = "disabled"
+        else:
+            try:
+                from app.services.db.query_contract import (
+                    datasource_metric_bindings,
+                    validate_confusable_measures,
+                    validate_sql_measure_aliases,
+                )
+
+                _mb_bindings = datasource_metric_bindings(db, kb_id)
+            except Exception as _mb_err:  # pragma: no cover — catalog hiccup
+                logger.debug("metric binding load failed: %s", _mb_err)
+                _mb_bindings = []
+            if not _mb_bindings:
+                checks["metric_binding"] = "not-applicable"
+            else:
+                try:
+                    from app.services.nl2sql.schema_validator import (
+                        _extract_alias_map as _mb_alias_extract,
+                    )
+
+                    _mb_violations = validate_sql_measure_aliases(
+                        _mb_bindings, parsed, tables, _mb_alias_extract(parsed),
+                    )
+                    # Blocker-1 closure: reject a DIFFERENT documented basis of
+                    # a verified concept even when no output alias claims the
+                    # concept (the incident's exact second shape).
+                    _mb_violations.extend(validate_confusable_measures(
+                        _mb_bindings, parsed, tables, _mb_alias_extract(parsed),
+                    ))
+                except Exception as _mb_err:  # pragma: no cover
+                    logger.debug("metric binding validation skipped: %s", _mb_err)
+                    _mb_violations = []
+                if _mb_violations:
+                    checks["metric_binding"] = "fail"
+                    errors.extend(_mb_violations)
+                    detail["metric_binding_violations"] = _mb_violations
+                else:
+                    checks["metric_binding"] = "pass"
 
         known = _known_tables(db, kb_id)
         if not known:
@@ -411,6 +468,26 @@ def enforce(
             else:
                 checks["join_reachability"] = "not-applicable"
 
+            # P0-6 join fan-out: catalog-derived 1↔N cardinality + aggregates
+            # on the many side → WARNING (never a refusal). Warnings live in
+            # detail["fanout_warnings"] and surface to the self-correct loop.
+            from app.config import settings as _gate_settings
+
+            if not _gate_settings.NL2SQL_JOIN_FANOUT_CHECK_ENABLED:
+                checks["join_fanout"] = "not-in-scope"
+            elif not joins:
+                checks["join_fanout"] = "not-applicable"
+            else:
+                try:
+                    fanout = _join_fanout_warnings(parsed, db, kb_id, alias_map)
+                except Exception as e:  # pragma: no cover — degrade, don't refuse
+                    logger.warning("execution gate: fanout check failed: %s", e)
+                    fanout = []
+                    checks["join_fanout"] = "unavailable"
+                detail["fanout_warnings"] = fanout
+                if checks.get("join_fanout") != "unavailable":
+                    checks["join_fanout"] = "warning" if fanout else "pass"
+
     # Policy: blocked tables are refused; an allow-list is honoured.
     blocked, allowed = _policy_decisions(policy, kb_id)
     if policy is None:
@@ -445,6 +522,42 @@ def enforce(
             )
         else:
             checks["row_filter"] = "pass"
+
+    # ── 2B-3: scope_authorization (flag-gated, ships OFF) ──────────────────
+    # A company-wide question must never be answered solely from confirmed
+    # partition tables while a global dataset exists, and a statement must
+    # never read a DIFFERENT partition than the question named. Evidence-
+    # positive only: unknown/absent scope and ``partition_family`` guesses
+    # are never convicted, human overrides win via effective_classification,
+    # and ANY catalog problem degrades to "unavailable" rather than refusing.
+    from app.config import settings as _scope_settings
+
+    if not getattr(_scope_settings, "SCHEMA_SCOPE_AUTHORIZATION_ENABLED", False):
+        checks["scope_authorization"] = "not-in-scope"
+    else:
+        _scope_ctx = dict(scope_context or {})
+        _scope_facts = dict(_scope_ctx.get("classification_facts") or {})
+        if not _scope_facts or introspection or not tables:
+            # No catalog evidence this turn (flag on but loader degraded,
+            # introspection statement, nothing to judge) → recorded, never a
+            # refusal and never an implied pass of an unrun check.
+            checks["scope_authorization"] = "not-applicable"
+        else:
+            try:
+                from app.services.db.schema_classification import validate_sql_scope
+
+                _scope_errors, _scope_warnings = validate_sql_scope(
+                    tables, _scope_ctx.get("question_scope"), _scope_facts
+                )
+                checks["scope_authorization"] = "fail" if _scope_errors else "pass"
+                errors.extend(_scope_errors)
+                if _scope_warnings:
+                    detail["scope_warnings"] = _scope_warnings
+            except Exception as _scope_err:  # degrade, don't refuse
+                logger.warning(
+                    "execution gate: scope_authorization degraded: %s", _scope_err
+                )
+                checks["scope_authorization"] = "unavailable"
 
     # Metric/ratio contracts declared for this question must be consistent.
     contracts = list(getattr(plan, "ratio_contracts", None) or []) if plan is not None else []
@@ -616,3 +729,179 @@ def _catalog_backs(db: Session, kb_id: str, table: str, keys: Iterable[str]) -> 
         if names & wanted:
             return True
     return False
+
+
+def _relation_cardinalities(db: Session, kb_id: str) -> list[dict[str, Any]]:
+    """Catalog join relations with their (possibly derived) cardinality.
+
+    P0-6: prefers the cardinality stamped at index time
+    (``kb_table_relation.source_cardinality``/``target_cardinality`` — dead
+    columns before Phase B populated them); for relations indexed before
+    that, derives on the fly from join-column key roles and indexed row
+    counts (``join_cardinality.derive_cardinality``) — no backfill needed
+    and nothing customer-specific: FK direction, PRI/UNI/MUL, row counts.
+    """
+    try:
+        from app.models.knowledge_catalog import (
+            KBColumnMeta,
+            KBTableMeta,
+            KBTableRelation,
+        )
+        from app.services.knowledge_graph.join_cardinality import (
+            derive_cardinality,
+        )
+
+        rows = (
+            db.query(KBTableRelation)
+            .filter(
+                KBTableRelation.kb_id == kb_id,
+                KBTableRelation.is_deleted.is_(False),
+            )
+            .all()
+        )
+    except Exception as e:  # pragma: no cover — catalog optional
+        logger.debug("execution gate: relation lookup failed: %s", e)
+        return []
+
+    meta_ids = {r.source_table_meta_id for r in rows} | {
+        r.target_table_meta_id for r in rows
+    }
+    name_by_id: dict[str, str] = {}
+    row_counts: dict[str, Any] = {}
+    if meta_ids:
+        try:
+            metas = (
+                db.query(KBTableMeta)
+                .filter(KBTableMeta.id.in_(meta_ids))
+                .all()
+            )
+            name_by_id = {m.id: m.table_name for m in metas}
+            row_counts = {m.id: m.row_count for m in metas}
+        except Exception:  # pragma: no cover
+            pass
+
+    # Key roles for the join columns (PRI/UNI/MUL from the connector).
+    key_roles: dict[tuple[str, str], str] = {}
+    if meta_ids:
+        try:
+            cols = (
+                db.query(KBColumnMeta)
+                .filter(KBColumnMeta.table_meta_id.in_(meta_ids))
+                .all()
+            )
+            key_roles = {
+                (c.table_meta_id, str(c.column_name).lower()): str(
+                    getattr(c, "key_role", "") or ""
+                ).upper()
+                for c in cols
+            }
+        except Exception:  # pragma: no cover
+            pass
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        src_name = name_by_id.get(r.source_table_meta_id)
+        tgt_name = name_by_id.get(r.target_table_meta_id)
+        if not src_name or not tgt_name:
+            continue
+        src_cols = [str(c).lower() for c in (r.source_columns or [])]
+        tgt_cols = [str(c).lower() for c in (r.target_columns or [])]
+        src_card = getattr(r, "source_cardinality", None)
+        tgt_card = getattr(r, "target_cardinality", None)
+        if not src_card or not tgt_card:
+            src_card, tgt_card = derive_cardinality(
+                r.relation_type,
+                source_key_roles=[
+                    key_roles.get((r.source_table_meta_id, c), "")
+                    for c in src_cols
+                ],
+                target_key_roles=[
+                    key_roles.get((r.target_table_meta_id, c), "")
+                    for c in tgt_cols
+                ],
+                source_row_count=row_counts.get(r.source_table_meta_id),
+                target_row_count=row_counts.get(r.target_table_meta_id),
+            )
+        out.append({
+            "source_table": src_name,
+            "target_table": tgt_name,
+            "source_columns": src_cols,
+            "target_columns": tgt_cols,
+            "relation_type": r.relation_type or "FK",
+            "source_cardinality": src_card,
+            "target_cardinality": tgt_card,
+        })
+    return out
+
+
+def _aggregated_tables(parsed: Any, alias_map: Mapping[str, str]) -> set[str]:
+    """Tables holding columns inside SUM/AVG aggregates (row-multipliers)."""
+    from sqlglot import exp
+
+    tables: set[str] = set()
+    for agg in parsed.find_all(exp.Sum, exp.Avg):
+        for column in agg.find_all(exp.Column):
+            raw = str(column.table or "").lower()
+            if raw:
+                tables.add(alias_map.get(raw, raw))
+    return tables
+
+
+def _join_fanout_warnings(
+    parsed: Any, db: Session, kb_id: str, alias_map: Mapping[str, str]
+) -> list[str]:
+    """Fanout warnings for aggregates over the many side of catalog 1↔N joins.
+
+    Only genuinely derived cardinalities warn — an undetermined cardinality
+    never reads as a safe one (``join_cardinality.derive_cardinality``
+    returns ``(None, None)`` rather than guessing).
+    """
+    from sqlglot import exp
+
+    from app.services.knowledge_graph.join_cardinality import (
+        fanout_risk_in_join,
+    )
+
+    relations = _relation_cardinalities(db, kb_id)
+    if not relations:
+        return []
+    aggregated = _aggregated_tables(parsed, alias_map)
+    if not aggregated:
+        return []
+
+    warnings: list[str] = []
+    seen: set[str] = set()
+    # Match relations against the statement's join keys (order-independent,
+    # same normalization _join_reachability uses).
+    for rel in relations:
+        src, tgt = rel["source_table"].lower(), rel["target_table"].lower()
+        rel_cols = {*(c.lower() for c in rel["source_columns"]),
+                    *(c.lower() for c in rel["target_columns"])}
+        joined_together = False
+        for join in parsed.find_all(exp.Join):
+            on = join.args.get("on")
+            if on is None:
+                continue
+            pair_tables: set[str] = set()
+            pair_cols: set[str] = set()
+            for equality in on.find_all(exp.EQ):
+                left, right = equality.left, equality.right
+                if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
+                    continue
+                lt = alias_map.get(str(left.table).lower(), str(left.table).lower())
+                rt = alias_map.get(str(right.table).lower(), str(right.table).lower())
+                pair_tables |= {lt, rt}
+                pair_cols |= {str(left.name).lower(), str(right.name).lower()}
+            if {src, tgt} <= pair_tables and rel_cols & pair_cols:
+                joined_together = True
+                break
+        if not joined_together:
+            continue
+        warning = fanout_risk_in_join(
+            (rel["source_cardinality"], rel["target_cardinality"]),
+            src, tgt, aggregated,
+        )
+        if warning and warning not in seen:
+            seen.add(warning)
+            warnings.append(warning)
+    return warnings

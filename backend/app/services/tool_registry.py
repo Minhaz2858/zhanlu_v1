@@ -446,7 +446,11 @@ DEFAULT_TOOLS_BY_AGENT: dict[str, list[str]] = {
         "create_skill", "update_skill", "list_tools",
     ],
     "automation_agent": [
-        "create_automation", "update_automation", "execute_automation",
+        # Lifecycle separation cutover (2026-11-03): the draft path only —
+        # no create_automation (direct ACTIVE insert), no update_automation
+        # (ungated status/data_source edits), no execute_automation (no
+        # same-turn runs of a just-created task).
+        "propose_automation", "update_automation_draft",
         "list_knowledge_bases", "list_data_sources", "clarify",
     ],
     "general_assistant": [

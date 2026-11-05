@@ -53,6 +53,7 @@ from app.routers.executions import router as executions_router
 from app.routers.agent_studio import router as agent_studio_router
 from app.routers.skill_studio import router as skill_studio_router
 from app.routers.governance import router as governance_router
+from app.routers.usage_analytics import router as usage_analytics_router
 from app.routers.workspace_settings import router as workspace_settings_router
 from app.routers.marketplace import router as marketplace_router
 from app.routers.mcp import router as mcp_router
@@ -1097,6 +1098,7 @@ def create_app() -> FastAPI:
     app.include_router(agent_studio_router, prefix="/api")
     app.include_router(skill_studio_router, prefix="/api")
     app.include_router(governance_router, prefix="/api")
+    app.include_router(usage_analytics_router, prefix="/api")
     app.include_router(workspace_settings_router, prefix="/api")
     app.include_router(marketplace_router, prefix="/api")
     app.include_router(mcp_router, prefix="/api")

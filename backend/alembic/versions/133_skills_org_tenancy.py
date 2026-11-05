@@ -20,6 +20,7 @@ Repeatable & auditable:
 import logging
 
 from alembic import op
+from sqlalchemy import text
 
 revision = "133_skills_org_tenancy"
 down_revision = "132_automation_retry_scheduling"
@@ -35,15 +36,17 @@ def upgrade() -> None:
     # (test_skills_org_tenancy.py::test_migration_133_backfill_logic).
     conn = op.get_bind()
     result = conn.execute(
-        """
-        UPDATE tools AS t
-           SET org_id = u.org_id
-          FROM users AS u
-         WHERE t.created_by_id = u.id
-           AND u.org_id IS NOT NULL
-           AND t.org_id = 'default-org'
-           AND t.source IN ('custom', 'marketplace_user')
-        """
+        text(
+            """
+            UPDATE tools AS t
+               SET org_id = u.org_id
+              FROM users AS u
+             WHERE t.created_by_id = u.id
+               AND u.org_id IS NOT NULL
+               AND t.org_id = 'default-org'
+               AND t.source IN ('custom', 'marketplace_user')
+            """
+        )
     )
     logger.warning(
         "133_skills_org_tenancy: backfilled tools.org_id for %s tenant "

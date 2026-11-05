@@ -54,6 +54,59 @@ def _connection_context(schema_svc: SchemaService, kb_id: str) -> str:
     return f"Data source ({', '.join(parts)})."
 
 
+def _scope_disclosure_seen(candidate: str, existing: str) -> bool:
+    """True when ``candidate`` restates something already disclosed.
+
+    Scope evidence arrives from up to THREE layers (2B-2 retrieval sentence,
+    P-SV plan disclosure, execution-gate warning) that legitimately describe
+    the same fact in different words. The reader gets the fact once; layers
+    remain distinguishable in the structured ``scope_refusals`` /
+    ``scope_check`` fields. Normalized token-Jaccard ≥ 0.6 against any
+    already-present sentence counts as a restatement.
+    """
+    import re as _re
+
+    def _tok(s: str) -> frozenset:
+        return frozenset(_re.findall(r"[a-z0-9]+", str(s).lower()))
+
+    ct = _tok(candidate)
+    if not ct:
+        return True
+    for sent in _re.split(r"(?:Note:|\.\s|\.\n|\n)", existing or ""):
+        st = _tok(sent)
+        if st and len(ct & st) / len(ct | st) >= 0.6:
+            return True
+    return False
+
+
+def _scope_limitation_sentence(state: str | None, loader_degraded: bool) -> str:
+    """The reader-facing sentence for a scope check that did NOT complete.
+
+    Review requirement B: ``unavailable`` (and a loader-degraded
+    ``not-applicable``) must be visible, and the wording must not claim
+    anything about the data — neither "the data is complete" nor "the data
+    is incomplete". The honest statement is that completeness could not be
+    VERIFIED. ``pass`` / ``fail`` / plain ``not-applicable`` / ``not-in-scope``
+    produce nothing (fail is disclosed by the refusal itself; a clean
+    not-applicable means the check was never wanted or had nothing to judge).
+    """
+    if state == "unavailable":
+        return (
+            "Note: the data-scope check for this answer could not be "
+            "completed (the data catalog was temporarily unavailable), so "
+            "whether the figures cover the full scope asked about could not "
+            "be verified."
+        )
+    if state == "not-applicable" and loader_degraded:
+        return (
+            "Note: the data-scope check for this answer could not be "
+            "completed (scope metadata was temporarily unavailable), so "
+            "whether the figures cover the full scope asked about could not "
+            "be verified."
+        )
+    return ""
+
+
 _MULTI_STMT_NL = re.compile(r";\s*(?=(?:SELECT|WITH)\b)", re.IGNORECASE)
 
 
@@ -141,8 +194,17 @@ class NLAnswerService:
         skip_narrate: bool = False,
         agent_name: str | None = None,
         conversation_id: str | None = None,
+        turn_id: str | None = None,
+        scope_hint: str | None = None,
     ) -> dict:
-        """Public entry point: gate + answer + readiness disclosure.
+        """Public entry point: gate + answer + readiness directive.
+
+        ``scope_hint`` (2B-4): a corrective-replan nudge — the structured
+        scope refusal from a previous attempt. When present (and
+        SCHEMA_CORRECTIVE_SCOPE_HINTS_ENABLED), it rides the table-selection
+        prompt so the selection prefers the verified company-wide dataset
+        instead of repeating the refused partition. Planner awareness only —
+        enforcement is unchanged and stays the final authority.
 
         Every caller goes through here, so the readiness gate cannot be
         bypassed by a second entry point (the previous design had one path in
@@ -151,6 +213,11 @@ class NLAnswerService:
         ``conversation_id`` (optional) enables the planner's structured
         multi-turn state: resolved entities/defaults carried across turns of
         one conversation (OCI P1-6). None = stateless single-shot, unchanged.
+
+        ``turn_id`` (optional) scopes the per-turn SQL execution budget
+        (``NL2SQL_MAX_TURN_SQL_QUERIES``) — one user message = one turn. The
+        chat loop threads the assistant message id here; FSM plan nodes thread
+        the execution id; without any scope the budget does not apply.
         """
         result = await self._answer_impl(
             kb_id,
@@ -161,6 +228,8 @@ class NLAnswerService:
             skip_narrate=skip_narrate,
             agent_name=agent_name,
             conversation_id=conversation_id,
+            turn_id=turn_id,
+            scope_hint=scope_hint,
         )
         return self._attach_readiness_directive(result, kb_id)
 
@@ -197,6 +266,8 @@ class NLAnswerService:
         skip_narrate: bool = False,
         agent_name: str | None = None,
         conversation_id: str | None = None,
+        turn_id: str | None = None,
+        scope_hint: str | None = None,
     ) -> dict:
         """Return a structured + prose answer for a user question.
 
@@ -227,6 +298,28 @@ class NLAnswerService:
                 "error": "Access to this data source is restricted.",
                 "source_id": kb_id,
             }
+
+        # 0-pre-pre. Per-turn SQL execution budget (2026-10-29 verification
+        # gate): every NL2SQL path funnels through this method, so a budget
+        # here bounds the ReAct tool-loop path that plan-node caps cannot
+        # see. Checked BEFORE any LLM call — an over-budget turn must not
+        # pay for another planning round. The refusal is honest and
+        # actionable: synthesize from what was already gathered.
+        from app.services.db import turn_sql_budget as _tsb
+
+        _tsb_scope = _tsb.resolve_scope(
+            turn_id=turn_id, conversation_id=conversation_id
+        )
+        _tsb_base = int(getattr(settings, "NL2SQL_MAX_TURN_SQL_QUERIES", 6) or 0)
+        # Explicit turn/execution scopes enforce the budget as configured;
+        # a conversation-scoped fallback gets 2x within its window (see
+        # turn_sql_budget.effective_budget).
+        _tsb_window = float(getattr(settings, "NL2SQL_TURN_BUDGET_WINDOW_S", 1800) or 1800)
+        # NOTE: the budget is not checked here any more — each SQL execution
+        # ATTEMPT acquires atomically via _tsb.try_acquire just before
+        # query_svc.execute (below), so validation rejections, gate refusals,
+        # execution failures and repair re-runs are all charged, not just
+        # successes.
 
         # 0-pre. Source readiness gate. This is the last gate before planning,
         # retrieval and SQL generation, so it is the one that matters: a source
@@ -532,6 +625,14 @@ class NLAnswerService:
         # clobber the pinned schema with its own TOC pick — observed: contract
         # route pinned erp_v_contract_execution but Phase A overwrote it with
         # erp_t_crm_contract).
+        # 2B-2/2B-3 state (defined here so the static-route path and the
+        # execution site always see them; empty/None == flag off or degraded,
+        # which is byte-identical legacy behavior):
+        _cls_facts: dict = {}
+        _question_scope: dict | None = None
+        _scope_disclosure = ""
+        _scope_refusals: list[str] = []
+        _cls_degraded = False
         if (
             not _selected_via_toc
             and settings.SCHEMA_LINKING_ENABLED
@@ -548,6 +649,7 @@ class NLAnswerService:
                     format_candidates_block,
                     reroute_uncovered,
                     retrieve_for_question,
+                    scope_disclosure_sentence,
                 )
                 toc = build_full_toc(self._db, [kb_id])
                 _toc_snapshot = toc
@@ -573,6 +675,48 @@ class NLAnswerService:
                         _window = parse_relative_window(question)
                     except Exception:
                         _window = None
+                    # Stage 2B-2 (flag-gated, ships OFF): classification
+                    # facts refine retrieval ranking and make the coverage
+                    # reroute scope-aware. Loader degrades to {} — with the
+                    # flag off (or the loader degraded) retrieval and reroute
+                    # are byte-identical to the pre-2B-2 behavior.
+                    _cls_facts: dict = {}
+                    _question_scope: dict | None = None
+                    try:
+                        from app.config import settings as _settings
+
+                        if _settings.SCHEMA_CLASSIFICATION_RETRIEVAL_ENABLED:
+                            from app.services.db.table_retrieval import (
+                                _load_classification_facts,
+                            )
+
+                            _cls_facts = await asyncio.to_thread(
+                                lambda: _load_classification_facts(
+                                    self._db, [kb_id], project_id=project_id,
+                                )
+                            )
+                            if _cls_facts:
+                                from app.services.db.schema_classification import (
+                                    resolve_question_scope_from_facts,
+                                )
+
+                                _question_scope = (
+                                    resolve_question_scope_from_facts(
+                                        question, _cls_facts
+                                    )
+                                )
+                    except Exception as _cls_err:
+                        logger.warning(
+                            "NLAnswer: classification facts unavailable (%s) — "
+                            "retrieval proceeds without them",
+                            _cls_err,
+                        )
+                        _cls_facts = {}
+                        _question_scope = None
+                        # 2B-3 review requirement B: the loader degraded — the
+                        # scope check could not run. This must be visible, not
+                        # silently folded into an unremarkable result.
+                        _cls_degraded = True
                     # Phase 3A: ontology-aware planning context (flag-gated,
                     # fail-open — org-scoped verified objects/links,
                     # terminology, enabled SQL rules for candidate ranking).
@@ -609,6 +753,7 @@ class NLAnswerService:
                         lambda: retrieve_for_question(
                             self._db, [kb_id], question, toc,
                             project_id=project_id, window=_window,
+                            classification_facts=_cls_facts or None,
                             ontology_context=_ontology_ctx,
                         )
                     )
@@ -697,9 +842,26 @@ class NLAnswerService:
                         toc_text = f"{_block}\n\n{toc_text}"
 
                     # Ask the LLM which tables are relevant
+                    # 2B-4: a corrective-replan scope hint rides as
+                    # error_context — the selection sees WHY the previous
+                    # attempt was refused and prefers the verified global
+                    # dataset (flag-gated; enforcement unchanged).
+                    _scope_sel_hint = None
+                    if scope_hint and getattr(
+                        settings, "SCHEMA_CORRECTIVE_SCOPE_HINTS_ENABLED",
+                        False,
+                    ):
+                        _scope_sel_hint = (
+                            "[Corrective scope guidance] A previous attempt "
+                            "for this question was refused by scope "
+                            "enforcement: " + str(scope_hint) + " — select "
+                            "the verified company-wide dataset when one "
+                            "exists instead of repeating that selection."
+                        )
                     selected_names = await self._select_tables_from_toc(
                         question, toc_text, len(toc), endpoint=endpoint,
                         known_names=_catalog_names,
+                        error_context=_scope_sel_hint,
                     )
                     if not selected_names and _retrieval.candidates:
                         # The model named no table that exists. Use the
@@ -728,6 +890,8 @@ class NLAnswerService:
                     if selected_names and _window is not None and _retrieval.candidates:
                         selected_names, _swaps = reroute_uncovered(
                             selected_names, toc, _retrieval, _window,
+                            classification_facts=_cls_facts or None,
+                            question_scope=_question_scope,
                         )
                         if _swaps:
                             logger.info(
@@ -735,6 +899,21 @@ class NLAnswerService:
                                 _window,
                                 "; ".join(f"{d} → {a}" for d, a in _swaps),
                             )
+
+                    # ── 2B-2 concern 3: scope refusals reach the reader ────
+                    # A refusal recorded only in the log is invisible to the
+                    # person reading the answer. The disclosure rides the same
+                    # channel as the grounding/coverage disclosures: appended
+                    # to the narrative and carried as a structured field.
+                    if _retrieval is not None:
+                        _scope_refusals = list(_retrieval.scope_refusals)
+                    _scope_disclosure = scope_disclosure_sentence(
+                        selected_names, _cls_facts or {}, _question_scope
+                    )
+                    if _scope_refusals:
+                        _scope_disclosure = " ".join(
+                            s for s in [_scope_disclosure, *_scope_refusals] if s
+                        )
 
                     # ── Join-partner guarantee (2026-09-22): when the
                     # catalog knows a relation for a selected table but its
@@ -1044,6 +1223,20 @@ class NLAnswerService:
                     _sv_guidance = _sv.guidance
                 for _d in _sv.disclosures:
                     logger.info("NLAnswer: source verification — %s", _d)
+                # 2B-3 review check 3: scope outcomes are not log-only. The
+                # gate marks its scope disclosures with a "scope:" prefix;
+                # they ride the same reader-facing disclosure chain as the
+                # retrieval-level ones (appended to the answer at 4c).
+                for _d in _sv.disclosures:
+                    if _d.startswith("scope:"):
+                        _sd_text = _d[len("scope:"):].strip()
+                        if _scope_disclosure_seen(
+                            _sd_text, _scope_disclosure
+                        ):
+                            continue
+                        _scope_disclosure = " ".join(
+                            s for s in (_scope_disclosure, _sd_text) if s
+                        )
             except Exception as _sv_err:
                 logger.debug(
                     "NLAnswer: source verification skipped: %s", _sv_err
@@ -1088,6 +1281,31 @@ class NLAnswerService:
                     )
         except Exception as _wl_err:
             logger.debug("NLAnswer: workload hints skipped: %s", _wl_err)
+
+        # 1b-qc (2026-10-29): verified metric binding — the datasource's
+        # metric_definitions are BINDING constraints for SQL generation, not
+        # advisory text. The same constraints are enforced post-hoc by the
+        # execution gate (metric_binding check); this block tells the SQL
+        # model up front so the rejection path stays rare. Empty when the
+        # datasource defines no verified metrics — nothing is invented.
+        try:
+            if getattr(settings, "METRIC_BINDING_ENFORCEMENT_ENABLED", True):
+                from app.services.db.query_contract import (
+                    contract_prompt_block,
+                    datasource_metric_bindings,
+                )
+
+                _qc_block = contract_prompt_block(
+                    datasource_metric_bindings(self._db, kb_id)
+                )
+                if _qc_block:
+                    schema_text = (schema_text or "") + "\n\n" + _qc_block
+                    logger.info(
+                        "NLAnswer: verified metric bindings injected (KB %s)",
+                        kb_id,
+                    )
+        except Exception as _qc_err:
+            logger.debug("NLAnswer: metric binding prompt skipped: %s", _qc_err)
 
         # 1c. GROUNDED PLAN (P3). One record of what this turn may answer with,
         # assembled from artifacts already computed above (catalog, retrieval,
@@ -1283,11 +1501,55 @@ class NLAnswerService:
         _exec_error: Exception | None = None
         _repaired_from: str | None = None
         _repair_budget = max(0, int(getattr(settings, "NL2SQL_DB_ERROR_REPAIR_MAX", 2) or 0))
+        _budget_refused: dict | None = None
         for _attempt in range(_repair_budget + 1):
+            # Per-turn SQL budget — one atomic acquisition PER EXECUTION
+            # ATTEMPT (2026-10-29 cycle 2): gate rejections, execution
+            # failures and repair re-runs are charged exactly like
+            # successes, because they all paid pipeline latency and, past
+            # the gate, warehouse work. Concurrent attempts serialize on
+            # the lock — no double-spend at budget-1.
+            _tsb_ok, _tsb_used, _tsb_max = _tsb.try_acquire(
+                _tsb_scope, _tsb_base, _tsb_window
+            )
+            if not _tsb_ok:
+                _budget_refused = {
+                    "success": False,
+                    "error_kind": "turn_sql_budget_exhausted",
+                    "error": (
+                        f"This turn has already spent {_tsb_used} of {_tsb_max} "
+                        "allowed SQL attempts against the data source. Do not run "
+                        "further queries in this turn — synthesize the report from "
+                        "the results already gathered, and clearly disclose anything "
+                        "that was not queried. If more data is essential, ask the "
+                        "user to send a follow-up message for the remaining part."
+                    ),
+                    "source_id": kb_id,
+                    "turn_sql_budget": {"max": _tsb_max, "used": _tsb_used},
+                    "disclosure": (
+                        f"Report query budget reached ({_tsb_used}/{_tsb_max} SQL "
+                        "attempts this turn); the report covers only what was "
+                        "already gathered."
+                    ),
+                }
+                logger.warning(
+                    "NLAnswer: turn SQL budget exhausted for scope %s (%d/%d attempts)",
+                    _tsb_scope, _tsb_used, _tsb_max,
+                )
+                break
             try:
                 # The grounded plan is the context the execution gate validates
                 # against (its ratio contracts in particular).
                 query_svc.plan = _grounded_plan
+                # 2B-3: scope_authorization validates the FINAL statement's
+                # tables against the classification facts + resolved question
+                # scope. Empty facts (flag off / degraded) → check records
+                # not-applicable; never a refusal from missing evidence.
+                if _cls_facts:
+                    query_svc.scope_context = {
+                        "classification_facts": _cls_facts,
+                        "question_scope": _question_scope,
+                    }
                 exec_result = await asyncio.to_thread(query_svc.execute, kb_id, sql)
                 _exec_error = None
                 break
@@ -1318,6 +1580,12 @@ class NLAnswerService:
                 if _repaired_from is None:
                     _repaired_from = str(e)
                 sql = repaired
+
+        # A repair attempt refused by the budget must not destroy a result
+        # an earlier attempt already produced — the successful execution
+        # stands; the refusal only ends further attempts.
+        if _budget_refused is not None and exec_result is None:
+            return _budget_refused
 
         if _exec_error is not None:
             logger.warning("NLAnswer: execute failed: %s", _exec_error)
@@ -1355,6 +1623,19 @@ class NLAnswerService:
                         "executed_sql": payload.get("executed_sql") or "",
                     }
                 )
+                # 2B-4: the corrective re-plan reads the durable failure
+                # observation — surface the scope verdict and the refusal
+                # sentence as first-class fields, not buried in the payload.
+                _sc = (payload.get("checks") or {}).get("scope_authorization")
+                if _sc:
+                    failure["scope_check"] = _sc
+                _scope_errs = [
+                    str(e) for e in (payload.get("errors") or [])
+                    if "partition" in str(e).lower()
+                    or "company-wide" in str(e).lower()
+                ]
+                if _scope_errs:
+                    failure["scope_disclosure"] = "; ".join(_scope_errs)
                 failure["result_set"] = execution_gate.failure_result_set(
                     _grounded_plan, payload
                 ).to_dict()
@@ -1376,6 +1657,40 @@ class NLAnswerService:
 
         if exec_result is None:  # unreachable: the loop either sets it or records an error
             exec_result = {"rows": [], "sql": sql, "source_id": kb_id}
+
+        # ── 2B-3 review check 3: the gate's scope verdict must survive to the
+        # response, and a failed/degraded check must never read as verified.
+        # State is recorded verbatim; warnings ride the reader-facing
+        # disclosure chain (deduped against what 2B-2 already disclosed).
+        _scope_check_state = None
+        _gate_validation = (
+            query_svc.last_validation
+            if isinstance(getattr(query_svc, "last_validation", None), dict)
+            else None
+        )
+        if _gate_validation:
+            _scope_check_state = (_gate_validation.get("checks") or {}).get(
+                "scope_authorization"
+            )
+            for _sw in (_gate_validation.get("detail") or {}).get(
+                "scope_warnings"
+            ) or []:
+                if not _scope_disclosure_seen(_sw, _scope_disclosure):
+                    _scope_disclosure = " ".join(
+                        s for s in (_scope_disclosure, "Note: " + _sw + ".") if s
+                    )
+        # Review requirement B: an INCOMPLETE check is a limitation the reader
+        # must see — stated as "could not be verified", never as a claim
+        # about the data itself.
+        _scope_limitation = _scope_limitation_sentence(
+            _scope_check_state, _cls_degraded
+        )
+        if _scope_limitation and not _scope_disclosure_seen(
+            _scope_limitation, _scope_disclosure
+        ):
+            _scope_disclosure = " ".join(
+                s for s in (_scope_disclosure, _scope_limitation) if s
+            )
 
         _shadow_validate_and_log(
             kb_id, question, sql, live_success=True,
@@ -1901,6 +2216,13 @@ class NLAnswerService:
             except Exception as e:
                 logger.debug("NLAnswer: narrative check skipped: %s", e)
 
+        # 4c. Scope disclosure (2B-2 concern 3): a scope refusal or a
+        # partition-only answer must be visible to the reader, not only in the
+        # log. Appended to the narrative the same way the grounding disclosure
+        # is, so every caller surfaces it without new plumbing.
+        if _scope_disclosure:
+            answer_text = f"{answer_text}\n\n{_scope_disclosure}"
+
         _na_rows = exec_result.get("rows", [])
         if _na_rows and isinstance(_na_rows[0], dict):
             _na_cols = list(_na_rows[0].keys())
@@ -1970,6 +2292,59 @@ class NLAnswerService:
             except Exception as e:
                 logger.debug("NLAnswer: turn-state save skipped: %s", e)
 
+        # ── 4e. Structured measure provenance + family-truncation guard
+        # (2026-10-29 root-cause fix, generic to any connected datasource).
+        _qc_provenance: dict = {}
+        _qc_family_disclosure = None
+        try:
+            if getattr(settings, "METRIC_BINDING_ENFORCEMENT_ENABLED", True):
+                import sqlglot as _sg
+
+                from app.services.db import query_contract as _qc
+
+                _qc_sql = exec_result.get("sql") or ""
+                if _qc_sql.strip() and _na_rows:
+                    _qc_parsed = _sg.parse_one(_qc_sql)
+                    _qc_tables = [
+                        t.name for t in _qc_parsed.find_all(_sg.exp.Table)
+                    ]
+                    _qc_bindings = _qc.datasource_metric_bindings(
+                        self._db, kb_id
+                    )
+                    _qc_provenance = {
+                        "measure_fingerprint": _qc.measure_fingerprint(
+                            _qc_parsed, _qc_tables
+                        ),
+                        "claimed_measure_terms": _qc.claimed_measure_terms(
+                            _qc_parsed, _qc_bindings
+                        ),
+                    }
+                    # Family truncation: a grouped top-N whose display names
+                    # repeat across rows means a family spans multiple keys
+                    # and keys beyond the LIMIT were silently dropped.
+                    _qc_family = _qc.detect_family_truncation(_qc_sql, _na_rows)
+                    if _qc_family:
+                        _qc_family_disclosure = (
+                            "Top-N results are grouped by individual codes; "
+                            "some displayed families span multiple codes "
+                            f"({_qc_family['column']}), so family totals "
+                            "may be understated by codes outside the top-N."
+                        )
+                        _qc_provenance["family_truncation"] = _qc_family
+                        # Bounded correction SQL is pre-built and recorded so a
+                        # caller (or the next turn) can fetch complete family
+                        # totals without re-deriving the grain. The presented
+                        # rows stay as executed — the narrative was generated
+                        # from them, and swapping data under a finished
+                        # narrative would create a new inconsistency.
+                        _qc_fix_sql = _qc.build_family_correction_sql(
+                            _qc_sql, _qc_family["column"]
+                        )
+                        if _qc_fix_sql:
+                            _qc_provenance["family_correction_sql"] = _qc_fix_sql
+        except Exception as _qc_assemble_err:
+            logger.debug("NLAnswer: measure provenance skipped: %s", _qc_assemble_err)
+
         return {
             "success": True,
             "answer": answer_text,
@@ -1996,6 +2371,12 @@ class NLAnswerService:
             # qualify the answer instead of presenting it as authoritative.
             **({"contract_violations": _contract.violations}
                if not _contract.ok else {}),
+            # 2026-10-29: structured measure provenance + family-grain
+            # disclosure (empty/absent when not computable). Consumed by
+            # cross-node reconciliation before synthesis.
+            **({"measure_provenance": _qc_provenance} if _qc_provenance else {}),
+            **({"family_disclosure": _qc_family_disclosure}
+               if _qc_family_disclosure else {}),
             # Provenance: which source, which SQL (fingerprinted), which tables
             # it actually touched, the period asked for and the freshest date
             # the catalog holds for those tables. Enough to audit an answer
@@ -2041,6 +2422,23 @@ class NLAnswerService:
                 else {}
             ),
             **({"disclosure": _crs.disclosure} if (_crs is not None and _crs.disclosure) else {}),
+            # 2B-2 concern 3 + 2B-3 check 3: the scope statement the reader
+            # was given, the structured refusals behind it, and the execution
+            # gate's scope verdict VERBATIM — a degraded catalog lookup reads
+            # "unavailable"/"not-applicable", never "verified".
+            **(
+                {
+                    "scope_disclosure": _scope_disclosure,
+                    "scope_refusals": list(_scope_refusals),
+                }
+                if (_scope_disclosure or _scope_refusals)
+                else {}
+            ),
+            **(
+                {"scope_check": _scope_check_state}
+                if _scope_check_state and _scope_check_state != "not-in-scope"
+                else {}
+            ),
         }
 
     # ------------------------------------------------------------------

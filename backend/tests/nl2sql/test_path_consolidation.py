@@ -409,7 +409,10 @@ def test_the_dialect_follows_the_source_not_a_default(env, monkeypatch):
     class _Conn:
         last_executed_sql = ""
 
-        def execute(self, sql, max_rows=10, timeout_s=5):
+        def execute(self, sql, max_rows=10, timeout_s=5, params=None):
+            # Production passes params (parameterized SQL); the fixture ignores
+            # them — this test only cares that the dialect-faithful statement is
+            # handed to the driver unchanged.
             seen["sql"] = sql
             return [{"n": 1}]
 

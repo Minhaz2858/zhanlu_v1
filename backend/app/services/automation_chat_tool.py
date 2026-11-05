@@ -218,6 +218,40 @@ async def execute_automation_tool(
 # ---------------------------------------------------------------------------
 # Tool registry registration (auto-registers on import)
 # ---------------------------------------------------------------------------
+PROPOSE_AUTOMATION_SCHEMA: dict[str, Any] = {
+    # Registry wrapper shape mirrors EXECUTE_AUTOMATION_SCHEMA (same
+    # {"type": "function", "function": {...}} envelope the CRUD tool
+    # lists use) — see the comment on EXECUTE_AUTOMATION_SCHEMA.
+    "type": "function",
+    "function": {
+        "name": "propose_automation",
+        "description": (
+            "Propose a new scheduled automation. Builds a structured draft "
+            "for the user to review and confirm in a review card. Does NOT "
+            "create or schedule anything by itself. Ask clarifying questions "
+            "first when the schedule (timezone, cadence) or objective is "
+            "ambiguous; then call this with the structured spec."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "description": (
+                        "Canonical AutomationSpec: {name, project_id, "
+                        "objective, trigger:{type:'schedule',cron,"
+                        "timezone}, output:{format}, delivery:{chat,email}, "
+                        "notifications:{notify_on,emails}, retry, budgets}. "
+                        "Validation errors are returned per-field."
+                    ),
+                },
+            },
+            "required": ["spec"],
+        },
+    },
+}
+
+
 EXECUTE_AUTOMATION_SCHEMA: dict[str, Any] = {
     # P3-bis: the OpenAI tool-call API requires the
     # ``{"type": "function", "function": {...}}`` wrapper around every
@@ -255,6 +289,152 @@ EXECUTE_AUTOMATION_SCHEMA: dict[str, Any] = {
 }
 
 
+def propose_automation_tool(
+    args: dict,
+    db: Session,
+    user_id: Optional[str],
+    *,
+    context: dict | None = None,
+) -> dict:
+    """R3 (TS §4.1): the LLM proposes a structured AutomationSpec — this
+    tool writes ONLY a server-side draft (``automation_drafts``). The
+    human confirm (POST /automations/drafts/{id}/confirm) is the only
+    definition-creation gate; the LLM can never bypass it.
+
+    Returns the draft id + validation so the review card renders from the
+    server (no client-only draft state, audit B2).
+    """
+    if not user_id:
+        return {"success": False, "error": "Authentication required."}
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        return {"success": False, "error": "User not found."}
+
+    spec_partial = args.get("spec") or {}
+    if not isinstance(spec_partial, dict):
+        return {
+            "success": False,
+            "error": "spec must be a structured object; ask a clarifying "
+                     "question instead of guessing.",
+        }
+    try:
+        from app.services.automation.control_plane import create_draft
+
+        draft = create_draft(
+            db, user, spec_partial,
+            origin_session_id=(context or {}).get("chat_session_id")
+            or (context or {}).get("session_id"),
+            origin_message_id=(context or {}).get("message_id"),
+        )
+    except Exception as e:  # noqa: BLE001 — surfaced to the LLM, never crashes chat
+        logger.exception("propose_automation failed")
+        return {"success": False, "error": str(e)[:300]}
+
+    validation = draft.validation or {"ok": False, "errors": []}
+    out: dict = {
+        "success": True,
+        "draft_id": draft.id,
+        "version": draft.spec_version,
+        "status": draft.status,
+        "validation": validation,
+        "message": (
+            "Draft created. The review card is shown to the user — they must "
+            "edit and explicitly confirm. Do NOT re-propose unless asked."
+        ),
+    }
+    if not validation.get("ok"):
+        out["message"] = (
+            "Draft created with validation errors — surface them to the user "
+            "and ask the clarifying questions needed to fix them."
+        )
+    return out
+
+
+def update_automation_draft_tool(
+    args: dict,
+    db: Session,
+    user_id: Optional[str],
+    *,
+    context: dict | None = None,
+) -> dict:
+    """Lifecycle separation (2026-11-03): the agent's ONLY chat-side way to
+    modify an automation under the V2 cutover — patches the SERVER DRAFT via
+    the Control Plane. It can never create or activate a task, never query
+    business data, never generate an artifact."""
+    if not user_id:
+        return {"success": False, "error": "Authentication required."}
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        return {"success": False, "error": "User not found."}
+    draft_id = args.get("draft_id")
+    spec_patch = args.get("spec_patch") or args.get("fields")
+    if not draft_id or not isinstance(spec_patch, dict):
+        return {
+            "success": False,
+            "error": "draft_id and spec_patch (object) are required.",
+        }
+    try:
+        from app.services.automation.control_plane import (
+            get_draft, patch_draft,
+        )
+
+        current = get_draft(db, user, draft_id)  # access check + version
+        draft = patch_draft(
+            db, user, draft_id,
+            if_match=current.spec_version, spec_patch=spec_patch)
+    except Exception as e:  # noqa: BLE001 — surfaced to the LLM
+        logger.exception("update_automation_draft failed")
+        return {"success": False, "error": str(e)[:300]}
+
+    validation = draft.validation or {"ok": False, "errors": []}
+    return {
+        "success": True,
+        "draft_id": draft.id,
+        "version": draft.spec_version,
+        "status": draft.status,
+        "validation": validation,
+        "message": (
+            "Draft updated. The review card refreshes from the server — "
+            "the user still must explicitly confirm to activate."
+        ),
+    }
+
+
+UPDATE_AUTOMATION_DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "update_automation_draft",
+        "description": (
+            "Update an EXISTING automation draft (the proposed automation "
+            "under review). Applies a spec patch server-side and returns the "
+            "refreshed validation. Cannot create, activate, run, or delete "
+            "anything — activation happens only via the user's explicit "
+            "confirm action on the review card."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "draft_id": {
+                    "type": "string",
+                    "description": "The automation draft id being edited.",
+                },
+                "spec_patch": {
+                    "type": "object",
+                    "description": (
+                        "Spec fields/sections to merge (name, objective, "
+                        "description, trigger:{type,cron,timezone}, "
+                        "output:{format}, datasource:{data_source_id}, "
+                        "delivery, notifications, retry, budgets). Only "
+                        "include fields that actually change."
+                    ),
+                },
+            },
+            "required": ["draft_id", "spec_patch"],
+        },
+    },
+}
+
+
 def _register() -> None:
     try:
         from app.services.tool_registry import registry
@@ -276,7 +456,30 @@ def _register() -> None:
             description=fn_block.get("description", ""),
             emoji="⏯",
         )
-        logger.info("execute_automation tool registered")
+        registry.register(
+            name="propose_automation",
+            schema=PROPOSE_AUTOMATION_SCHEMA,
+            handler=propose_automation_tool,
+            category="automation",
+            toolset="automation",
+            is_async=False,
+            description=PROPOSE_AUTOMATION_SCHEMA.get("function", {}).get("description", ""),
+            emoji="📝",
+        )
+        registry.register(
+            name="update_automation_draft",
+            schema=UPDATE_AUTOMATION_DRAFT_SCHEMA,
+            handler=update_automation_draft_tool,
+            category="automation",
+            toolset="automation",
+            is_async=False,
+            description=UPDATE_AUTOMATION_DRAFT_SCHEMA.get("function", {}).get(
+                "description", ""),
+            emoji="✏️",
+        )
+        logger.info(
+            "execute_automation + propose_automation + update_automation_draft "
+            "tools registered")
     except Exception:
         logger.exception("execute_automation: registry.register failed")
 

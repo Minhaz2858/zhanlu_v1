@@ -139,6 +139,17 @@ def execute_plan_nodes(
             _emit(node, "denied", node_decision["reason"])
             continue
 
+        # P2 (Part 4): conditional delegation. A node may carry a `run_if`
+        # condition in its inputs (no schema change needed). If the condition is
+        # NOT satisfied by upstream results / shared evidence, skip the node
+        # (do not execute, do not fail) — the dependent downstream nodes simply
+        # never receive its output.
+        if not _node_condition_met(node, plan, execution):
+            node.status = "skipped"
+            db.commit()
+            _emit(node, "skipped", "condition not met (run_if)")
+            continue
+
         # Execute the node
         node.status = "running"
         node.started_at = datetime.now(timezone.utc)
@@ -161,6 +172,24 @@ def execute_plan_nodes(
                 "completed" if obs.success else "failed",
                 (obs.error_message if not obs.success else None),
             )
+
+            # P2 (Part 4): human-approval gate. If a node result requires human
+            # approval (e.g. an agent sub-task returned requires_approval), surface
+            # it and PAUSE the run so downstream nodes do not execute on unapproved
+            # output. The chat loop's existing approval/resume flow handles the rest.
+            if isinstance(obs.result_data, dict) and obs.result_data.get("requires_approval"):
+                try:
+                    execution.needs_approval = True
+                except Exception:  # noqa: BLE001 — model may lack the column
+                    pass
+                # Persist the pause state (completed node + gate) BEFORE returning
+                # so a process restart / resume sees a consistent execution.
+                try:
+                    db.commit()
+                except Exception:  # noqa: BLE001
+                    pass
+                _emit(node, "awaiting_approval", obs.result_data.get("approval_reason"))
+                return observations
 
         except Exception as e:
             logger.error("Node %s execution failed: %s", node.name, e)
@@ -252,6 +281,10 @@ def execute_plan_nodes(
     if replan_depth < _max and may_refine(db, execution.id):
         recoverable = _recoverable_failures(plan)
         if recoverable:
+            # 2B-4: give the corrective planner the STRUCTURED scope verdict
+            # of each failed node, read from its durable observation — a
+            # scope refusal must not be re-authored as the same plan.
+            _enrich_failures_with_scope(db, execution.id, recoverable)
             logger.info(
                 "ACT re-plan (depth %d): %d failed replannable node(s) — generating corrective plan",
                 replan_depth + 1, len(recoverable),
@@ -311,6 +344,58 @@ def _recoverable_failures(plan: Optional[Plan]) -> list[dict]:
     return collect_replannable_failures(plan.nodes)
 
 
+def _enrich_failures_with_scope(db, execution_id, failures: list[dict]) -> None:
+    """2B-4: attach the structured scope verdict of each failed node to its
+    failure-context entry, read from the DURABLE observation records (keyed
+    by execution + plan-node identity). Flag-gated
+    (SCHEMA_CORRECTIVE_SCOPE_HINTS_ENABLED, ships OFF); any problem degrades
+    to no enrichment — the planner then works from the error text alone, and
+    enforcement stays the final authority."""
+    try:
+        from app.config import settings as _s
+
+        if not getattr(_s, "SCHEMA_CORRECTIVE_SCOPE_HINTS_ENABLED", False):
+            return
+        from app.models.execution import ObservationRecord
+
+        for f in failures or []:
+            nid = f.get("node_id")
+            if not nid:
+                continue
+            obs = (
+                db.query(ObservationRecord)
+                .filter(
+                    ObservationRecord.execution_id == execution_id,
+                    ObservationRecord.plan_node_id == nid,
+                )
+                .order_by(ObservationRecord.seq.desc())
+                .first()
+            )
+            rd = getattr(obs, "result_data", None)
+            if not isinstance(rd, dict):
+                continue
+            if rd.get("scope_check"):
+                f["scope_check"] = rd["scope_check"]
+            if rd.get("scope_disclosure"):
+                f["scope_disclosure"] = rd["scope_disclosure"]
+            # Fallbacks for shapes that carry the verdict only inside the
+            # validation payload (execution-gate refusals).
+            vc = rd.get("validation_checks")
+            if isinstance(vc, dict) and not f.get("scope_check"):
+                f["scope_check"] = vc.get("scope_authorization")
+            ve = rd.get("validation_errors")
+            if ve and not f.get("scope_disclosure"):
+                _scope_errs = [
+                    str(e) for e in ve
+                    if "partition" in str(e).lower()
+                    or "company-wide" in str(e).lower()
+                ]
+                if _scope_errs:
+                    f["scope_disclosure"] = "; ".join(_scope_errs)
+    except Exception as e:  # degrade — never break the re-plan
+        logger.debug("failure-context scope enrichment skipped: %s", e)
+
+
 def _persist_adaptive_tail(db, execution, steps) -> Optional[Plan]:
     """Persist an adaptive-planner decision's step dicts as a new Plan + nodes.
 
@@ -355,6 +440,49 @@ def _persist_adaptive_tail(db, execution, steps) -> Optional[Plan]:
         return None
 
 
+def _node_condition_met(node, plan, execution) -> bool:
+    """P2 (Part 4): evaluate a node's optional `run_if` condition.
+
+    The condition lives in ``node.inputs["run_if"]`` (no schema migration needed).
+    Supported sub-keys (all optional, ANDed):
+      * requires_evidence_topic: skip if no shared evidence in this execution's
+        registry matches the topic (a dependent investigation produced nothing).
+      * requires_upstream_status: {node: NAME, status: "completed"} — skip if the
+        named upstream node did not end in the required status.
+    Returns True when no condition is set or all set conditions are satisfied.
+    """
+    _cond = ((getattr(node, "inputs", None) or {}) or {}).get("run_if")
+    if not isinstance(_cond, dict):
+        return True
+    _conv = getattr(execution, "conversation_id", None)
+
+    _topic = _cond.get("requires_evidence_topic")
+    if _topic:
+        try:
+            from app.services.agent_collaboration.shared_evidence import get_registry
+
+            if not get_registry().find_by_topic(_conv, _topic):
+                return False
+        except Exception:  # noqa: BLE001 — on any doubt, do not block
+            pass
+
+    _req = _cond.get("requires_upstream_status")
+    if isinstance(_req, dict):
+        _name = _req.get("node")
+        _want = _req.get("status", "completed")
+        if _name:
+            _matched = False
+            for n in (plan.nodes or []):
+                if getattr(n, "name", None) == _name:
+                    _matched = True
+                    if getattr(n, "status", None) != _want:
+                        return False
+            if not _matched:
+                # Unknown upstream — don't block the run on a typo'd name.
+                return True
+    return True
+
+
 def _execute_single_node(
     db: Session,
     execution: Execution,
@@ -382,6 +510,126 @@ def _execute_single_node(
         return _execute_sandbox_node(db, execution, node)
     elif node_type == "skill":
         return _execute_skill_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
+    elif node_type == "reviewer":
+        # P2 (Part 1 + Part 4): a first-class critic/reviewer stage. Aggregates the
+        # upstream findings (provided in node.inputs["content"]) and the shared
+        # evidence produced in this execution, runs the fact-safe reviewer, and if
+        # the reviewer reports missing evidence, dispatches BOUNDED targeted
+        # follow-up delegations through the governed path before re-reviewing.
+        from app.services.agent_collaboration.reviewer import review_findings
+        from app.services.agent_collaboration.shared_evidence import get_registry
+
+        _args = dict(node.inputs or {})
+        _content = _args.get("content") or node.name
+        _question = _args.get("question") or node.name
+        _conv = getattr(execution, "conversation_id", None)
+        _evidence = []
+        if _conv:
+            try:
+                _evidence = get_registry().list_items(_conv)
+            except Exception:  # noqa: BLE001
+                _evidence = []
+
+        _report = review_findings(
+            question=_question, content=_content,
+            evidence_items=_evidence, endpoint=endpoint,
+        )
+
+        _retries = int(getattr(settings, "COLLAB_REVIEW_MAX_RETRIES", 1))
+        if _report.needs_evidence and _retries > 0 and _args.get("agent_name"):
+            _extra = []
+            for _gap in _report.needs_evidence[:2]:
+                try:
+                    from app.services.agent_tools import execute_tool_with_retry
+
+                    _sub = _run_coro_sync(execute_tool_with_retry(
+                        "delegate_task",
+                        {"task": f"Targeted follow-up to review gap: {_gap}",
+                         "agent_name": _args["agent_name"], "review": False},
+                        db, user_id,
+                        context={
+                            "conversation_id": _conv,
+                            "execution_id": getattr(execution, "id", None),
+                            "agent_name": getattr(execution, "agent_name", None),
+                            **(data_ctx_extras or {}),
+                        },
+                    ))
+                    if isinstance(_sub, dict) and _sub.get("success"):
+                        _extra.append(f"[follow-up: {_gap}] {_sub.get('response') or ''}")
+                except Exception as _e:  # noqa: BLE001
+                    logger.debug("reviewer node follow-up failed (non-fatal): %s", _e)
+            if _extra:
+                _content = _content + "\n\n" + "\n".join(_extra)
+                _evidence = get_registry().list_items(_conv) if _conv else []
+                _report = review_findings(
+                    question=_question, content=_content,
+                    evidence_items=_evidence, endpoint=endpoint,
+                )
+
+        _rd = _report.to_dict()
+        return _record_observation(
+            db, execution, node,
+            observation_type="reviewer",
+            tool_name="reviewer",
+            request_args=_args,
+            result_data={"review": _rd, "content": _content},
+            result_text=f"Review verdict: {_rd['overall']} (answered={_rd['answered']})",
+            success=True,
+        )
+    elif node_type == "agent":
+        # P1 (2026-10-31, roadmap Q2): the "agent" node type was DECLARED in
+        # this module's docstring but never dispatched — it silently fell
+        # through to the tool node. Implement it by delegating to the
+        # delegate_task TOOL through the same governed path
+        # (execute_tool_with_retry → _run_sub_agent): the child runs with
+        # its AgentApp prompt/toolset (P0 AgentApp-aware delegation), its
+        # own authorized bindings, wall-clock budget, permission checks and
+        # invocation linking. No new orchestrator — the DAG schedules, the
+        # existing delegation runtime executes.
+        from app.services.agent_tools import execute_tool_with_retry
+
+        args = dict(node.inputs or {})
+        delegate_args = {
+            "task": args.get("task") or args.get("objective") or node.name,
+            "agent_name": args.get("agent_name") or args.get("agent") or "general_assistant",
+        }
+        if args.get("max_iterations"):
+            delegate_args["max_iterations"] = args["max_iterations"]
+        tool_context = {
+            "conversation_id": getattr(execution, "conversation_id", None),
+            "execution_id": getattr(execution, "id", None),
+            "agent_app_id": getattr(execution, "app_id", None) or getattr(execution, "agent_name", None),
+            "agent_name": getattr(execution, "agent_name", None),
+            **(data_ctx_extras or {}),
+        }
+        try:
+            result = _run_coro_sync(
+                execute_tool_with_retry("delegate_task", delegate_args, db, user_id, context=tool_context)
+            )
+            result_data = result if isinstance(result, dict) else {"result": str(result)}
+            ok = bool(result_data.get("success", True))
+            result_text = result_data.get("response") or str(result_data)
+            if result_data.get("truncated"):
+                result_text = "[PARTIAL — child hit its wall-clock budget]\n" + result_text
+            return _record_observation(
+                db, execution, node,
+                observation_type="agent_delegation",
+                tool_name="delegate_task",
+                request_args=delegate_args,
+                result_data=result_data,
+                result_text=result_text,
+                success=ok,
+                error_message=None if ok else str(result_data.get("error", "agent node failed")),
+            )
+        except Exception as e:
+            return _record_observation(
+                db, execution, node,
+                observation_type="agent_delegation",
+                tool_name="delegate_task",
+                request_args=delegate_args,
+                success=False,
+                error_message=str(e),
+            )
     else:
         # Default: treat as tool
         return _execute_tool_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
@@ -571,12 +819,17 @@ def _execute_tool_node(db, execution, node, user_id, data_ctx_extras=None) -> Ob
     # Build the tool context. Always include the FSM-friendly identifiers
     # so handlers can route to the right conversation/agent; then layer
     # the data-source runtime on top so KB scoping reaches ask_data_agent.
+    # FSM tenant isolation (IC-2, 2026-10-31): the tool context carries the
+    # org AND an org-resolved memory key — the previous value
+    # (execution.app_id or bare agent_name) was org-ambiguous.
     tool_context = {
         "conversation_id": getattr(execution, "conversation_id", None),
         # Execution identity lets the artifact path ground a deck in the REAL
         # query rows this execution fetched (see deck_data.collect_grounded_rows).
         "execution_id": getattr(execution, "id", None),
-        "agent_app_id": getattr(execution, "app_id", None) or getattr(execution, "agent_name", None),
+        "org_id": getattr(execution, "org_id", None),
+        "agent_app_id": _fsm_exec_memory_key(db, execution)
+        or getattr(execution, "agent_name", None),
         "agent_name": getattr(execution, "agent_name", None),
         **(data_ctx_extras or {}),
     }
@@ -665,6 +918,36 @@ def _select_grounding_kb(
     return bound_kb_ids[0]
 
 
+def _fsm_exec_memory_key(db, execution) -> str | None:
+    """Org-safe memory key for an FSM execution (IC-2, 2026-10-31).
+
+    Resolves the execution's agent with STRICT org equality
+    (synexia.identity) and returns identity.memory_write_key: the agent
+    PK, or the bare-name legacy bridge for default-org callers only,
+    or None when the org has no own row (fail closed — callers must not
+    write memories under a shared key).
+    """
+    try:
+        from app.services.synexia.identity import (
+            memory_write_key,
+            resolve_agent_in_org,
+        )
+
+        agent = resolve_agent_in_org(
+            db,
+            agent_id=getattr(execution, "agent_id", None),
+            agent_name=getattr(execution, "agent_name", None),
+            org_id=getattr(execution, "org_id", None),
+        )
+        return memory_write_key(
+            agent_row=agent,
+            agent_name=getattr(execution, "agent_name", None),
+            org_id=getattr(execution, "org_id", None),
+        )
+    except Exception:  # noqa: BLE001 — isolation metadata must never break tools
+        return None
+
+
 def _load_bound_kb_meta(db, bound_kb_ids: list[str]) -> dict:
     """Load ``kb_id -> {"name", "description"}`` for the bound KBs.
 
@@ -694,6 +977,28 @@ def _load_bound_kb_meta(db, bound_kb_ids: list[str]) -> dict:
     except Exception as e:
         logger.warning("KB meta load failed for market grounding (fallback to first bound): %s", e)
         return {}
+
+
+def _resolve_node_policy(db, execution, data_ctx_extras):
+    """Resolve the caller's data-access policy for an FSM data node (P0-1).
+
+    Uses the shared ``resolve_policy_from_context`` — same resolution as
+    ``answer_from_database`` and the delegation fastpath. Fails open (full
+    access) when the node context carries no resource scoping.
+    """
+    try:
+        from app.services.access_policy_service import resolve_policy_from_context
+
+        return resolve_policy_from_context(
+            db,
+            getattr(execution, "user_id", None),
+            data_ctx_extras or {},
+        )
+    except Exception as e:  # fail open — policy must never break the node
+        logger.warning("FSM data node: policy resolution failed (fail open): %s", e)
+        from app.services.access_policy_service import ResolvedPolicy
+
+        return ResolvedPolicy(has_policies=False)
 
 
 def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None, endpoint=None) -> ObservationRecord:
@@ -735,15 +1040,64 @@ def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None, endpoint=Non
         )
         try:
             svc = NLAnswerService(db)
-            result = _run_coro_sync(svc.answer(kb_id, question, endpoint=endpoint))
+            # Per-turn SQL budget scope: prefer the CANONICAL TURN identity
+            # threaded from the chat loop (one user message = one turn) so
+            # repeated query_database invocations share one budget; fall
+            # back to the per-execution scope for direct FSM entry.
+            _dce = data_ctx_extras or {}
+            _turn_scope = (
+                _dce.get("turn_id")
+                or (f"exec:{getattr(execution, 'id', '') or 'unknown'}")
+            )
+            result = _run_coro_sync(svc.answer(
+                kb_id, question, endpoint=endpoint,
+                turn_id=_turn_scope,
+                # P0-1 (2026-10-30, audit D2): resolve the user's data-access
+                # policy like every other caller — previously None here left
+                # pre-generation policy filtering inert on the FSM path.
+                # data_ctx_extras carries resource_type/resource_id/user_id
+                # from prepare_data_source_runtime; no scoping → full access.
+                resolved_policy=(
+                    _resolve_node_policy(db, execution, data_ctx_extras)
+                ),
+                # 2B-4: a corrective re-plan annotates the replacement data
+                # step with the structured scope refusal it must not repeat.
+                scope_hint=(node.inputs or {}).get("scope_hint"),
+            ))
 
             # Defensive: NLAnswerService may return an error dict on some failures
             if isinstance(result, dict) and result.get("success") is False:
+                # 2B-4: the durable failure observation must carry the
+                # STRUCTURED scope verdict/refusal (previously result_data
+                # was dropped on failures, so the corrective re-plan could
+                # only guess from the error string).
+                _fail_rd: dict = {}
+                if result.get("scope_check"):
+                    _fail_rd["scope_check"] = result["scope_check"]
+                if result.get("scope_disclosure"):
+                    _fail_rd["scope_disclosure"] = result["scope_disclosure"]
+                _val = result.get("validation")
+                if isinstance(_val, dict):
+                    _fail_rd["validation_checks"] = _val.get("checks")
+                    _fail_rd["validation_errors"] = _val.get("errors")
+                    _sc = (_val.get("checks") or {}).get("scope_authorization")
+                    if _sc and not _fail_rd.get("scope_check"):
+                        _fail_rd["scope_check"] = _sc
+                    _scope_errs = [
+                        str(e) for e in (_val.get("errors") or [])
+                        if "partition" in str(e).lower()
+                        or "company-wide" in str(e).lower()
+                    ]
+                    if _scope_errs and not _fail_rd.get("scope_disclosure"):
+                        _fail_rd["scope_disclosure"] = "; ".join(_scope_errs)
+                if result.get("error_kind"):
+                    _fail_rd["error_kind"] = result["error_kind"]
                 return _record_observation(
                     db, execution, node,
                     observation_type="nl2sql",
                     tool_name="nl2sql",
                     request_args={"question": question, "kb_id": kb_id},
+                    result_data=(_fail_rd or None),
                     success=False,
                     error_message=result.get("error", "Data source query failed"),
                 )
@@ -778,6 +1132,25 @@ def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None, endpoint=Non
                     ),
                     "unsupported_slots": (
                         result.get("unsupported_slots") if isinstance(result, dict) else None
+                    ),
+                    # 2026-10-29: structured measure provenance (claimed
+                    # concept → column, aggregation fingerprint) + family-
+                    # grain disclosure. Consumed by cross-node reconciliation
+                    # before synthesis (see _execute_synthesize_node).
+                    "measure_provenance": (
+                        result.get("measure_provenance") if isinstance(result, dict) else None
+                    ),
+                    "family_disclosure": (
+                        result.get("family_disclosure") if isinstance(result, dict) else None
+                    ),
+                    # 2B-3 (review check 3): scope warnings/refusals travel the
+                    # SAME structured envelope, so cross-node synthesis sees
+                    # them even when it re-derives prose from rows alone.
+                    "scope_disclosure": (
+                        result.get("scope_disclosure") if isinstance(result, dict) else None
+                    ),
+                    "scope_check": (
+                        result.get("scope_check") if isinstance(result, dict) else None
                     ),
                 },
                 result_text=answer or f"Generated SQL: {sql}",
@@ -981,6 +1354,48 @@ def _execute_synthesize_node(db, execution, node, endpoint=None) -> ObservationR
         _data = _rd.get("data")
         if isinstance(_data, list):
             rows.extend(_data)
+
+    # ── Cross-node measure reconciliation (2026-10-29 root-cause fix) ────
+    # Before synthesis, compare what each successful node CLAIMED to measure
+    # (claimed concept → column) with what the others claimed. Two nodes
+    # claiming the same concept from different columns (e.g. one summing the
+    # net amount, another the tax-inclusive amount) are a conflict: the
+    # conflict is disclosed into the synthesis input so the report either
+    # qualifies the figures or withholds the combined total — it never
+    # silently blends incompatible measures. Generic: terms come from each
+    # datasource's own verified metric catalog via the node provenance.
+    _reconciliation_disclosures: list[str] = []
+    try:
+        from app.services.db.query_contract import reconcile_fingerprints
+
+        _claimed = []
+        _family_notes = []
+        _scope_notes = []
+        for _obs in data_obs:
+            if not getattr(_obs, "success", False):
+                continue
+            _rd = getattr(_obs, "result_data", None)
+            if not isinstance(_rd, dict):
+                continue
+            _mp = _rd.get("measure_provenance")
+            if isinstance(_mp, dict) and isinstance(
+                _mp.get("claimed_measure_terms"), dict
+            ):
+                _claimed.append(_mp["claimed_measure_terms"])
+            _fd = _rd.get("family_disclosure")
+            if _fd:
+                _family_notes.append(str(_fd))
+            # 2B-3: scope warnings/refusals must qualify the synthesized
+            # report — a node that answered from partition data forces the
+            # synthesis to say so, whatever prose it re-derives from rows.
+            _sd = _rd.get("scope_disclosure")
+            if _sd:
+                _scope_notes.append(str(_sd))
+        _reconciliation_disclosures.extend(reconcile_fingerprints(_claimed))
+        _reconciliation_disclosures.extend(_family_notes)
+        _reconciliation_disclosures.extend(_scope_notes)
+    except Exception as _recon_err:  # pragma: no cover — never break synthesis
+        logger.debug("synthesize: reconciliation check skipped: %s", _recon_err)
     sql = "; ".join(sql_parts) if sql_parts else None
 
     user_message = execution.user_message or ""
@@ -1005,6 +1420,7 @@ def _execute_synthesize_node(db, execution, node, endpoint=None) -> ObservationR
             call_llm_fn=partial(_synth_call_llm, endpoint=endpoint),
             skill_name=skill_name,
             skill_methodology=skill_methodology,
+            disclosures=_reconciliation_disclosures or None,
         ))
         result_data = _finalize_result_to_result_data(finalize_result)
         summary_text = result_data.get("summary", "")
@@ -1268,7 +1684,10 @@ def _execute_sandbox_node(db, execution, node) -> ObservationRecord:
             user_id=execution.agent_name,
             context={
                 "conversation_id": execution.conversation_id,
-                "agent_app_id": execution.agent_name,
+                "org_id": getattr(execution, "org_id", None),
+                # Tenant isolation: bare agent_name is org-ambiguous; use
+                # the org-resolved memory key (identity.memory_write_key).
+                "agent_app_id": _fsm_exec_memory_key(db, execution),
             },
         )
 
@@ -1329,12 +1748,16 @@ def _execute_skill_node(
     args = dict(node.inputs or {})
     skill_name = args.get("skill_name") or args.get("name") or node.name
     skill_id = args.get("skill_id")
+    # FSM tenant isolation (IC-2): org + org-resolved memory key — same
+    # contract as the tool-node path above.
     tool_context = {
         "conversation_id": getattr(execution, "conversation_id", None),
         # Execution identity lets the artifact path ground a deck in the REAL
         # query rows this execution fetched (see deck_data.collect_grounded_rows).
         "execution_id": getattr(execution, "id", None),
-        "agent_app_id": getattr(execution, "app_id", None) or getattr(execution, "agent_name", None),
+        "org_id": getattr(execution, "org_id", None),
+        "agent_app_id": _fsm_exec_memory_key(db, execution)
+        or getattr(execution, "agent_name", None),
         "agent_name": getattr(execution, "agent_name", None),
         **(data_ctx_extras or {}),
     }
@@ -1372,11 +1795,28 @@ def _execute_skill_node(
         )
 
 
+def _extract_evidence_ids(result_data) -> list | None:
+    """Phase 3.1: best-effort evidence-reference extraction from a tool
+    result so ObservationRecord provenance is restorable after a restart.
+    Recognizes the shared evidence-registry payload shapes; returns None
+    when nothing is found (column stays NULL — never fabricated)."""
+    if not isinstance(result_data, dict):
+        return None
+    for key in ("evidence_ids", "evidence_refs", "citations"):
+        val = result_data.get(key)
+        if isinstance(val, list) and val:
+            return [str(x) for x in val][:50]
+    ids = result_data.get("evidence_id")
+    if ids:
+        return [str(ids)]
+    return None
+
+
 def _record_observation(
     db, execution, node,
     observation_type, tool_name, request_args=None,
     result_data=None, result_text=None, success=True,
-    error_message=None, artifact_ids=None,
+    error_message=None, artifact_ids=None, evidence_ids=None,
 ) -> ObservationRecord:
     """Record an observation for a plan node execution."""
     # Get next sequence number
@@ -1399,6 +1839,10 @@ def _record_observation(
         success=success,
         error_message=error_message,
         artifact_ids=artifact_ids,
+        # Phase 3.1: durable evidence references (restorable provenance
+        # after restart). Best-effort extraction from result_data when the
+        # caller did not pass them explicitly.
+        evidence_ids=evidence_ids if evidence_ids is not None else _extract_evidence_ids(result_data),
     )
     db.add(obs)
     db.commit()

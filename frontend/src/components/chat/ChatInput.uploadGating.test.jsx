@@ -41,7 +41,9 @@ describe('ChatInput.jsx file_upload_enabled gating', () => {
   });
 
   it('passes uploadEnabled to the PlusMenu so its entry hides too', () => {
-    expect(SOURCE).toMatch(/<PlusMenu[\s\S]{0,500}?uploadEnabled=\{uploadEnabled\}/);
+    // Window widened (P1 department props pushed uploadEnabled further
+    // from the <PlusMenu opener; contract unchanged).
+    expect(SOURCE).toMatch(/<PlusMenu[\s\S]{0,800}?uploadEnabled=\{uploadEnabled\}/);
   });
 
   it('does NOT add a paperclip attach button (upload stays in the + menu)', () => {

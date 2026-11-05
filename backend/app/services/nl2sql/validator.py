@@ -104,8 +104,15 @@ def validate(
         result.errors.append("SQL parse produced no statement")
         return result
 
-    # ── Rule 1: Must be SELECT ───────────────────────────────────
-    if parsed.key != "select":
+    # ── Rule 1: Must be SELECT (or a read-only set operation) ────
+    # 2026-10-29 cycle 2: UNION/EXCEPT/INTERSECT of SELECTs are read-only
+    # statements valid in every supported dialect (MySQL, PostgreSQL,
+    # SQLite, ...). Rejecting them at parsed.key level forced the pipeline
+    # into expensive regeneration loops for legitimate comparison queries
+    # (e.g. net vs gross in one statement). Rule 2 below still walks the
+    # ENTIRE tree (both arms of the set operation), so any write/DDL node
+    # remains blocked regardless of shape.
+    if parsed.key not in ("select", "union", "except", "intersect"):
         result.errors.append(f"Only SELECT statements are allowed, got: {parsed.key}")
 
     # ── Rule 2: Blocked statement types (from ast tree) ──────────

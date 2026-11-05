@@ -64,18 +64,14 @@ def _check_access(db: Session, project: Any, user: Any) -> tuple[bool, bool]:
 
 
 def _bound_kbs(db: Session, project: Any) -> list[Any]:
-    """KBs bound to the project (exact FK or legacy project-name match)."""
-    from sqlalchemy import or_
-
+    """KBs bound to the project (home FK, legacy name, or a share link)."""
     from app.models.knowledge_base import KnowledgeBase
+    from app.services.project_kb_membership import project_kb_membership_filter
 
     return (
         db.query(KnowledgeBase)
         .filter(
-            or_(
-                KnowledgeBase.project_id == project.id,
-                KnowledgeBase.project == project.name,
-            ),
+            project_kb_membership_filter(project),
             KnowledgeBase.is_deleted == False,  # noqa: E712
         )
         .all()
@@ -604,6 +600,7 @@ def register_project_catalog_router() -> APIRouter:
             raise HTTPException(status_code=404, detail="Metric not found")
 
         # Approve / reject via status. Field edits allowed for owner/admin.
+        previous_status = str(row.status or "")
         for field in (
             "name", "aliases", "definition", "sql_expression", "query_pattern",
             "unit", "default_aggregation", "bindings", "status",
@@ -613,7 +610,23 @@ def register_project_catalog_router() -> APIRouter:
         if "source" in payload:
             row.source = payload["source"]
         db.commit()
-        return {"success": True, "metric": _metric_to_dict(row)}
+
+        # P0-6 promotion bridge (2026-10-30): a human approval event is the
+        # ONLY thing that promotes a project metric into the enforced
+        # contract (MetricDefinition). Proposed/LLM rows are never promoted
+        # automatically; re-approval updates the same row idempotently.
+        promotion: dict = {}
+        if payload.get("status") == "approved" and previous_status != "approved":
+            from app.services.knowledge_graph.metric_bootstrap import (
+                promote_to_metric_definition,
+            )
+
+            try:
+                promotion = promote_to_metric_definition(db, row)
+            except Exception:  # pragma: no cover — promotion must not break the edit
+                logger.exception("metric promotion failed for %s", metric_id)
+                promotion = {"promoted": False, "reason": "promotion failed"}
+        return {"success": True, "metric": _metric_to_dict(row), "promotion": promotion}
 
     @router.post("/projects/{project_id}/catalog/metrics/bootstrap")
     async def bootstrap_catalog_metrics(

@@ -63,7 +63,11 @@ from app.services.tool_handlers import env_passthrough_tool  # noqa: F401
 from app.services.tool_handlers import credential_files_tool  # noqa: F401
 from app.services.tool_handlers import kanban_tool  # noqa: F401
 from app.services.tool_handlers import mode_tool  # noqa: F401
-from app.services.tool_handlers import cronjob_tool  # noqa: F401
+# The legacy cron-job tool is RETIRED (roadmap R5): its JSON-file
+# persistence path and the in-process scheduling it duplicated are replaced
+# by the durable scheduling plane (automation_occurrences + scheduler_core).
+# The tool name may remain in forbidden-lists elsewhere — forbidding a
+# nonexistent tool is a no-op.
 from app.services.tool_handlers import query_database_tool  # noqa: F401 — Phase 2: FSM boxed as a tool
 from app.services.tool_handlers import ontology_tool  # noqa: F401 — P0-2: enterprise ontology
 from app.services.tool_handlers import po_draft_tool  # noqa: F401 — P0-4: first write-back

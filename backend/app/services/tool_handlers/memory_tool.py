@@ -31,12 +31,28 @@ MEMORY_CHAR_LIMIT = 2200
 USER_CHAR_LIMIT = 1375
 
 
+def _runtime_tool_context_org() -> str | None:
+    """Read the org from the runtime TOOL_CONTEXT (trusted, server-set).
+
+    ``agent_tools.execute_tool`` merges the chat loop's server-built
+    context into ``TOOL_CONTEXT`` before every tool call. Import is lazy
+    so handlers stay importable without the registry.
+    """
+    try:
+        from app.services.agent_tools import TOOL_CONTEXT
+
+        return TOOL_CONTEXT.get("org_id") or None
+    except Exception:  # noqa: BLE001 — isolation metadata must never break tools
+        return None
+
+
 def _get_or_create_memory(
     db: Session,
     agent_app_id: str,
     user_id: str | None,
     target: str,
     project_id: str | None = None,
+    org_id: str | None = None,
 ) -> AgentMemory:
     """Get existing memory record or create a new one.
 
@@ -54,6 +70,12 @@ def _get_or_create_memory(
         AgentMemory.target == target,
         AgentMemory.is_deleted == False,
     )
+    # FSM tenant isolation (IC-2, 2026-10-31): when the tool context
+    # carries the caller's org, the row is confined to it — lookups and
+    # creates can never cross organization boundaries, even where legacy
+    # agent_app_id keys collide between orgs.
+    if org_id:
+        query = query.filter(AgentMemory.org_id == org_id)
     if user_id:
         query = query.filter(AgentMemory.user_id == user_id)
     else:
@@ -91,6 +113,7 @@ def _get_or_create_memory(
             target=target,
             content="",
             char_count=0,
+            **({"org_id": org_id} if org_id else {}),
         )
         db.add(mem)
         db.commit()
@@ -152,6 +175,19 @@ async def _memory_tool(
     agent_app_id = (context or {}).get("agent_app_id", "default")
     if not agent_app_id:
         agent_app_id = "default"
+    # FSM tenant isolation (IC-2 + closure check B, 2026-10-31): the
+    # memory row is stamped and confined to the AUTHENTICATED org.
+    # Derivation order: per-call context org (FSM: execution.org_id) →
+    # runtime TOOL_CONTEXT org (chat loop stamps conv.org_id before
+    # every execute_tool) → 'default-org' (EXPLICIT compatibility
+    # policy for legacy callers, mirroring the pre-tenancy convention —
+    # never a cross-tenant value). Callers in a real org always carry
+    # one of the first two, so non-default-org writes are never unscoped.
+    memory_org_id = (
+        (context or {}).get("org_id")
+        or _runtime_tool_context_org()
+        or "default-org"
+    )
 
     # Resolve the active project_id from the tool context (set by
     # agent_tools.py when the LLM invokes the memory tool). This is
@@ -166,7 +202,10 @@ async def _memory_tool(
     if target not in ("memory", "user"):
         return {"success": False, "error": f"Invalid target '{target}'. Use 'memory' or 'user'."}
 
-    mem = _get_or_create_memory(db, agent_app_id, user_id, target, project_id=project_id)
+    mem = _get_or_create_memory(
+        db, agent_app_id, user_id, target,
+        project_id=project_id, org_id=memory_org_id,
+    )
     entries = _parse_entries(mem.content)
 
     if action == "read":

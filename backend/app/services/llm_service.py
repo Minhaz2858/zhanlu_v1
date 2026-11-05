@@ -218,6 +218,22 @@ def llm_headers() -> dict:
     }
 
 
+def llm_endpoint_headers(api_key: str | None) -> dict:
+    """Headers for a DB-resolved LLM endpoint (2026-10-31 fix).
+
+    A keyless endpoint (self-hosted vLLM etc.) must OMIT the
+    Authorization header entirely: building ``Bearer ''`` is an illegal
+    header value and httpx rejects it client-side, killing the turn
+    before any request leaves the process. Sending no auth header is
+    exactly what keyless servers expect.
+    """
+    key = (api_key or "").strip()
+    headers: dict = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
 def llm_url() -> str:
     """Return the full URL for the LLM chat completions endpoint."""
     return f"{settings.OPENAI_BASE_URL.rstrip('/')}/chat/completions"

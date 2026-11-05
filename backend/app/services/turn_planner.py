@@ -78,6 +78,77 @@ _EVIDENCE_BUILD = (
 )
 _EVIDENCE_VERIFY = ("verify", "evaluate", "run_verification", "check_", "validate_")
 
+# ── P1.1/P1.2 (Phase 1): explicit intent taxonomy + plan enrichment ─────────
+# Semantic classification is done by the PLANNER LLM inside the existing
+# one-shot planning call — never a keyword router. The template path leaves
+# intent_type empty (it cannot classify semantically) and only derives a
+# conservative default execution strategy from the mechanical intent
+# precedence it already implements.
+# Phase 1.5: "unknown" is a FIRST-CLASS intent value — an unclassified turn
+# is represented explicitly, never omitted (intent consistency).
+INTENT_TYPES: tuple[str, ...] = (
+    "conversational", "information_retrieval", "data_analysis", "research",
+    "investigation", "decision_support", "report_generation",
+    "operational_execution", "multi_step_task", "cross_department_task",
+    "unknown",
+)
+RISK_LEVELS: tuple[str, ...] = ("low", "medium", "high", "critical")
+# Phase 1.5: "plan_dag" — DAG-shaped execution (dependency-ordered agent
+# dispatch) is an executable strategy, distinct from a flat multi_agent batch.
+EXECUTION_STRATEGIES: tuple[str, ...] = (
+    "direct_response",   # Strategy A — conversational, no tools
+    "direct_tool",       # Strategy B — GA's own tools
+    "single_specialist", # Strategy C — one domain specialist
+    "multi_agent",       # Strategy D — supervisor batch / peer collab
+    "plan_dag",          # Strategy E — dependency-ordered DAG dispatch
+)
+
+
+def _norm_plan_meta(raw: dict | None) -> dict:
+    """Validate + normalize planner-supplied plan meta (tolerant, never raises).
+
+    Unknown/invalid values are DROPPED (not guessed) and scalar list fields
+    are wrapped, so a sloppy LLM payload degrades to an un-enriched plan
+    instead of breaking the turn.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+
+    def _s(v) -> str | None:
+        return str(v).strip() or None if v is not None else None
+
+    def _lst(v) -> tuple[str, ...]:
+        if v is None:
+            return ()
+        if isinstance(v, str):
+            return (v.strip(),) if v.strip() else ()
+        if isinstance(v, (list, tuple)):
+            return tuple(str(x).strip() for x in v if str(x).strip())
+        return ()
+
+    it = _s(raw.get("intent_type"))
+    if it in INTENT_TYPES:
+        out["intent_type"] = it
+    rl = _s(raw.get("risk_level"))
+    if rl in RISK_LEVELS:
+        out["risk_level"] = rl
+    es = _s(raw.get("execution_strategy"))
+    if es in EXECUTION_STRATEGIES:
+        out["execution_strategy"] = es
+    for k in ("objective_statement", "expected_outcome"):
+        v = _s(raw.get(k)) or _s(raw.get("objective") if k == "objective_statement" else None)
+        if v:
+            out[k] = v[:600]
+    for k in ("constraints", "acceptance_criteria", "verification_requirements"):
+        v = _lst(raw.get(k))
+        if v:
+            out[k] = v
+    ra = raw.get("required_approvals")
+    if ra is not None:
+        out["required_approvals"] = bool(ra) if not isinstance(ra, str) else ra.strip().lower() in ("true", "yes", "1")
+    return out
+
 
 @dataclass
 class TurnStep:
@@ -98,20 +169,74 @@ class TurnStep:
     title_en: str
     title_zh: str
     evidence: tuple[str, ...] = field(default_factory=tuple)
+    # 2026-11-02 (dynamic orchestration timeline): stable task identity +
+    # planner-provided user-friendly description + dependencies. task_id is
+    # CONTENT-derived (sha1 of normalized key+title) so the same task keeps
+    # its id across replans/reordering — the frontend matches on it to
+    # preserve completed rows and mark superseded ones. Empty for legacy
+    # constructions until assign_task_ids runs.
+    task_id: str = ""
+    description: str | None = None
+    depends_on: tuple[int, ...] = field(default_factory=tuple)
 
 
 @dataclass
 class TurnPlan:
-    """A deterministic, intent-derived todo list for one turn."""
+    """A deterministic, intent-derived todo list for one turn.
+
+    P1.1/P1.2 (Phase 1): optional enrichment meta. All fields default empty —
+    the template path and legacy LLM payloads stay byte-for-byte backward
+    compatible. The ORIGINAL user request is never replaced: the meta fields
+    carry the planner's structured understanding ALONGSIDE it (the loop keeps
+    the raw user message as the authoritative objective).
+    """
 
     kind: str = KIND_NONE
     steps: list[TurnStep] = field(default_factory=list)
+    intent_type: str | None = None
+    objective_statement: str | None = None
+    expected_outcome: str | None = None
+    constraints: tuple[str, ...] = field(default_factory=tuple)
+    acceptance_criteria: tuple[str, ...] = field(default_factory=tuple)
+    verification_requirements: tuple[str, ...] = field(default_factory=tuple)
+    risk_level: str | None = None
+    required_approvals: bool = False
+    execution_strategy: str | None = None
 
     def step_by_index(self, step_index: int) -> TurnStep | None:
         for s in self.steps:
             if s.step_index == step_index:
                 return s
         return None
+
+    def plan_meta(self) -> dict:
+        """Non-empty enrichment fields, for SSE emission / prompt context."""
+        out: dict = {}
+        if self.intent_type:
+            out["intent_type"] = self.intent_type
+        if self.objective_statement:
+            out["objective_statement"] = self.objective_statement
+        if self.expected_outcome:
+            out["expected_outcome"] = self.expected_outcome
+        if self.constraints:
+            out["constraints"] = list(self.constraints)
+        if self.acceptance_criteria:
+            out["acceptance_criteria"] = list(self.acceptance_criteria)
+        if self.verification_requirements:
+            out["verification_requirements"] = list(self.verification_requirements)
+        if self.risk_level:
+            out["risk_level"] = self.risk_level
+        if self.required_approvals:
+            out["required_approvals"] = True
+        if self.execution_strategy:
+            out["execution_strategy"] = self.execution_strategy
+        return out
+
+    def apply_meta(self, meta: dict | None) -> "TurnPlan":
+        """Merge validated meta into this plan (mutates, returns self)."""
+        for k, v in _norm_plan_meta(meta).items():
+            setattr(self, k, v)
+        return self
 
 
 # ── Step templates ────────────────────────────────────────────────────────
@@ -165,6 +290,7 @@ def build_turn_plan(
     is_dashboard_build: bool = False,
     is_report_request: bool = False,
     tool_names: list[str] | None = None,
+    plan_meta: dict | None = None,
 ) -> TurnPlan:
     """Build the deterministic turn plan from the user's input.
 
@@ -175,7 +301,12 @@ def build_turn_plan(
     """
     text = (user_content or "").strip()
     if not text or is_greeting(text) or _SMALLTALK_RE.match(text):
-        return TurnPlan(kind=KIND_NONE)
+        # Phase 1.5: conversational turns are classified explicitly, not omitted.
+        return TurnPlan(
+            kind=KIND_NONE,
+            intent_type="conversational",
+            execution_strategy="direct_response",
+        )
 
     if is_dashboard_build:
         kind = KIND_DASHBOARD
@@ -185,7 +316,15 @@ def build_turn_plan(
         kind = KIND_DATA
     else:
         kind = KIND_GENERIC
-    return TurnPlan(kind=kind, steps=_steps(kind))
+    plan = TurnPlan(kind=kind, steps=assign_task_ids(_steps(kind)))
+    # P1.3: conservative default strategy from the mechanical intent
+    # precedence (the planner LLM may override with a richer classification).
+    plan.execution_strategy = "direct_tool"
+    # Phase 1.5: the template path cannot classify semantically — say so
+    # explicitly. Explicit plan_meta (validated in apply_meta) still wins.
+    plan.intent_type = "unknown"
+    plan.apply_meta(plan_meta)
+    return plan
 
 
 def _looks_like_data_question(text: str, tool_names: list[str]) -> bool:
@@ -256,11 +395,19 @@ def mark_final_step_completed(plan: TurnPlan, completed: set[int], has_content: 
 # ── Prompt injection ──────────────────────────────────────────────────────
 
 def plan_to_system_block(plan: TurnPlan) -> str:
-    """The plan block injected into the LLM context before the loop."""
+    """The plan block injected into the LLM context before the loop.
+
+    Phase 1.5 (Gap 2): the plan's enrichment meta is part of the CONTRACT the
+    loop executes against — acceptance criteria, verification requirements,
+    risk and strategy are injected so the model can be held to them (and so
+    reviewer findings have something concrete to check against). Compact
+    key: value rows — no chain-of-thought, nothing fabricated: only fields
+    the planner actually supplied appear.
+    """
     if not plan or not plan.steps:
         return ""
     lines = [f"{i}. {s.title_en}" for i, s in enumerate(plan.steps, start=1)]
-    return (
+    block = (
         "TURN PLAN — the user's request has been decomposed into the following "
         "steps. Execute them IN ORDER. Do not skip ahead, do not repeat a step "
         "that is already done, and do not narrate the plan — execute it.\n"
@@ -269,11 +416,44 @@ def plan_to_system_block(plan: TurnPlan) -> str:
           "cannot be completed, state that plainly and continue with the next "
           "achievable step."
     )
+    meta = plan.plan_meta()
+    if not meta:
+        return block
+    rows: list[str] = []
+    if meta.get("intent_type"):
+        rows.append(f"- Intent: {meta['intent_type']}")
+    if meta.get("execution_strategy"):
+        rows.append(f"- Execution strategy: {meta['execution_strategy']}")
+    if meta.get("objective_statement"):
+        rows.append(f"- Objective: {meta['objective_statement']}")
+    if meta.get("expected_outcome"):
+        rows.append(f"- Expected outcome: {meta['expected_outcome']}")
+    for c in meta.get("constraints") or ():
+        rows.append(f"- Constraint: {c}")
+    criteria = meta.get("acceptance_criteria") or ()
+    if criteria:
+        rows.append("- Acceptance criteria (completion is judged against these):")
+        rows.extend(f"  - {c}" for c in criteria)
+    verifications = meta.get("verification_requirements") or ()
+    if verifications:
+        rows.append("- Verification requirements:")
+        rows.extend(f"  - {v}" for v in verifications)
+    if meta.get("risk_level"):
+        rows.append(f"- Risk level: {meta['risk_level']}")
+    if meta.get("required_approvals"):
+        rows.append("- Required approvals: yes")
+    if rows:
+        block += (
+            "\n\nPLAN CONTEXT — structured requirements for this turn "
+            "(do not contradict them; if one cannot be met, say so plainly):\n"
+            + "\n".join(rows)
+        )
+    return block
 
 
 # ── Dynamic (per-request) plan parsing ─────────────────────────────────────
 
-DYNAMIC_PLAN_MAX_STEPS = 6
+DYNAMIC_PLAN_MAX_STEPS = 8
 _DYNAMIC_TITLE_MAX = 80
 
 # Keyword → evidence/step-key inference for LLM-generated step titles, so the
@@ -352,13 +532,40 @@ def _clean_llm_title(raw: str) -> str:
     return title
 
 
+def _mint_task_id(key: str, title: str) -> str:
+    """Content-derived stable task identity (2026-11-02).
+
+    The same logical task keeps the same id across replans and reordering:
+    the id is a short hash of the normalized key+title, NOT the position.
+    A task whose title is rewritten by a replan legitimately gets a new id
+    (it is a new task to the user); preserved titles keep theirs.
+    """
+    import hashlib
+
+    basis = f"{(key or '').strip().lower()}|{(title or '').strip().lower()}"
+    return "task-" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+
+
+def assign_task_ids(steps: list[TurnStep]) -> list[TurnStep]:
+    """In-place: mint stable task ids for steps that lack one."""
+    for s in steps:
+        if not s.task_id:
+            s.task_id = _mint_task_id(s.key, s.title_en or s.title_zh)
+    return steps
+
+
 def parse_dynamic_plan(raw: str | None, kind: str) -> TurnPlan | None:
     """Parse the planner LLM's output into a TurnPlan.
 
-    Accepts ``{"steps": [{"title": ...}]}``, a bare list of objects or
-    strings, or a plain numbered/bullet list ("1. title"). Returns None when
-    the output cannot be parsed into 2..DYNAMIC_PLAN_MAX_STEPS valid steps —
-    the caller then falls back to the fixed intent template.
+    Accepts ``{"steps": [{"title": ..., "description": ...,
+    "depends_on": [1,2]}]}``, a bare list of objects or strings, or a plain
+    numbered/bullet list ("1. title"). Returns None when the output cannot
+    be parsed into 2..DYNAMIC_PLAN_MAX_STEPS valid steps — the caller then
+    falls back to the fixed intent template.
+
+    2026-11-02: every parsed step gets a stable content-derived ``task_id``
+    (see ``_mint_task_id``); ``description``/``depends_on`` are parsed
+    tolerantly (invalid shapes are dropped, never guessed).
     """
     if not raw or not raw.strip():
         return None
@@ -368,23 +575,46 @@ def parse_dynamic_plan(raw: str | None, kind: str) -> TurnPlan | None:
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
     titles: list[str] = []
+    descriptions: dict[int, str] = {}
+    depends: dict[int, tuple[int, ...]] = {}
+    plan_meta_raw: dict | None = None
     # 1) JSON: {"steps": [...]} | {"plan": [...]} | [...]
     try:
         data = json.loads(text)
         if isinstance(data, dict):
             steps_raw = data.get("steps") or data.get("plan") or []
+            # P1.1/P1.2: enriched planner payloads carry structured intent /
+            # acceptance / risk fields alongside the steps. Tolerant parse —
+            # invalid values are dropped by _norm_plan_meta, never guessed.
+            plan_meta_raw = {
+                k: v for k, v in data.items()
+                if k not in ("steps", "plan")
+            } or None
         elif isinstance(data, list):
             steps_raw = data
         else:
             steps_raw = None
         if isinstance(steps_raw, list):
-            for item in steps_raw:
+            for pos, item in enumerate(steps_raw):
                 if isinstance(item, dict) and item.get("title"):
                     titles.append(str(item["title"]))
+                    d = str(item.get("description") or "").strip()
+                    if d:
+                        descriptions[pos] = d[:300]
+                    dep = item.get("depends_on")
+                    if isinstance(dep, list):
+                        vals = tuple(
+                            int(x) for x in dep
+                            if isinstance(x, (int, float, str)) and str(x).strip().lstrip("+-").isdigit()
+                        )
+                        if vals:
+                            depends[pos] = vals
                 elif isinstance(item, str) and item.strip():
                     titles.append(item)
     except (ValueError, TypeError):
         titles = []
+        descriptions = {}
+        depends = {}
     # 2) Plain numbered / bullet list fallback.
     if not titles:
         for m in _PLAN_LINE_RE.finditer(text):
@@ -405,18 +635,35 @@ def parse_dynamic_plan(raw: str | None, kind: str) -> TurnPlan | None:
     titles = uniq
     if len(titles) < 2 or len(titles) > DYNAMIC_PLAN_MAX_STEPS:
         return None
-    steps = [
-        TurnStep(
+    steps = []
+    for i, t in enumerate(titles, start=1):
+        key = infer_step_key(t, i)
+        s = TurnStep(
             step_index=i,
-            key=infer_step_key(t, i),
-            phase="verify" if infer_step_key(t, i) == "verify" else "act",
+            key=key,
+            phase="verify" if key == "verify" else "act",
             title_en=t,
             title_zh=t,  # LLM emits in the user's language; keep as-is
             evidence=infer_evidence_from_title(t),
         )
-        for i, t in enumerate(titles, start=1)
-    ]
-    return TurnPlan(kind=kind, steps=steps)
+        # positions were captured pre-dedup; best-effort match by order
+        pos = i - 1
+        if pos in descriptions:
+            s.description = descriptions[pos]
+        if pos in depends:
+            s.depends_on = depends[pos]
+        steps.append(s)
+    assign_task_ids(steps)
+    plan = TurnPlan(kind=kind, steps=steps)
+    plan.apply_meta(plan_meta_raw)
+    if not plan.intent_type:
+        # Phase 1.5: an LLM plan that omits intent is explicitly "unknown".
+        plan.intent_type = "unknown"
+    if not plan.execution_strategy:
+        # P1.3: conservative default — the planner LLM classifies richer
+        # strategies; without one, the turn executes with the GA's own tools.
+        plan.execution_strategy = "direct_tool"
+    return plan
 
 
 def dynamic_plan_prompt(
@@ -428,11 +675,33 @@ def dynamic_plan_prompt(
     system = (
         "You are a strict task planner for an autonomous agent. "
         "Given the user's request, output a concise step-by-step execution "
-        'plan as JSON ONLY: {"steps": [{"title": "..."}]}. Rules: '
-        "2-6 steps; each title is a concrete action in the imperative mood, "
-        "under 60 characters; no commentary, no markdown fences, no extra "
-        "fields; the first step analyzes the request; include data-gathering "
-        "and a final build or verify step when relevant."
+        'plan as JSON ONLY: {"steps": [{"title": "...", "description": '
+        '"...", "depends_on": [step_numbers]}]}. Rules: '
+        "2-8 steps sized to the ACTUAL request (a simple request may need "
+        "only 2; a complex enterprise analysis 6 or more — never pad with "
+        "generic filler); each title is a concrete action in the imperative "
+        "mood, under 60 characters; each description is one short "
+        "user-friendly sentence about what that step does for THIS request "
+        "(no internal jargon, no tool names, no SQL); depends_on lists the "
+        "1-based step numbers that must finish first (empty for the first "
+        "step); no commentary, no markdown fences; the first step analyzes "
+        "the request; include data-gathering and a final build or verify "
+        "step when relevant. "
+        # P1.1/P1.2: structured intent + enrichment — semantic classification
+        # by the planner LLM, NOT keyword routing. All meta fields optional;
+        # unknown values are dropped server-side.
+        "Also include, when determinable: "
+        'intent_type (one of: conversational, information_retrieval, '
+        "data_analysis, research, investigation, decision_support, "
+        "report_generation, operational_execution, multi_step_task, "
+        "cross_department_task; use \"unknown\" only when none fits), "
+        'objective_statement (what the user wants to accomplish, one '
+        "sentence), expected_outcome, execution_strategy (direct_response | "
+        "direct_tool | single_specialist | multi_agent | plan_dag), "
+        "risk_level (low | "
+        "medium | high | critical), required_approvals (bool), constraints "
+        "(list), acceptance_criteria (list — how completion will be judged), "
+        "verification_requirements (list). Never invent evidence or figures."
     )
     user = (
         f"User request: {user_content}\n"
@@ -445,11 +714,61 @@ def dynamic_plan_prompt(
 
 # ── SSE frames ────────────────────────────────────────────────────────────
 
+def _scrub_step_title(title: str) -> str:
+    """Content invariant for plan-step titles.
+
+    Titles may be LLM-AUTHORED (parse_dynamic_plan) — they are raw model text,
+    not server-template metadata like tool labels. A planner echoing a table
+    or view name ("Summarize v_sale_order by region") must not reach the
+    persisted live feed. Ordinary titles pass through verbatim (the sanitizer
+    only replaces strings matching the forbidden patterns). Reuses the SAME
+    sanitizer that gates all live events — no second framework.
+    """
+    from app.services.agent_loop.sse_builders import _sanitize_live_event_params
+
+    return _sanitize_live_event_params({"title": title})["title"]
+
+
+def plan_meta_frame(plan: TurnPlan | None) -> str | None:
+    """P1.5: SSE frame carrying the plan's structured meta (intent, objective,
+    strategy, acceptance criteria, risk) — same content-invariant gate as the
+    step frames. None when the plan carries no enrichment (greetings, legacy
+    payloads) so no empty/fake event is ever emitted."""
+    meta = plan.plan_meta() if plan is not None else {}
+    if not meta:
+        return None
+    from app.services.agent_loop.sse_builders import _sanitize_live_event_params
+
+    safe = _sanitize_live_event_params({"m": meta})["m"]
+    return 'data: ' + json.dumps({"type": "plan_meta", **safe}, ensure_ascii=False) + '\n\n'
+
+
 def plan_step_added_frame(step: TurnStep) -> str:
-    """SSE frame announcing a plan step (rendered as a pending checklist row)."""
-    return f'data: {json.dumps({"type": "plan_step_added", "step_index": step.step_index, "title": step.title_en}, ensure_ascii=False)}\n\n'
+    """SSE frame announcing a plan step (rendered as a pending checklist row).
+
+    2026-11-02: carries ``task_id`` (stable content-derived identity) and
+    ``description`` so the frontend can preserve task identity across plan
+    updates and show a user-friendly line under the title."""
+    return f'data: {json.dumps({"type": "plan_step_added", "step_index": step.step_index, "task_id": step.task_id or None, "description": step.description, "title": _scrub_step_title(step.title_en)}, ensure_ascii=False)}\n\n'
 
 
 def plan_step_completed_frame(step: TurnStep) -> str:
     """SSE frame marking a plan step complete (checklist row ticks off)."""
-    return f'data: {json.dumps({"type": "plan_step_completed", "step_index": step.step_index, "title": step.title_en}, ensure_ascii=False)}\n\n'
+    return f'data: {json.dumps({"type": "plan_step_completed", "step_index": step.step_index, "task_id": step.task_id or None, "title": _scrub_step_title(step.title_en)}, ensure_ascii=False)}\n\n'
+
+
+def plan_step_updated_frame(step: TurnStep, *, status: str) -> str:
+    """SSE frame for a plan REVISION of one step (2026-11-02, Phase 4).
+
+    Emitted when the supervisor supersedes, fails, or re-opens a step
+    mid-turn. ``status`` is one of: superseded | failed | pending. The
+    frontend merges by ``task_id``: completed tasks stay completed, the
+    affected row updates its status in place, never silently erased.
+    """
+    return f'data: {json.dumps({"type": "plan_updated", "step_index": step.step_index, "task_id": step.task_id or None, "title": _scrub_step_title(step.title_en), "status": status}, ensure_ascii=False)}\n\n'
+
+
+def plan_replan_started_frame(reason: str = "") -> str:
+    """SSE frame announcing the supervisor is revising its plan (Phase 4)."""
+    safe_reason = (reason or "").strip() or "Adjusting the plan based on progress"
+    return f'data: {json.dumps({"type": "replanning_started", "reason": safe_reason[:200]}, ensure_ascii=False)}\n\n'

@@ -63,6 +63,7 @@ const makeStep = (number, status, description) => ({
 const STEP_RUNNING = (n) => makeStep(n, 'running', `Step ${n} running`);
 const STEP_DONE = (n) => makeStep(n, 'done', `Step ${n} done`);
 const STEP_FAILED = (n) => makeStep(n, 'failed', `Step ${n} failed`);
+const STEP_AWAITING = (n) => makeStep(n, 'awaiting_approval', `Step ${n} awaiting approval`);
 
 const SUMMARY_LABEL = 'activity-steps-toggle';
 const LIST_LABEL = 'activity-steps-list';
@@ -126,6 +127,31 @@ describe('ActivitySteps — streaming (any step running)', () => {
 
   it('does not render the toggle button while any step is running', () => {
     const steps = [STEP_RUNNING(1), STEP_DONE(2)];
+    render(<ActivitySteps steps={steps} />);
+    expect(getSummary()).toBeNull();
+    expect(getList()).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A-6 (enterprise reliability audit, 2026-11-01): awaiting_approval is a
+// known terminal step status — the backend closes a tool step as
+// awaiting_approval when the turn pauses for human approval. Without this
+// entry the card spun forever after the `paused` SSE frame.
+// ---------------------------------------------------------------------------
+
+describe('ActivitySteps — awaiting_approval is terminal (A-6)', () => {
+  it('does NOT keep the section in live-running mode when the only open step is awaiting_approval', () => {
+    const steps = [STEP_DONE(1), STEP_AWAITING(2)];
+    render(<ActivitySteps steps={steps} />);
+    // Terminal whitelist: summary renders, list auto-collapses — no
+    // permanent spinner state.
+    expect(getSummary()).toBeInTheDocument();
+    expect(getList()).toBeNull();
+  });
+
+  it('still shows live-running mode while a genuinely running step exists', () => {
+    const steps = [STEP_DONE(1), STEP_AWAITING(2), STEP_RUNNING(3)];
     render(<ActivitySteps steps={steps} />);
     expect(getSummary()).toBeNull();
     expect(getList()).toBeInTheDocument();

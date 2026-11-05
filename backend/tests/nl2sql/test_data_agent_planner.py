@@ -182,6 +182,11 @@ def test_ask_data_agent_degrades_to_legacy_on_planner_failure(monkeypatch):
 
     monkeypatch.setattr(settings, "DATA_AGENT_PLANNER_ENABLED", True)
     monkeypatch.setattr(settings, "DATA_AGENT_FASTPATH_ENABLED", False)
+    # Isolate the legacy fail-soft path: when the swarm sub-agent path is
+    # enabled (default in some deployments) a non-None swarm result short-circuits
+    # the legacy loop, so the planner-failure fallback under test would never
+    # build the legacy prompt. Disable swarm to exercise exactly that wiring.
+    monkeypatch.setattr(settings, "DATA_AGENT_SWARM_ENABLED", False)
 
     async def broken(*a, **k):
         raise RuntimeError("planner down")
@@ -191,7 +196,7 @@ def test_ask_data_agent_degrades_to_legacy_on_planner_failure(monkeypatch):
     # The legacy loop starts with the prompt builder; make it observable.
     calls = []
 
-    def fake_prompt(question, bound, preferred, caller=None):
+    def fake_prompt(question, bound, preferred, caller=None, db=None):
         calls.append(question)
         return "system"
 

@@ -108,7 +108,14 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 def _recency_score(memory: AgentMemory, now: datetime) -> float:
-    """Recency in [0, 1] — decays linearly to 0 over 30 days."""
+    """Recency in [0, 1] — decays linearly to 0 over 30 days.
+
+    2026-10-31 fix: SQLite stores NAIVE datetimes while ``now`` may be
+    timezone-aware (and vice versa) — the mixed subtraction raised
+    TypeError, which the FSM context assembler's broad except silently
+    swallowed, so agent memory recall was silently returning [] forever.
+    Both sides are normalized to naive before subtracting.
+    """
     created = memory.created_date
     if isinstance(created, str):
         try:
@@ -117,6 +124,10 @@ def _recency_score(memory: AgentMemory, now: datetime) -> float:
             return 0.0
     if not created:
         return 0.0
+    if created.tzinfo is not None:
+        created = created.replace(tzinfo=None)
+    if now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
     age_days = (now - created).days
     if age_days < 0:
         return 1.0
@@ -157,10 +168,11 @@ class SearchResult:
 
 def search_memories(
     db: Session,
-    agent_app_id: str,
+    agent_app_id: str | list[str],
     query: str,
     limit: int = 10,
     min_score: float = 0.1,
+    org_id: str | None = None,
 ) -> list[SearchResult]:
     """Search agent memories, preferring semantic recall with a lexical fallback.
 
@@ -175,13 +187,30 @@ def search_memories(
 
     Memories are always scoped by ``agent_app_id`` (the previous FSM context
     assembler ignored scope entirely — see context_assembler fix).
+    ``agent_app_id`` may be a list of keys (org-scoped legacy bridge —
+    see synexia.identity.memory_read_keys).
+
+    T1/FSM tenant isolation (2026-10-31): when ``org_id`` is provided,
+    results are additionally confined to ``AgentMemory.org_id == org_id``
+    — memories cannot cross organization boundaries even where legacy
+    keys collide. Callers that do not pass ``org_id`` keep the previous
+    behaviour (single-tenant/local compatibility).
     """
     query_tokens = set(_tokenize(query))
 
-    memories = db.query(AgentMemory).filter(
-        AgentMemory.agent_app_id == agent_app_id,
-        AgentMemory.is_deleted == False,
-    ).all()
+    base = db.query(AgentMemory).filter(
+        AgentMemory.is_deleted == False,  # noqa: E712
+    )
+    if isinstance(agent_app_id, (list, tuple, set)):
+        keys = [k for k in agent_app_id if k]
+        if not keys:
+            return []
+        base = base.filter(AgentMemory.agent_app_id.in_(keys))
+    else:
+        base = base.filter(AgentMemory.agent_app_id == agent_app_id)
+    if org_id:
+        base = base.filter(AgentMemory.org_id == org_id)
+    memories = base.all()
     memories = filter_expired(memories)
     if not memories:
         return []

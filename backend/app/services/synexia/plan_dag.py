@@ -203,6 +203,91 @@ def _strip_sandbox_without_file_intent(steps: list, task_spec: dict) -> list:
         return steps
 
 
+def _bound_nl2sql_plan(steps: list) -> list:
+    """Duplicate-intent merge + node cap for nl2sql plans (generic, no
+    per-database knowledge). Dependencies are positional indices, so drops
+    re-map dependents onto the kept twin.
+
+    Merge rule: two nl2sql nodes whose normalized question tokens are
+    near-identical (Jaccard ≥ 0.8) express the same intent — the LLM planner
+    or decomposition re-stated it. Cap rule: at most
+    ``NL2SQL_MAX_REPORT_NODES`` (default 4) nl2sql nodes survive, in plan
+    order. Non-nl2sql nodes (synthesize, sandbox, …) are never dropped.
+    """
+    if not steps:
+        return steps
+    try:
+        from app.config import settings as _s
+
+        max_nodes = max(1, int(getattr(_s, "NL2SQL_MAX_REPORT_NODES", 4)))
+    except Exception:
+        max_nodes = 4
+
+    def _tokens(text: str) -> set:
+        return {
+            t for t in re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", str(text or "").lower()).split()
+            if len(t) > 1
+        }
+
+    def _jaccard(a: set, b: set) -> float:
+        if not a or not b:
+            return 0.0
+        return len(a & b) / len(a | b)
+
+    nl_positions = [i for i, s in enumerate(steps) if s.get("node_type") == "nl2sql"]
+    if len(nl_positions) <= 1:
+        return steps
+
+    keep: dict[int, int] = {}          # nl_position → its kept twin (self when kept)
+    kept_tokens: dict[int, set] = {}   # kept nl_position → token set
+    order: list[int] = []
+    for pos in nl_positions:
+        toks = _tokens(steps[pos].get("description") or steps[pos].get("name") or "")
+        twin = next(
+            (k for k in order if _jaccard(kept_tokens[k], toks) >= 0.8), None
+        )
+        if twin is not None:
+            keep[pos] = twin
+        else:
+            keep[pos] = pos
+            kept_tokens[pos] = toks
+            order.append(pos)
+    dropped = {p for p in nl_positions if keep[p] != p}
+    over = len(order) - max_nodes
+    if over > 0:
+        # Cap: the LAST authored nl2sql nodes are the overflow; re-point each
+        # at the nearest kept predecessor so dependents still get data.
+        kept_order = order[:max_nodes]
+        for pos in order[max_nodes:]:
+            prev_kept = [k for k in kept_order if k < pos]
+            keep[pos] = prev_kept[-1] if prev_kept else kept_order[0]
+        dropped.update(p for p in nl_positions if keep[p] != p)
+    if not dropped:
+        return steps
+
+    # Rebuild: pass 1 — kept nodes in order; pass 2 — resolve dropped nodes
+    # to their twin's NEW index; pass 3 — remap positional dependencies.
+    old_to_new: dict[int, int] = {}
+    new_steps: list = []
+    for i, s in enumerate(steps):
+        if i in dropped:
+            continue
+        old_to_new[i] = len(new_steps)
+        new_steps.append(s)
+    for i in dropped:
+        twin = keep[i]
+        old_to_new[i] = old_to_new.get(twin, 0)
+    for s in new_steps:
+        deps = s.get("dependencies")
+        if isinstance(deps, list) and all(isinstance(d, int) for d in deps):
+            s["dependencies"] = sorted({old_to_new[d] for d in deps if d in old_to_new})
+    logger.info(
+        "plan: bounded nl2sql planning — merged/capped %d node(s), %d remain",
+        len(dropped), len([s for s in new_steps if s.get("node_type") == "nl2sql"]),
+    )
+    return new_steps
+
+
 def _build_report_decomposition_steps(task_spec: dict) -> list | None:
     """Decompose a multi-dimension report question into per-dimension queries.
 
@@ -633,12 +718,63 @@ def generate_plan(
     # Default plan based on task kind (fallback if LLM fails)
     default_plan = _build_default_plan(task_spec, agent_name)
 
+    # 2B-4: structured scope knowledge from the failed attempt. Two carriers:
+    # the corrective LLM prompt gets an explicit scope block; the DEFAULT
+    # (planner-OFF) corrective plan gets a scope_hint on its data step so the
+    # replacement nl2sql node's table selection prefers the verified global
+    # dataset. Both flag-gated (SCHEMA_CORRECTIVE_SCOPE_HINTS_ENABLED);
+    # enforcement is unchanged and stays the final authority.
+    _scope_hint_flag = False
+    try:
+        from app.config import settings as _s
+
+        _scope_hint_flag = getattr(
+            _s, "SCHEMA_CORRECTIVE_SCOPE_HINTS_ENABLED", False
+        )
+    except Exception:  # pragma: no cover — degrade to off
+        _scope_hint_flag = False
+    _scope_failures = (
+        [
+            f for f in (failure_context or [])
+            if isinstance(f, dict)
+            and f.get("scope_check") in ("fail", "unavailable")
+        ]
+        if _scope_hint_flag
+        else []
+    )
+    if _scope_failures and _scope_hint_flag:
+        _scope_hint_text = " ".join(
+            str(f.get("scope_disclosure") or f.get("error") or "").strip()
+            for f in _scope_failures
+            if f.get("scope_disclosure") or f.get("error")
+        ).strip()
+        if _scope_hint_text:
+            for _stp in default_plan:
+                if _stp.get("node_type") == "nl2sql":
+                    _stp_inputs = dict(_stp.get("inputs") or {})
+                    _stp_inputs["scope_hint"] = _scope_hint_text
+                    _stp["inputs"] = _stp_inputs
+
     if failure_context:
         # ── Corrective re-plan: ask the LLM to recover from failures ────
         failures_text = "\n".join(
             f"- Step '{f.get('name')}' ({f.get('node_type', 'tool')}): {f.get('error', 'unknown error')}"
             for f in failure_context
         )
+        _scope_block = ""
+        if _scope_failures:
+            _scope_lines = "\n".join(
+                f"- Step '{f.get('name')}': scope verdict = {f.get('scope_check')}"
+                + (f"; refusal: {f.get('scope_disclosure')}" if f.get("scope_disclosure") else "")
+                for f in _scope_failures
+            )
+            _scope_block = (
+                "\nScope context (structured, from scope enforcement):\n"
+                + _scope_lines
+                + "\nThe revised plan MUST NOT repeat the refused selection. "
+                "When the data source holds a verified company-wide dataset, "
+                "the revised data step must read that one instead."
+            )
         system_prompt = f"""The previous execution plan failed. Generate a CORRECTIVE plan that still accomplishes the original task despite these failures.
 
 Original task kind: {task_kind}
@@ -646,7 +782,7 @@ Entities: {json.dumps(entities)}
 Failed steps:
 {failures_text}
 {context_block}
-{skill_catalog_block}
+{skill_catalog_block}{_scope_block}
 Generate a revised plan as a JSON array of steps. Each step has:
 - node_type: "skill" | "tool" | "nl2sql" | "sandbox" | "agent"
 - name: short name for the step
@@ -863,6 +999,17 @@ Respond with ONLY a JSON array."""
                     len(_nl_nodes), _dims,
                 )
                 plan_steps = _dec
+    # ── Bounded report planning (2026-10-29 root-cause fix) ─────────────
+    # The incident turn ran NINE nl2sql pipelines (483s), several with
+    # duplicate intents, each independently re-interpreting the schema —
+    # latency AND inconsistent measures. Two deterministic bounds, applied
+    # to ANY plan author and ANY database:
+    #   1. duplicate-intent merge: a later nl2sql node whose question is a
+    #      near-duplicate of an earlier node's is dropped (its dependents
+    #      re-point at the earlier node);
+    #   2. cap: at most NL2SQL_MAX_REPORT_NODES (default 4) nl2sql nodes per
+    #      turn, keeping the authored order (totals-first by construction).
+    plan_steps = _bound_nl2sql_plan(plan_steps)
     plan.is_acyclic = _validate_acyclic(plan_steps)
 
     # Create PlanNode records — AFTER sanitization/strip/decomposition, so

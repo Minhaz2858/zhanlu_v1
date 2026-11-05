@@ -184,6 +184,35 @@ def _resolve_bound_kb_ids(context: dict | None) -> list[str]:
     return list(context.get("bound_kb_ids") or [])
 
 
+def _extract_sql_tables(sql: str) -> list[str]:
+    """Extract the table names a SQL statement references (P0-2 helper).
+
+    sqlglot first (engine-agnostic parse), regex fallback for dialects
+    sqlglot cannot read. Used by the execute_query source-verification
+    parity check — never by generation.
+    """
+    try:
+        import sqlglot
+        from sqlglot import exp as _exp
+
+        parsed = sqlglot.parse_one(sql)
+        names = sorted({
+            t.name for t in parsed.find_all(_exp.Table) if t.name
+        })
+        if names:
+            return names
+    except Exception:
+        pass
+    import re as _re
+
+    return sorted({
+        m.group(1).split(".")[-1].strip("`\"[]")
+        for m in _re.finditer(
+            r"\b(?:FROM|JOIN)\s+`?([\w.]+)`?", sql, _re.IGNORECASE,
+        )
+    })
+
+
 def _require_kb_id(args: dict, context: dict | None) -> tuple[str | None, dict | None]:
     """Pick a KB id from `data_source_id` / `kb_id` / context.
 
@@ -220,24 +249,12 @@ def _resolve_user_policy(
 ) -> "access_policy_service.ResolvedPolicy":
     """Resolve the current user's data-access policy from tool context.
 
-    Reads ``resource_type`` / ``resource_id`` (injected by
-    ``prepare_data_source_runtime``) and the bound KB set.  When the context
-    lacks resource scoping (e.g. the builtin Data Agent), returns a full-access
-    policy — policies only apply to shared users of a project/agent.
+    P0-1 (2026-10-30): delegates to the shared
+    ``access_policy_service.resolve_policy_from_context`` so the FSM node and
+    the delegation fastpath resolve policies IDENTICALLY (single source of
+    truth — the previous private copy here is why they drifted).
     """
-    if not context or not user_id:
-        return access_policy_service.ResolvedPolicy(has_policies=False)
-    resource_type = context.get("resource_type")
-    resource_id = context.get("resource_id")
-    if not resource_type or not resource_id:
-        return access_policy_service.ResolvedPolicy(has_policies=False)
-    return access_policy_service.resolve_user_policies(
-        db,
-        user_id=user_id,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        bound_kb_ids=_resolve_bound_kb_ids(context),
-    )
+    return access_policy_service.resolve_policy_from_context(db, user_id, context)
 
 
 def _apply_schema_policy(
@@ -514,6 +531,31 @@ async def _describe_schema(
                 _attach_readiness(result, _source_readiness(db, str(kb_id)))
         except Exception:
             logger.debug("describe_schema: readiness tag skipped", exc_info=True)
+        # Security: feed the REAL schema identifiers into the live-event
+        # sanitizer's dynamic supplement. After this, any live-event param
+        # mentioning one of these tables/views is scrubbed even when the
+        # static prefix patterns (erp_/v_) don't match. Registration is
+        # snake_case-gated so ordinary prose is never corrupted.
+        try:
+            from app.services.agent_loop.sse_builders import (
+                register_sensitive_identifiers,
+            )
+
+            _names: list[str] = []
+            if isinstance(result.get("table"), str):
+                _names.append(result["table"])
+            for _e in result.get("tables", []) or []:
+                if isinstance(_e, dict) and isinstance(_e.get("table"), str):
+                    _names.append(_e["table"])
+            if isinstance(result.get("all_table_names"), list):
+                _names.extend(
+                    t for t in result["all_table_names"] if isinstance(t, str)
+                )
+            if _names:
+                register_sensitive_identifiers(_names)
+        except Exception:  # noqa: BLE001 — hardening must never break the tool
+            logger.debug("describe_schema: identifier registration skipped",
+                         exc_info=True)
     return result
 
 
@@ -919,6 +961,48 @@ async def _execute_query(
     if refusal:
         return refusal
 
+    # ── Per-turn SQL execution budget (2026-10-29 cycle 2) ──
+    # The data-agent sub-loop and raw-SQL exploratory calls reach the
+    # warehouse through THIS handler, not through NLAnswerService.answer,
+    # so the shared-boundary budget would never see them. Same registry,
+    # same scope resolution. The attempt is charged ATOMICALLY UPFRONT
+    # (try_acquire): a rejected or failed execution counts exactly like a
+    # successful one.
+    try:
+        from app.services.db import turn_sql_budget as _tsb
+
+        _tsb_scope = _tsb.resolve_scope(
+            turn_id=(context or {}).get("turn_id"),
+            conversation_id=(context or {}).get("conversation_id"),
+        )
+        _tsb_base = int(getattr(_settings, "NL2SQL_MAX_TURN_SQL_QUERIES", 6) or 0)
+        _tsb_window = float(getattr(_settings, "NL2SQL_TURN_BUDGET_WINDOW_S", 1800) or 1800)
+        _tsb_ok, _tsb_used, _tsb_max = _tsb.try_acquire(
+            _tsb_scope, _tsb_base, _tsb_window
+        )
+        if not _tsb_ok:
+            logger.warning(
+                "execute_query: turn SQL budget exhausted for scope %s (%d/%d attempts)",
+                _tsb_scope, _tsb_used, _tsb_max,
+            )
+            return {
+                "success": False,
+                "error_kind": "turn_sql_budget_exhausted",
+                "error": (
+                    f"This turn has already spent {_tsb_used} of {_tsb_max} allowed "
+                    "SQL attempts against the data source. Do not run further queries "
+                    "in this turn — answer from the results already gathered and "
+                    "clearly disclose anything that was not queried. If more data is "
+                    "essential, ask the user to send a follow-up message."
+                ),
+                "source_id": kb_id,
+                "turn_sql_budget": {"max": _tsb_max, "used": _tsb_used},
+            }
+    except Exception as _tsb_err:  # fail-open — budget must never break queries
+        logger.debug("execute_query: budget check skipped: %s", _tsb_err)
+        _tsb_scope = None
+        _tsb_window = 1800.0
+
     # ── OCI stage 5: deterministic, semantics-preserving rewrite ──
     # Runs BEFORE every downstream validation so policy / schema / execution
     # checks see the statement that actually runs. The tool path IS the
@@ -988,6 +1072,71 @@ async def _execute_query(
                 "sql": sql,
             }
 
+    # ── P0-2 (2026-10-30, audit D1): source verification parity ──────────
+    # The delegation sub-loop authors raw SQL and executes it HERE — bypassing
+    # the P-SV source-verification gate that guards every NLAnswerService
+    # generation (table role/grain compatibility, archive-twin authority).
+    # When the caller's context carries the QUESTION (the sub-loop threads it
+    # via ``context["question"]``), run the same gate on the SQL's tables
+    # before execution. No question → intent cannot be judged → skip (never
+    # guess intent; a false refusal is worse than an unjudged pass here).
+    _sv_guidance: str | None = None
+    _sv_question = str((context or {}).get("question") or args.get("question") or "").strip()
+    if _sv_question and getattr(_settings, "NL2SQL_SOURCE_VERIFICATION_ENABLED", True):
+        try:
+            from app.services.db.source_verification import verify_sources
+
+            _sv_tables = _extract_sql_tables(sql)
+            if _sv_tables:
+                _sv = verify_sources(db, kb_id, _sv_question, _sv_tables)
+                if _sv.clarify:
+                    logger.warning(
+                        "execute_query: source verification clarify on KB %s: %s",
+                        kb_id, _sv.clarify,
+                    )
+                    return {
+                        "success": False,
+                        "error_kind": "source_verification_clarify",
+                        "error": _sv.clarify,
+                        "source_verification": {
+                            "clarify": _sv.clarify,
+                            "disclosures": _sv.disclosures,
+                            "removed_tables": _sv.removed_tables,
+                            "added_tables": _sv.added_tables,
+                        },
+                        "sql": sql,
+                        "source_id": kb_id,
+                    }
+                _removed_in_sql = [
+                    t for t in _sv.removed_tables if t in set(_sv_tables)
+                ]
+                if _removed_in_sql:
+                    logger.warning(
+                        "execute_query: SQL references excluded source(s) %s "
+                        "on KB %s", _removed_in_sql, kb_id,
+                    )
+                    return {
+                        "success": False,
+                        "error_kind": "source_verification_refused",
+                        "error": (
+                            "This query references source(s) excluded by "
+                            "source verification: "
+                            + ", ".join(sorted(set(_removed_in_sql)))
+                            + ". " + " ".join(_sv.disclosures)
+                            + " Re-run against the authoritative source."
+                        ),
+                        "source_verification": {
+                            "disclosures": _sv.disclosures,
+                            "removed_tables": _sv.removed_tables,
+                            "added_tables": _sv.added_tables,
+                        },
+                        "sql": sql,
+                        "source_id": kb_id,
+                    }
+                _sv_guidance = _sv.guidance
+        except Exception as _sv_err:  # fail-open — never break a query here
+            logger.debug("execute_query: source verification skipped: %s", _sv_err)
+
     # ── Structural schema validation (flag-gated): feedback, not a gate ──
     # Returns available-columns so the LLM self-corrects in the agent loop.
     # Enabled globally via SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED OR per-agent via
@@ -1048,16 +1197,52 @@ async def _execute_query(
 
     def _do_work() -> dict:
         svc = QueryService(db)
+        # 2B-3 (review check 2): the delegation/DataAgent sub-loop authors raw
+        # SQL and executes it HERE — the execution gate's scope_authorization
+        # check must not be canonical-path-only. Same rule as the P0-2 gate
+        # above: a question in context is required to judge scope (never
+        # guess intent); without one the check records not-applicable.
+        if _sv_question and getattr(
+            _settings, "SCHEMA_SCOPE_AUTHORIZATION_ENABLED", False
+        ):
+            try:
+                from app.services.db.schema_classification import (
+                    resolve_question_scope_from_facts,
+                )
+                from app.services.db.table_retrieval import (
+                    _load_classification_facts,
+                )
+
+                _scope_facts = _load_classification_facts(db, [kb_id])
+                if _scope_facts:
+                    svc.scope_context = {
+                        "classification_facts": _scope_facts,
+                        "question_scope": resolve_question_scope_from_facts(
+                            _sv_question, _scope_facts
+                        ),
+                    }
+            except Exception as _scope_ctx_err:  # degrade, never block
+                logger.debug(
+                    "execute_query: scope context unavailable: %s",
+                    _scope_ctx_err,
+                )
         return svc.execute(kb_id, sql, max_rows=max_rows, timeout_s=timeout_s)
 
     try:
         result = await asyncio.to_thread(_do_work)
+        # (The attempt was already charged by try_acquire above — failures
+        # and successes both count, so no post-hoc registration here.)
         # Surface the effective timeout policy so the model (and the user)
         # know the statement ran unbounded vs. bounded.
         result["timeout_policy"] = (
             "unlimited" if getattr(_settings, "QUERY_TIMEOUT_DISABLED", False)
             else f"{timeout_s}s"
         )
+        # P0-2: source-verification guidance travels with the result so the
+        # sub-loop LLM sees grain/authority facts exactly like the funnel's
+        # SQL prompt does.
+        if _sv_guidance:
+            result["source_verification_guidance"] = _sv_guidance
         hints = _build_validation_hints(db, kb_id, result)
         if hints:
             result["validation_hints"] = hints
@@ -1381,6 +1566,10 @@ async def _answer_from_database(
             # OCI P1-6: enable the planner's structured multi-turn state when
             # the caller carries a conversation context (stateless otherwise).
             conversation_id=(context or {}).get("conversation_id"),
+            # 2026-10-29: per-turn SQL budget scope — one user message = one
+            # turn. The chat loop threads the assistant message id; without
+            # it the budget falls back to conversation scope (2x window).
+            turn_id=(context or {}).get("turn_id"),
         )
         return _attach_grounding_envelope(_attach_readiness(result, readiness))
     except DriverUnavailable as e:

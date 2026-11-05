@@ -11,6 +11,14 @@ import { streamAgentResponse, createAgentConversation } from '@/api/agentEnhance
 import { detectLang } from '@/lib/detectLang';
 import { saveDraft, clearDraft } from '@/lib/draftManager';
 import { usePersistentStream } from '@/lib/PersistentStreamContext';
+// E-1 (enterprise reliability audit, 2026-11-01): shared answer-lifecycle
+// helpers — D5 reset-carrying deltas, invariant-I1 empty-replace rejection,
+// and the D4 backend-owns-content attestation (single writer of record).
+import {
+  applyContentReplace,
+  applyDelta,
+  backendOwnsContent,
+} from '@/lib/answerLifecycle';
 
 /**
  * MobileChatPage — mobile-first chat (方案A).
@@ -159,6 +167,10 @@ export default function MobileChatPage() {
     let finalArtifacts = [];
     let reasoningText = '';
     let traceSteps = [];
+    // E-1 (enterprise reliability audit, 2026-11-01): carry the server
+    // reset/retry markers as state (D5 parity with desktop Chat.jsx).
+    let pendingReset = false;
+    let answerPersisted = false;
 
     try {
       streamState.startStreaming();
@@ -184,18 +196,31 @@ export default function MobileChatPage() {
         }
         if (!evt || typeof evt !== 'object') continue;
         if (evt.type === 'delta' && typeof evt.content === 'string') {
-          fullContent += evt.content;
+          // D5 parity: the first delta after a server reset REPLACES the
+          // stale accumulator instead of appending (no transient doubling).
+          const applied = applyDelta(fullContent, evt.content, pendingReset);
+          fullContent = applied.content;
+          pendingReset = applied.pendingReset;
           if (genNow === genRef.current) {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id ? { ...m, content: fullContent } : m
             ));
             scrollToBottom();
           }
+        } else if (evt.type === 'content_reset') {
+          // D5 parity: server re-streams the answer from scratch. Invariant
+          // I1 keeps the visible text; the next delta replaces the
+          // accumulator (state-carrying reset).
+          pendingReset = true;
         } else if (evt.type === 'content_replace' && typeof evt.content === 'string') {
           // D2 (2026-08-20): post-nudge re-synthesis. REPLACE the whole
           // bubble instead of appending so leaked nudge-reply prose never
           // shows; the `done` event carries the authoritative final content.
-          fullContent = evt.content;
+          // Invariant I1 (desktop parity): an EMPTY replacement is rejected —
+          // it marks a pending reset instead of blanking a valid answer.
+          const applied = applyContentReplace(fullContent, evt.content);
+          fullContent = applied.content;
+          pendingReset = !applied.accepted;
           if (genNow === genRef.current) {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id ? { ...m, content: fullContent } : m
@@ -236,6 +261,10 @@ export default function MobileChatPage() {
           if (typeof evt.content === 'string' && evt.content.trim()) {
             fullContent = evt.content;
           }
+          // D4 parity: honor the backend's persistence attestation — when
+          // the server owns the content, the client must not re-write it
+          // (single writer of record).
+          answerPersisted = evt.answer_persisted === true;
           const convMsgs = evt.conversation?.messages || [];
           const lastAssistant = [...convMsgs].reverse().find((m) => m?.role === 'assistant');
           if (Array.isArray(lastAssistant?.tool_calls) && lastAssistant.tool_calls.length) {
@@ -290,9 +319,16 @@ export default function MobileChatPage() {
       }
     }
     // Persist the final assistant message + tool_calls + artifacts.
+    // D4 parity: when the backend attested `answer_persisted`, it is the
+    // writer of record — the client updates only metadata it owns.
+    const _clientOwnsContent = !backendOwnsContent({
+      hadTerminal: true,
+      doneContent: fullContent,
+      answerPersisted,
+    });
     try {
       await base44.entities.ChatMessage.update(aiMsg.id, {
-        content: fullContent,
+        ...(_clientOwnsContent ? { content: fullContent } : {}),
         ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
         ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
       });

@@ -119,7 +119,12 @@ def test_rls_policies_treat_empty_setting_as_unpinned_source():
     policy_re = re.compile(
         r"CREATE POLICY tenant_isolation.*?USING\s*\((.*?)\)\s*", re.DOTALL
     )
-    for name in ("apply_rls.sql", "apply_rls_batch4.sql", "apply_rls_batch5.sql"):
+    for name in (
+        "apply_rls.sql",
+        "apply_rls_batch4.sql",
+        "apply_rls_batch5.sql",
+        "apply_rls_batch6.sql",
+    ):
         path = scripts / name
         if not path.exists():
             continue
@@ -132,3 +137,84 @@ def test_rls_policies_treat_empty_setting_as_unpinned_source():
                 f"{name}: policy bypass must treat '' as unpinned "
                 f"(SET LOCAL sticky-GUC quirk) — got: {body[:120]}"
             )
+
+
+def test_every_org_scoped_table_has_rls_or_is_allowlisted():
+    """LIVE-ONLY (Postgres) durability guard for the RLS membrane.
+
+    The audit found 17 tables deliberately outside RLS with no service-layer
+    enforcement; after the 2026-10-13/14 rollout + batch 6 (2026-10-25) the
+    remaining org-scoped tables that are NOT RLS-protected are intentionally
+    global (cross-tenant catalogs) or sharing tables whose ACL IS the isolation
+    mechanism. This test pins that invariant: EVERY table carrying an `org_id`
+    column must be RLS-protected (relrowsecurity on the live DB) OR be on the
+    explicit allowlist. It catches the exact bug class that let `cad_revisions`
+    (migration 101, added after the rollout) escape the membrane.
+
+    SQLite cannot run RLS — skip there; verified live against Postgres.
+    """
+    import pytest
+
+    from app.config import settings
+
+    if settings.is_sqlite:
+        pytest.skip("RLS coverage guard requires Postgres (verified live)")
+
+    from app.database import engine
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        org_tables = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT table_name FROM information_schema.columns "
+                    "WHERE table_schema='public' AND column_name='org_id'"
+                )
+            )
+        }
+        rls_tables = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT relname FROM pg_class "
+                    "WHERE relnamespace='public'::regnamespace AND relrowsecurity"
+                )
+            )
+        }
+
+    # Tables that are org-scoped by schema but intentionally outside RLS:
+    #   organizations          tenant root — global slug/email resolution; RLS
+    #                           would break tenant creation/login.
+    #   tools, external_agents, global cross-tenant catalogs — the per-org skill
+    #   external_skills,        namespacing work is the real fix; RLS here would
+    #   market_agents,          empty shared catalogs.
+    #   skill_sources
+    #   chat_shares,            sharing ACLs ARE the isolation mechanism; org RLS
+    #   resource_access_policies, could hide a grant's target from its grantee
+    #   resource_registry,      path. Service layer enforces org bounds; a future
+    #   resource_shares         custom policy is the long-term shape.
+    ALLOWLIST = {
+        "organizations",
+        "tools",
+        "external_agents",
+        "external_skills",
+        "market_agents",
+        "skill_sources",
+        "chat_shares",
+        "resource_access_policies",
+        "resource_registry",
+        "resource_shares",
+    }
+
+    missing = sorted(t for t in org_tables if t not in rls_tables and t not in ALLOWLIST)
+    assert not missing, (
+        "org-scoped tables escape the RLS membrane (no tenant_isolation "
+        "policy): " + ", ".join(missing) + ". Either enroll them in "
+        "scripts/apply_rls*.sql or add them to the allowlist with a rationale."
+    )
+    # Regression pin: cad_revisions must stay covered.
+    assert "cad_revisions" in rls_tables, (
+        "cad_revisions lost its tenant_isolation policy — re-apply "
+        "scripts/apply_rls_batch6.sql"
+    )

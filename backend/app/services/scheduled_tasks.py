@@ -254,6 +254,57 @@ async def _run_procedural_promotion_cycle() -> None:
 TURN_HEALTH_MONITOR_INTERVAL = 6 * 3600  # every 6 hours
 
 
+# ---- Invocation orphan recovery (H1-B, mission §23) ------------------------
+
+# Delegation wall-clock caps are minutes, so any `running` invocation older
+# than one hour is by definition orphaned. Frequent check, near-zero cost.
+INVOCATION_ORPHAN_RECOVERY_INTERVAL = 600  # every 10 minutes
+INVOCATION_ORPHAN_MAX_AGE_SECONDS = 3600
+
+
+async def _run_invocation_orphan_recovery_cycle() -> None:
+    """Reconcile `running` invocations whose worker disappeared (truthful
+    `failed` + recovery metadata — never fabricated completion)."""
+    from app.database import SessionLocal
+    from app.services.agent_invocations import recover_orphaned_invocations
+
+    db = SessionLocal()
+    try:
+        recover_orphaned_invocations(
+            db, max_age_seconds=INVOCATION_ORPHAN_MAX_AGE_SECONDS
+        )
+    finally:
+        db.close()
+
+
+# ---- Plan-node recovery (Phase 3.5 P1: automatic task resumption) -----------
+
+# Node-level complement to invocation orphan recovery: stale running PlanNodes
+# are decided by durable_execution.resume_decision (approval-gated → paused,
+# destructive → honest failed, read-only → re-eligible) and audited as
+# ObservationRecords. Same single-worker guarantee as the rest of this file.
+PLAN_NODE_RECOVERY_INTERVAL = 1800  # every 30 minutes (== stale TTL)
+
+
+async def _run_plan_node_recovery_cycle() -> None:
+    from app.config import settings
+
+    if not getattr(settings, "PLAN_NODE_RECOVERY_ENABLED", True):
+        return
+    from app.database import SessionLocal
+    from app.services.recovery_resumer import recover_interrupted_plans
+
+    db = SessionLocal()
+    try:
+        summary = recover_interrupted_plans(db)
+        if summary.get("examined_running"):
+            logger.info("[plan_node_recovery] %s", summary)
+    except Exception:
+        logger.exception("[plan_node_recovery] Cycle failed")
+    finally:
+        db.close()
+
+
 async def _run_turn_health_monitor_cycle() -> None:
     """Scan recent assistant turns for fallback-collapse symptoms."""
     from app.config import settings
@@ -798,6 +849,19 @@ def start_scheduled_tasks() -> None:
         loop.create_task(
             _periodic_task("turn_health_monitor", TURN_HEALTH_MONITOR_INTERVAL, _run_turn_health_monitor_cycle),
             name="sched-turn-health-monitor",
+        ),
+        # H1-B (mission §23): reconcile `running` invocations orphaned by a
+        # worker crash/restart. Frequent + cheap (one indexed query); the
+        # recovery itself is truthful (failed + metadata, never completed).
+        loop.create_task(
+            _periodic_task("invocation_orphan_recovery", INVOCATION_ORPHAN_RECOVERY_INTERVAL, _run_invocation_orphan_recovery_cycle),
+            name="sched-invocation-orphan-recovery",
+        ),
+        # Phase 3.5 P1: automatic node-level resumption (consumes
+        # durable_execution.resume_decision over persisted PlanNodes).
+        loop.create_task(
+            _periodic_task("plan_node_recovery", PLAN_NODE_RECOVERY_INTERVAL, _run_plan_node_recovery_cycle),
+            name="sched-plan-node-recovery",
         ),
     ]
 

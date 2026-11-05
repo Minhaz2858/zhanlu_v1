@@ -27,7 +27,7 @@ from app.config import settings
 from app.services.llm_router import LLMEndpoint
 from app.services.llm_service import (
     llm_headers, llm_url, get_model, model_has_fixed_temperature,
-    maybe_enable_parallel_tool_calls,
+    maybe_enable_parallel_tool_calls, llm_endpoint_headers,
 )
 from app.services.prompt_caching import apply_cache_control
 from app.services.api_error_classifier import classify_api_error
@@ -92,7 +92,7 @@ async def call_llm_with_reliability(
     if endpoint is not None:
         _model = endpoint.model_id
         _url = endpoint.base_url.rstrip("/") + "/chat/completions"
-        _headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+        _headers = llm_endpoint_headers(endpoint.api_key)
     else:
         _model = get_model()
         _url = llm_url()
@@ -121,7 +121,10 @@ async def call_llm_with_reliability(
     if not model_has_fixed_temperature(_model):
         payload["temperature"] = temperature
     if tools:
-        payload["tools"] = tools
+        # P0 pilot fix (2026-10-31): same strict-provider schema patch as the
+        # main loops (see app/services/tool_schema_sanitize.py).
+        from app.services.tool_schema_sanitize import sanitize_tool_schemas
+        payload["tools"] = sanitize_tool_schemas(tools)
     # P0-2: parallel tool calls capability injection (default off; gated
     # on the shared helper so anthropic models never receive the field).
     maybe_enable_parallel_tool_calls(payload, _model)
@@ -159,10 +162,21 @@ async def call_llm_with_reliability(
     data = resp.json()
     choice = data["choices"][0]
     message = choice.get("message", {})
+    # Part 1.3: surface provider token usage so sub-agent cost can be metered
+    # (previously the `usage` block was discarded). Never invent numbers — pass
+    # through exactly what the provider returned (0 when absent). `model` lets
+    # the caller attribute + price the consumption.
+    _usage = data.get("usage") or {}
     return {
         "content": message.get("content", "") or "",
         "tool_calls": message.get("tool_calls", []) or [],
         "reasoning": message.get("reasoning_content") or "",
+        "usage": {
+            "prompt_tokens": int(_usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(_usage.get("completion_tokens") or 0),
+            "total_tokens": int(_usage.get("total_tokens") or 0),
+        },
+        "model": data.get("model") or getattr(endpoint, "model_id", None),
     }
 
 

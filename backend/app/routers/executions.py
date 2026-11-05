@@ -21,6 +21,10 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.deps import get_db, get_current_user_required
 from app.models.user import User
+from app.services.agent_invocations import build_agent_tree
+from app.services.agent_collaboration.shared_evidence import (
+    get_registry, get_evidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,177 @@ class CreateExecutionRequest(BaseModel):
     user_message: str
     user_id: Optional[str] = None
     mode: str = "dynamic"
+
+
+def _user_org(user: User) -> str:
+    """Authenticated org identity (IC-5, FSM tenant isolation).
+
+    The org ALWAYS comes from the authenticated user — never from the
+    request body. A user without an org fails closed.
+    """
+    org_id = getattr(user, "org_id", None)
+    if not org_id:
+        raise HTTPException(
+            status_code=403,
+            detail="ERR_ORG_MISSING: authenticated user has no organization context",
+        )
+    return org_id
+
+
+def _org_scoped_execution(execution_id: str, db: Session, user: User):
+    """Fetch an execution confined to the caller's org (IC-5).
+
+    Foreign-org executions are indistinguishable from nonexistent ones
+    (404) — identity is enforced at the resolution boundary, before any
+    plan approval, rejection, observation read, clone or replay.
+    """
+    from app.models.execution import Execution
+
+    execution = (
+        db.query(Execution)
+        .filter(
+            Execution.id == execution_id,
+            Execution.org_id == _user_org(user),
+        )
+        .first()
+    )
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return execution
+
+
+def _owns_conversation(db: Session, conversation_id: str, user: User) -> bool:
+    """Best-effort tenant/project isolation for conversation-scoped data.
+
+    AgentInvocation rows always carry the real ``user_id`` and the conversation
+    (via ``conversations``) belongs to a single user/org. We treat a conversation
+    as viewable by a user if (a) they own at least one invocation in it, or
+    (b) an execution tied to it lives under their org. This keeps the execution
+    tree / evidence reads confined to authorized conversations (no cross-tenant
+    leak) without a dedicated conversation model dependency.
+    """
+    from app.models.agent_invocation import AgentInvocation
+
+    hit = (
+        db.query(AgentInvocation.id)
+        .filter(
+            AgentInvocation.conversation_id == conversation_id,
+            AgentInvocation.user_id == user.id,
+            AgentInvocation.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if hit:
+        return True
+    from app.models.execution import Execution
+
+    ex = (
+        db.query(Execution.id)
+        .filter(
+            Execution.conversation_id == conversation_id,
+            Execution.org_id == _user_org(user),
+        )
+        .first()
+    )
+    return ex is not None
+
+
+def _serialize_evidence(item) -> dict:
+    if item is None:
+        return None
+    data = item.to_dict() if hasattr(item, "to_dict") else dict(item)
+    # Security: the shared-evidence contract promises peers/frontend receive a
+    # *reference* — provenance metadata + compact findings + validation status —
+    # never the raw result rows. ``to_dict()`` leaks ``query_provenance.rows``
+    # (and any nested ``rows`` payload), so strip it here at the REST boundary.
+    # Findings stay (they are compact, curated numbers, not raw DB rows).
+    qp = data.get("query_provenance")
+    if isinstance(qp, dict):
+        cleaned = {k: v for k, v in qp.items() if k != "rows"}
+        if "rows" in qp:
+            cleaned.setdefault("row_count", len(qp["rows"]) if isinstance(qp["rows"], (list, tuple)) else None)
+        data["query_provenance"] = cleaned
+    # Belt-and-braces: never ship a top-level "rows" payload either.
+    data.pop("rows", None)
+    return data
+
+
+from datetime import datetime  # noqa: E402 — used by the tree turn filter
+
+@router.get("/executions/tree", tags=["executions"])
+def agent_execution_tree(
+    execution_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    started_after: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P2 Phase 3 — multi-agent execution tree for visualization.
+
+    Reuses existing AgentInvocation records (no new event storage). Scoped by
+    conversation_id + user_id; an execution_id is resolved to its conversation
+    under the caller's org. Returns the parent→child tree plus a compact summary.
+
+    ``started_after`` (consistency audit D1, ISO-8601, optional) scopes the
+    tree to a single turn so one user turn renders exactly its own executions.
+    """
+    if not execution_id and not conversation_id:
+        raise HTTPException(
+            status_code=400,
+            detail="ERR_BAD_REQUEST: provide execution_id or conversation_id",
+        )
+    awaiting_approval = False
+    conv_id = conversation_id
+    if execution_id:
+        ex = _org_scoped_execution(execution_id, db, user)
+        conv_id = ex.conversation_id
+        awaiting_approval = bool(getattr(ex, "needs_approval", False))
+    if not conv_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if not _owns_conversation(db, conv_id, user):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _started_after = None
+    if started_after:
+        try:
+            _started_after = datetime.fromisoformat(
+                started_after.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="ERR_BAD_REQUEST: invalid started_after (ISO-8601 expected)",
+            )
+    return build_agent_tree(
+        db, conversation_id=conv_id, user_id=user.id,
+        awaiting_approval=awaiting_approval,
+        started_after=_started_after,
+    )
+
+
+@router.get("/executions/evidence", tags=["executions"])
+def agent_evidence(
+    conversation_id: str = None,
+    evidence_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P2 Phase 3 — read shared-evidence references (reuses the existing registry).
+
+    Exposes the in-process/Redis evidence registry over REST so the frontend
+    Evidence panel can resolve an evidence_id. Scoped by conversation ownership.
+    Never returns raw result rows — only the reference + compact findings.
+    """
+    if not conversation_id:
+        raise HTTPException(
+            status_code=400, detail="ERR_BAD_REQUEST: conversation_id is required",
+        )
+    if not _owns_conversation(db, conversation_id, user):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if evidence_id:
+        item = get_evidence(conversation_id, evidence_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Evidence not found")
+        return _serialize_evidence(item)
+    return [_serialize_evidence(i) for i in get_registry().list_items(conversation_id)]
 
 
 @router.post("/executions")
@@ -49,14 +224,27 @@ def create_execution(
         )
 
     from app.services.synexia.fsm import SynexiaFSM, ExecutionRequest
+    from app.services.synexia.identity import resolve_agent_in_org
+
+    org_id = _user_org(user)
+    # Resolve the agent within the CALLER'S org (IC-1). An unknown agent
+    # does not fail the request — the FSM fails closed on capabilities —
+    # but the resolved PK (when present) threads through as agent_id so
+    # memories/config/profiles can never be resolved cross-org.
+    agent = resolve_agent_in_org(
+        db, agent_name=req.agent_name, org_id=org_id,
+    )
 
     fsm = SynexiaFSM(db)
     result = fsm.run(ExecutionRequest(
         conversation_id=req.conversation_id,
         agent_name=req.agent_name,
+        agent_id=agent.id if agent else None,
         user_message=req.user_message,
         user_id=user.id,
         mode=req.mode,
+        org_id=org_id,
+        app_id=getattr(user, "app_id", None) or "default-app",
     ))
 
     return {
@@ -81,11 +269,7 @@ def get_execution(
     user: User = Depends(get_current_user_required),
 ):
     """Get execution state, plan, and observations."""
-    from app.models.execution import Execution
-
-    execution = db.query(Execution).filter(Execution.id == execution_id).first()
-    if not execution:
-        raise HTTPException(status_code=404, detail="Execution not found")
+    execution = _org_scoped_execution(execution_id, db, user)
 
     result = execution.to_dict()
     result["observations"] = [o.to_dict() for o in execution.observations]
@@ -96,6 +280,23 @@ def get_execution(
         result["plan"] = plan_data
 
     return result
+
+
+@router.get("/executions/{execution_id}/agent-tree", tags=["executions"])
+def agent_execution_tree_by_execution(
+    execution_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """P2 Phase 3 — execution tree scoped by execution (org-confined)."""
+    execution = _org_scoped_execution(execution_id, db, user)
+    conv_id = execution.conversation_id
+    if not conv_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return build_agent_tree(
+        db, conversation_id=conv_id, user_id=user.id,
+        awaiting_approval=bool(getattr(execution, "needs_approval", False)),
+    )
 
 
 class ReplayRequest(BaseModel):
@@ -130,9 +331,9 @@ def replay_execution(
     if req is None:
         req = ReplayRequest()
 
-    source = db.query(Execution).filter(Execution.id == execution_id).first()
-    if source is None:
-        raise HTTPException(status_code=404, detail="Execution not found")
+    # IC-5: the source must belong to the caller's org — foreign plans
+    # are rejected BEFORE any clone or execute_plan_nodes call.
+    source = _org_scoped_execution(execution_id, db, user)
     if source.plan is None or not source.plan.nodes:
         raise HTTPException(422, "Source execution has no plan to replay")
 
@@ -146,6 +347,9 @@ def replay_execution(
         task_spec=source.task_spec,
         current_state="plan",
         started_at=_dt.now(_tz.utc),
+        # The clone is the CALLER'S execution — never inherit a stale org
+        # (the model default would silently collapse it to default-org).
+        org_id=_user_org(user),
     )
     db.add(clone)
     db.flush()
@@ -207,11 +411,7 @@ def get_plan(
     user: User = Depends(get_current_user_required),
 ):
     """Get the execution plan (PlanDAG)."""
-    from app.models.execution import Execution
-
-    execution = db.query(Execution).filter(Execution.id == execution_id).first()
-    if not execution:
-        raise HTTPException(status_code=404, detail="Execution not found")
+    execution = _org_scoped_execution(execution_id, db, user)
     if not execution.plan:
         raise HTTPException(status_code=404, detail="No plan for this execution")
 
@@ -227,11 +427,7 @@ def approve_plan(
     user: User = Depends(get_current_user_required),
 ):
     """Approve the execution plan (pass the GATE state)."""
-    from app.models.execution import Execution
-
-    execution = db.query(Execution).filter(Execution.id == execution_id).first()
-    if not execution:
-        raise HTTPException(status_code=404, detail="Execution not found")
+    execution = _org_scoped_execution(execution_id, db, user)
     if not execution.plan:
         raise HTTPException(status_code=404, detail="No plan for this execution")
 
@@ -248,11 +444,7 @@ def reject_plan(
     user: User = Depends(get_current_user_required),
 ):
     """Reject the execution plan."""
-    from app.models.execution import Execution
-
-    execution = db.query(Execution).filter(Execution.id == execution_id).first()
-    if not execution:
-        raise HTTPException(status_code=404, detail="Execution not found")
+    execution = _org_scoped_execution(execution_id, db, user)
     if not execution.plan:
         raise HTTPException(status_code=404, detail="No plan for this execution")
 
@@ -270,10 +462,8 @@ def get_observations(
     user: User = Depends(get_current_user_required),
 ):
     """Get observation records for an execution."""
-    from app.models.execution import Execution, ObservationRecord
+    from app.models.execution import ObservationRecord  # noqa: F401
 
-    execution = db.query(Execution).filter(Execution.id == execution_id).first()
-    if not execution:
-        raise HTTPException(status_code=404, detail="Execution not found")
+    execution = _org_scoped_execution(execution_id, db, user)
 
     return [o.to_dict() for o in execution.observations]

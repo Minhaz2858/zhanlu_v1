@@ -164,8 +164,72 @@ export default function Sidebar() {
   // of route. Inline style (not a Tailwind class) keeps
   // `transition-[width]` animatable for both manual collapse and tier
   // changes, while flex-shrink-0 keeps the rail from being squeezed.
+  //
+  // User-resizable: a drag handle on the right edge lets the user widen
+  // the rail so long project-group labels (e.g. "EXECUTIVE MANAGEMENT
+  // & STRATEGY") aren't truncated. The chosen width persists in
+  // localStorage; double-click the handle to reset to the tier default.
   const { settings } = useScreenSize();
-  const sidebarWidth = collapsed ? 64 : settings.sidebarWidth;
+  const SIDEBAR_MIN_WIDTH = 220;
+  const SIDEBAR_MAX_WIDTH = 480;
+  const SIDEBAR_WIDTH_KEY = 'sidebar:userWidth';
+  const [userWidth, setUserWidth] = useState(() => {
+    try {
+      const v = parseInt(window.localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
+      return Number.isFinite(v) && v >= SIDEBAR_MIN_WIDTH && v <= SIDEBAR_MAX_WIDTH ? v : null;
+    } catch {
+      return null;
+    }
+  });
+  const [resizing, setResizing] = useState(false);
+  const resizeStartRef = useRef(null);
+  const sidebarWidth = collapsed ? 64 : (userWidth || settings.sidebarWidth);
+
+  function handleResizeStart(e) {
+    e.preventDefault();
+    resizeStartRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    setResizing(true);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleResizeMove);
+    window.addEventListener('mouseup', handleResizeEnd);
+  }
+
+  function handleResizeMove(e) {
+    const start = resizeStartRef.current;
+    if (!start) return;
+    const next = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, start.startWidth + (e.clientX - start.startX)));
+    setUserWidth(next);
+  }
+
+  function handleResizeEnd() {
+    resizeStartRef.current = null;
+    setResizing(false);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    window.removeEventListener('mousemove', handleResizeMove);
+    window.removeEventListener('mouseup', handleResizeEnd);
+    setUserWidth((w) => {
+      try {
+        if (w == null) window.localStorage.removeItem(SIDEBAR_WIDTH_KEY);
+        else window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
+      } catch { /* storage unavailable — non-fatal */ }
+      return w;
+    });
+  }
+
+  function handleResizeReset() {
+    setUserWidth(null);
+    try { window.localStorage.removeItem(SIDEBAR_WIDTH_KEY); } catch { /* ignore */ }
+  }
+
+  // Safety: if the component unmounts mid-drag, restore the document.
+  useEffect(() => () => {
+    window.removeEventListener('mousemove', handleResizeMove);
+    window.removeEventListener('mouseup', handleResizeEnd);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
 
   // ── Dashboard accordion (REMOVED 2026-08-27) ─────────────────────
   // The Market Dashboard section nav (Dashboard/Overview/Upstream/
@@ -178,6 +242,17 @@ export default function Sidebar() {
       style={{ width: sidebarWidth }}
       className="relative flex h-screen shrink-0 flex-col border-r border-sidebar-border bg-sidebar transition-[width] duration-200"
     >
+      {/* Drag-to-resize handle on the right edge. Hidden while collapsed. */}
+      {!collapsed && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          onMouseDown={handleResizeStart}
+          onDoubleClick={handleResizeReset}
+          title={lang === 'en' ? 'Drag to resize · double-click to reset' : '拖动调整宽度 · 双击恢复默认'}
+          className={`absolute inset-y-0 right-0 z-20 w-1.5 cursor-col-resize touch-none transition-colors hover:bg-primary/25 ${resizing ? 'bg-primary/30' : ''}`}
+        />
+      )}
       <div className={`flex items-center px-3 py-5 ${collapsed ? 'justify-center' : 'gap-2.5'}`}>
         {collapsed ? (
           <button

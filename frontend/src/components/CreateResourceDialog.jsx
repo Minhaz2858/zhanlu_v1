@@ -16,7 +16,9 @@ import {
 import { useLanguage } from '@/lib/LanguageProvider';
 import { base44 } from '@/api/base44Client';
 
-const TEMPLATES = {
+// 2026-11-02: exported for the full-page New Automation Task form
+// (pages/NewAutomationTask.jsx) — same templates, single source.
+export const TEMPLATES = {
   automation: {
     zh: [
       { type: 'data_sync', name: '每日销售数据同步', desc: '将ERP系统销售数据每日定时同步至业务数据库，支持增量更新与异常告警', schedule: 'daily', scheduleTime: '08:00' },
@@ -105,6 +107,54 @@ function getTypeOptions(resourceType, t) {
   if (resourceType === 'kb') return t.detail.kbTypes;
   return null;
 }
+
+const OUTPUT_FORMAT_OPTIONS = [
+  { value: 'html', label: 'HTML report' },
+  { value: 'docx', label: 'Word document' },
+  { value: 'pptx', label: 'PowerPoint deck' },
+  { value: 'pdf', label: 'PDF document' },
+  { value: 'md', label: 'Markdown' },
+  { value: 'xlsx', label: 'Excel workbook' },
+  { value: 'csv', label: 'CSV' },
+  { value: 'json', label: 'JSON' },
+];
+
+/**
+ * Build the automation chat prefill — extracted (2026-11-02) so the
+ * full-page New Automation Task form (pages/NewAutomationTask.jsx) and this
+ * dialog produce BYTE-IDENTICAL prefills. The downstream create_automation
+ * tool parses these exact lines (output format raw value in parens, skills
+ * list, llm-informed-tick keyword, project + data-source summary).
+ */
+export function buildAutomationPrefill({
+  name, schedule, outputFormat, skills, llmInformedTick,
+  project, projectDataSources, description, isEn, t,
+}) {
+  const lines = [];
+  lines.push(isEn ? 'Create a new Automation Task:' : '帮我新建一个自动化任务：');
+  if (name) lines.push(`- ${isEn ? 'Name' : '名称'}：${name}`);
+  if (schedule) lines.push(`- ${isEn ? 'Schedule' : '调度规则'}：${schedule}`);
+  const opt = OUTPUT_FORMAT_OPTIONS.find((o) => o.value === outputFormat) || OUTPUT_FORMAT_OPTIONS[0];
+  lines.push(`- ${isEn ? 'Output format' : '输出格式'}：${opt.label} (${opt.value})`);
+  if (skills?.length) lines.push(`- ${isEn ? 'Skills' : '技能'}：${skills.join(', ')}`);
+  if (llmInformedTick) lines.push(`- ${isEn ? 'LLM-informed tick' : '智能调度'}: yes`);
+  const projName = project === 'global' ? (isEn ? 'Ungrouped' : '未分组') : project;
+  lines.push(`- ${isEn ? 'Project' : '所属项目'}：${projName}`);
+  if (projectDataSources?.length > 0) {
+    const summary = projectDataSources
+      .slice(0, 6)
+      .map((kb) => kb.name)
+      .join(isEn ? ', ' : '、');
+    const extra = projectDataSources.length > 6
+      ? `${isEn ? ' and ' : '，'}${projectDataSources.length - 6}${t.createDialog.dataSourcesMore}`
+      : '';
+    lines.push(`- ${isEn ? 'Available data sources' : '可用数据源'}：${summary}${extra}`);
+  }
+  if (description) lines.push(`- ${isEn ? 'Description' : '描述'}：${description}`);
+  return lines.join('\n');
+}
+
+export { buildTemplateString };
 
 export default function CreateResourceDialog({ open, onOpenChange, resourceType, onAgentBuild, defaultProjectName, defaultProjectId }) {
   const { t, lang } = useLanguage();
@@ -205,6 +255,14 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
   }
 
   function buildPrefill() {
+    // 2026-11-02: automation prefills come from the shared builder so the
+    // full-page form and this dialog stay byte-identical.
+    if (resourceType === 'automation') {
+      return buildAutomationPrefill({
+        name, schedule, outputFormat, skills, llmInformedTick,
+        project, projectDataSources, description, isEn, t,
+      });
+    }
     const lines = [];
     if (resourceType === 'dashboard') {
       // Intent chip — the literal "dashboard" keyword deterministically
@@ -317,17 +375,6 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
   }
 
   const canSubmit = name.trim().length > 0;
-
-  const OUTPUT_FORMAT_OPTIONS = [
-    { value: 'html', label: 'HTML report' },
-    { value: 'docx', label: 'Word document' },
-    { value: 'pptx', label: 'PowerPoint deck' },
-    { value: 'pdf', label: 'PDF document' },
-    { value: 'md', label: 'Markdown' },
-    { value: 'xlsx', label: 'Excel workbook' },
-    { value: 'csv', label: 'CSV' },
-    { value: 'json', label: 'JSON' },
-  ];
 
   // The locked-project path is the new default when the dialog is
   // opened from inside a project. The legacy free-choice dropdown

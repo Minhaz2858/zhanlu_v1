@@ -408,10 +408,24 @@ _TOOLS: list[tuple[str, dict, callable, str, str]] = [
 ]
 
 # Register all tools at module-import time (same pattern as edia_delegation_tools.py)
+# P0 pilot fix (2026-10-31): wrap schemas in the OpenAI function envelope.
+# The _TOOLS entries previously stored BARE parameter schemas (no name, no
+# envelope) — registry entry.schema came out as {"type":"object",...} and
+# strict providers (DashScope qwen) rejected the ENTIRE request with
+# 400 "'function' is a required property - tools.N" for any agent whose
+# toolset included a universal_* tool. DeepSeek tolerated the shape, which
+# is why this only surfaced on the qwen path.
 for _name, _schema, _handler, _desc, _emoji in _TOOLS:
     registry.register(
         name=_name,
-        schema=_schema,
+        schema={
+            "type": "function",
+            "function": {
+                "name": _name,
+                "description": _desc,
+                "parameters": _schema,
+            },
+        },
         handler=_handler,
         category="universal_analytics",
         toolset="universal_analytics",

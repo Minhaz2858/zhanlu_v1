@@ -417,10 +417,23 @@ async def execute_tool_with_retry(
     """Execute a tool with result-level retry + one-shot argument self-heal.
 
     Wraps :func:`execute_tool`. When the result is a FAILURE DICT classified
-    as transient by :func:`_is_retryable`, retries with exponential backoff
-    (``base_delay * 2**n``, capped at ``TOOL_RETRY_MAX_DELAY``). When retries
-    are exhausted and the failure looks arg-fixable, asks the LLM for
-    corrected arguments and re-executes exactly once.
+    as transient by the shared classifier
+    (:mod:`app.services.execution_recovery`, Phase 2.1), retries with
+    exponential backoff (``base_delay * 2**n``, capped at
+    ``TOOL_RETRY_MAX_DELAY``). When retries are exhausted and the failure is
+    arg-fixable, asks the LLM for corrected arguments and re-executes exactly
+    once.
+
+    Phase 2.1 guarantees:
+    - permission/authorization failures are TERMINAL — never retried, never
+      reformulated;
+    - mutating (consequential) tools are never retried without idempotency
+      evidence;
+    - a per-turn healing budget (``context["_healing_budget"]``) bounds TOTAL
+      recovery actions across the whole task;
+    - every returned failure dict carries ``failure_category`` /
+      ``recovery_hint`` / ``recovery_outcome`` — structured feedback for the
+      ReAct observation instead of prose-only errors.
 
     Results carrying ``failure_kind`` (emitted by the handler-level
     ``_execute_with_reliability`` after ITS retries are exhausted) are NOT
@@ -429,31 +442,75 @@ async def execute_tool_with_retry(
     Never raises; the last failure dict is returned on exhaustion.
     """
     from app.config import settings
+    from app.services.execution_recovery import (
+        HealingBudget,
+        RecoveryPolicy,
+        classify_failure,
+        should_reformulate,
+        should_retry,
+    )
 
     _tool_start = _time.monotonic()
 
-    retries_left = max_attempts if max_attempts is not None else settings.TOOL_RETRY_MAX_ATTEMPTS
+    policy = RecoveryPolicy.from_settings()
+    retries_left = (
+        max_attempts
+        if max_attempts is not None
+        else max(1, policy.max_attempts_per_call or settings.TOOL_RETRY_MAX_ATTEMPTS)
+    )
     delay = base_delay if base_delay is not None else settings.TOOL_RETRY_BASE_DELAY
+
+    # Phase 2.1: mutating/idempotent identity from the shared classification
+    # tables (same source the loop guardrails use — no second registry),
+    # EXTENDED with the risk resolver: a tool whose resolved risk tier is
+    # write/destructive is consequential even when absent from the static
+    # tables (e.g. ontology action tools like create_po_draft).
+    from app.services.tool_loop_guardrails import IDEMPOTENT_TOOL_NAMES, MUTATING_TOOL_NAMES
+
+    _mutating = tool_name in MUTATING_TOOL_NAMES
+    try:
+        from app.services.permissions.approval import resolve_risk
+
+        if not _mutating and resolve_risk(tool_name, arguments).level in ("write", "destructive"):
+            _mutating = True
+    except Exception:  # noqa: BLE001 — risk resolution is best-effort here
+        pass
+    _idempotent = tool_name in IDEMPOTENT_TOOL_NAMES
+    # Per-turn healing budget: honored when the caller wired one; a local
+    # budget otherwise (which then only bounds this single call).
+    healing_budget = (context or {}).get("_healing_budget")
+    if not isinstance(healing_budget, HealingBudget):
+        healing_budget = HealingBudget(max_healings=policy.max_healing_per_task)
 
     result = await execute_tool(tool_name, arguments, db, user_id, context=context)
 
+    classification = classify_failure(result, tool_name=tool_name, mutating=_mutating)
     retries_done = 0
     while (
         not result.get("success")
         and not result.get("requires_approval")
         and "failure_kind" not in result
-        and _is_retryable(result)
-        and retries_done < retries_left
+        and should_retry(
+            classification,
+            attempts=retries_done,
+            mutating=_mutating,
+            idempotent=_idempotent,
+            task_healing_budget_left=healing_budget.remaining > 0,
+            max_attempts=retries_left,
+        )
     ):
         sleep_s = min(delay * (2 ** retries_done), settings.TOOL_RETRY_MAX_DELAY)
         logger.info(
-            "Tool '%s' transient failure dict (retry %d/%d) in %.1fs: %s",
-            tool_name, retries_done + 1, retries_left, sleep_s,
+            "Tool '%s' transient failure [%s] (heal %d/%d, task budget left %d) in %.1fs: %s",
+            tool_name, classification.category.value, retries_done + 1, retries_left,
+            healing_budget.remaining, sleep_s,
             result.get("error", "?"),
         )
         await asyncio.sleep(sleep_s)
         retries_done += 1
+        healing_budget.consume(tool_name)
         result = await execute_tool(tool_name, arguments, db, user_id, context=context)
+        classification = classify_failure(result, tool_name=tool_name, mutating=_mutating)
 
     if (
         not result.get("success")
@@ -461,8 +518,16 @@ async def execute_tool_with_retry(
         and "failure_kind" not in result
         and settings.TOOL_REFORMULATE_MAX_ATTEMPTS > 0
         and getattr(settings, "TOOL_ARG_REFORMULATION_ENABLED", True)
-        and _is_arg_fixable_failure(result)
+        and healing_budget.remaining > 0
+        and (
+            should_reformulate(classification)
+            or (
+                classification.category.value == "unknown_error"
+                and _is_arg_fixable_failure(result)
+            )
+        )
     ):
+        healing_budget.consume(tool_name)
         corrected = await _reformulate_tool_args(
             tool_name, arguments, result.get("error", "")
         )
@@ -474,6 +539,11 @@ async def execute_tool_with_retry(
             healed = await execute_tool(tool_name, corrected, db, user_id, context=context)
             if healed.get("success"):
                 healed["reformulated"] = True
+            else:
+                healed_cls = classify_failure(healed, tool_name=tool_name, mutating=_mutating)
+                healed.setdefault("failure_category", healed_cls.category.value)
+                healed.setdefault("recovery_hint", healed_cls.recovery_hint)
+                healed.setdefault("recovery_outcome", healed_cls.outcome.value)
             _get_tracer().record_tool_call(
                 tool_name=tool_name,
                 args_hash=hashlib.sha256(str(arguments).encode()).hexdigest()[:16],
@@ -490,6 +560,13 @@ async def execute_tool_with_retry(
         success=bool(result.get("success")),
         error=result.get("error") if not result.get("success") else None,
     )
+    # Phase 2.1: structured failure feedback rides on the observation the
+    # ReAct loop injects back into the conversation (G4) — the model no
+    # longer re-derives the failure category from raw prose.
+    if not result.get("success") and not result.get("failure_category"):
+        result["failure_category"] = classification.category.value
+        result["recovery_hint"] = classification.recovery_hint
+        result["recovery_outcome"] = classification.outcome.value
     return result
 
 
@@ -667,7 +744,24 @@ async def execute_tool(
         # them removes the per-call approval gate that previously made the
         # agent_builder unusable. The actual user consent is the click in
         # the UI that started the conversation.
-        if perm_result.requires_confirmation and agent_name in SYSTEM_META_AGENTS:
+        # Phase 2.7 (2026-10-31): the bypass is NO LONGER unconditional —
+        # DESTRUCTIVE-tier calls always require human approval (mission:
+        # "consequential operations must use existing approval mechanisms";
+        # "never bypass authorization"). Flag EXEC_APPROVAL_DESTRUCTIVE_ALWAYS,
+        # default True; lower tiers keep the existing behavior.
+        _meta_bypass = agent_name in SYSTEM_META_AGENTS
+        if (
+            _meta_bypass
+            and getattr(settings, "EXEC_APPROVAL_DESTRUCTIVE_ALWAYS", True)
+            and perm_result.risk == "destructive"
+        ):
+            logger.warning(
+                "Tool '%s' is DESTRUCTIVE — meta-agent bypass withheld for '%s' "
+                "(human approval required)",
+                tool_name, agent_name,
+            )
+            _meta_bypass = False
+        if perm_result.requires_confirmation and _meta_bypass:
             logger.info(
                 "Tool '%s' bypassed requires_confirmation for system meta-agent '%s'",
                 tool_name, agent_name,
@@ -1648,6 +1742,21 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
     Scheduled button would never appear in the chat header (the frontend
     detects automation per-session via this FK).
     """
+    # Lifecycle separation cutover (TS §4.1, AUTOMATION_CREATION_V2):
+    # this legacy handler bypasses the Control Plane (direct ACTIVE task
+    # insert, no confirmation). Under the cutover it REFUSES — creation
+    # must go through propose_automation + the user's explicit confirm.
+    from app.config import settings as _settings
+    if getattr(_settings, "AUTOMATION_CREATION_V2", True):
+        return {
+            "success": False,
+            "error": (
+                "create_automation is retired: automations are created as "
+                "DRAFTS via propose_automation and activated only by the "
+                "user's explicit confirmation on the review card. Call "
+                "propose_automation with the structured spec instead."
+            ),
+        }
     schedule = (args.get("schedule") or "manual").strip()
     # Resolve the timezone the cron should be interpreted in: explicit arg
     # wins, else the user's saved preference, else UTC. Fixes P0-6 so
@@ -2056,6 +2165,35 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
     if not isinstance(fields, dict):
         return {"success": False, "error": "'fields' must be an object"}
 
+    # Lifecycle separation cutover (2026-11-03, AUTOMATION_CREATION_V2):
+    # activation and datasource rebinding are GATED operations — activation
+    # happens only via the confirmation transaction / the Center toggle, and
+    # a datasource is bound only through the draft with the user's explicit
+    # choice. Cosmetic field edits stay allowed for existing tasks.
+    from app.config import settings as _settings
+    if getattr(_settings, "AUTOMATION_CREATION_V2", True):
+        if str(fields.get("status", "")).lower() == "active":
+            return {
+                "success": False,
+                "error": (
+                    "update_automation cannot activate an automation: "
+                    "activation requires the user's explicit confirmation "
+                    "(review card confirm, or the Automation Center "
+                    "toggle). Update the DRAFT via update_automation_draft "
+                    "instead."
+                ),
+            }
+        if fields.get("data_source_id"):
+            return {
+                "success": False,
+                "error": (
+                    "update_automation cannot bind a datasource: the "
+                    "datasource must be chosen explicitly by the user on "
+                    "the draft (update_automation_draft spec_patch."
+                    "datasource) — never rebound silently."
+                ),
+            }
+
     task = db.query(AutomationTask).filter(
         AutomationTask.id == task_id,
         AutomationTask.is_deleted == False,
@@ -2189,6 +2327,7 @@ def _list_knowledge_bases(args: dict, db: Session, user_id: str | None) -> dict:
         # "no databases" even though the UI shows them connected.
         from sqlalchemy import func as _func, or_
         from app.models.project import Project
+        from app.services.project_kb_membership import project_kb_link_subquery
         name_clauses = []
         proj = db.query(Project).filter(
             Project.id == project_id,
@@ -2196,7 +2335,16 @@ def _list_knowledge_bases(args: dict, db: Session, user_id: str | None) -> dict:
         ).first()
         if proj is not None and proj.name and proj.name.lower() != "global":
             name_clauses.append(_func.lower(KnowledgeBase.project) == proj.name.lower())
-        q = q.filter(or_(KnowledgeBase.project_id == project_id, *name_clauses))
+        q = q.filter(or_(
+            KnowledgeBase.project_id == project_id,
+            # Multi-project sharing: also include explicitly linked KBs.
+            KnowledgeBase.id.in_(project_kb_link_subquery(
+                project_id,
+                org_id=getattr(proj, "org_id", None) if proj else None,
+                app_id=getattr(proj, "app_id", None) if proj else None,
+            )),
+            *name_clauses,
+        ))
     kbs = q.order_by(KnowledgeBase.name.asc()).all()
 
     # End the read-only transaction on the tool session. Without this the

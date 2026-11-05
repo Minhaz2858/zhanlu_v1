@@ -443,11 +443,17 @@ def test_store_writes_nothing(db):
 
 def test_stats_reports_the_foundation(db):
     kb = _kb(db, "stat-kb")
-    _table(db, kb, "t", description="described", domain="D")
+    t = _table(db, kb, "t", description="described", domain="D")
     _table(db, kb, "u", description="")
+    # P0-5 (2026-10-30): columns_described now counts COLUMN rows with
+    # descriptions (the old implementation counted described TABLES, which
+    # misreported column coverage by ~15x); the table count moved to
+    # tables_described.
+    _column(db, t, "amount")
     s = SemanticStore(db, [kb]).stats()
     assert s["relations"] == 2
     assert s["columns_described"] == 1
+    assert s["tables_described"] == 1
     assert TIER_RUNTIME in s["tiers"]
 
 

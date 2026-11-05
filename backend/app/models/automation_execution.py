@@ -6,7 +6,7 @@ row with the result. The frontend reads this table to render the "Past runs"
 panel in AutomationTaskDetail and to download generated files.
 """
 
-from sqlalchemy import String, Text, JSON, ForeignKey, DateTime, Integer
+from sqlalchemy import String, Text, JSON, ForeignKey, DateTime, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -14,6 +14,14 @@ from app.models.base import TimestampedBase
 
 class AutomationExecution(TimestampedBase):
     __tablename__ = "automation_executions"
+    __table_args__ = (
+        # §1.3 identity model: one attempt row per (occurrence, attempt).
+        # Partial — legacy rows (occurrence_id NULL) are exempt.
+        UniqueConstraint(
+            "occurrence_id", "attempt",
+            name="uq_automation_executions_occurrence_attempt",
+        ),
+    )
 
     # The parent task that was fired.
     automation_task_id: Mapped[str] = mapped_column(
@@ -72,3 +80,21 @@ class AutomationExecution(TimestampedBase):
     # (success or failure). NULL when no email was sent (disabled, no
     # recipients, or notify_on mismatch). Used for dedup + observability.
     email_notified_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    # ── R5 occurrence identity + cancellation metadata (TS §1.3) ────────
+    # Logical occurrence identity: executions are ATTEMPTS against an
+    # occurrence; UNIQUE(occurrence_id, attempt) enforces one attempt row
+    # per attempt number. NULL for legacy rows (backfilled idempotently in
+    # migration 127).
+    occurrence_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Chains attempts WITHIN one occurrence (retry #1 points at attempt 0's
+    # execution). parent_execution_id (above) chains recursion across
+    # occurrences — the two are distinct by design (audit fix F-13-review).
+    retry_of_execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Typed cancellation metadata (§3.2): user | admin | definition_deleted |
+    # org_deactivated | parent_cancelled | superseded.
+    cancel_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    cancelled_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    cancelled_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # R5 persisted-retry scheduling: run-when for queued retry rows (the
+    # in-memory backoff timer is retired). NULL for fresh fires.
+    next_attempt_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)

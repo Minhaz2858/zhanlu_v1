@@ -11,7 +11,9 @@ via asyncio.gather().
 import asyncio
 import json
 import logging
+import time
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -293,6 +295,136 @@ async def _verify_sub_agent_output(task: str, response: str) -> dict | None:
         return None
 
 
+async def _maybe_review_and_refine(
+    task: str,
+    agent_name: str,
+    db: Session,
+    user_id: str | None,
+    endpoint: "LLMEndpoint | None",
+    context: dict | None,
+    result: dict,
+) -> dict:
+    """P2 (Part 1): optionally review a successful sub-agent result and, if the
+    reviewer reports missing evidence, run a BOUNDED targeted re-investigation.
+
+    Fact-safe by construction: the reviewer only ASSESSES provided material and
+    never invents figures. The targeted follow-ups are real delegations (governed
+    by the broker) to the SAME specialist with a narrow task derived from the
+    reviewer's gap — they add real findings, they do not fabricate them.
+
+    Selective: caller must have set ``context["_enable_review"]`` (via
+    delegate_task review=True). Never runs for simple questions.
+    """
+    from app.services.agent_collaboration.reviewer import review_findings
+    from app.services.agent_collaboration.shared_evidence import get_registry
+
+    _conv = (context or {}).get("conversation_id")
+    _items = []
+    if _conv:
+        try:
+            _items = get_registry().list_items(_conv)
+        except Exception:  # noqa: BLE001
+            _items = []
+
+    _report = review_findings(
+        question=task, content=result.get("response") or "",
+        evidence_items=_items, endpoint=endpoint,
+    )
+    result["review"] = _report.to_dict()
+
+    _max = int(getattr(settings, "COLLAB_REVIEW_MAX_RETRIES", 1))
+    if _report.needs_evidence and _max > 0:
+        _extra: list = []
+        # Bounded: at most 2 gaps, a single follow-up round. No review loops.
+        for _gap in _report.needs_evidence[:2]:
+            _narrow = (
+                f"Targeted follow-up to the original task: {task[:200]}. "
+                f"Investigate SPECIFICALLY this gap identified by review: {_gap}"
+            )
+            _ctx = dict(context or {})
+            _ctx.pop("_enable_review", None)  # do not re-review the follow-up
+            try:
+                _sub = await _run_sub_agent(_narrow, agent_name, db, user_id, 3, endpoint, context=_ctx)
+                if _sub.get("success"):
+                    _extra.append(f"[follow-up: {_gap}] {_sub.get('response') or ''}")
+                    if _sub.get("evidence_ids"):
+                        result.setdefault("evidence_ids", []).extend(_sub["evidence_ids"])
+            except Exception as _e:  # noqa: BLE001
+                logger.debug("delegate: review follow-up failed (non-fatal): %s", _e)
+        if _extra:
+            result["response"] = (result.get("response") or "") + "\n\n" + "\n".join(_extra)
+            # One re-review after gathering the targeted findings.
+            _items2 = get_registry().list_items(_conv) if _conv else []
+            _report2 = review_findings(
+                question=task, content=result.get("response") or "",
+                evidence_items=_items2, endpoint=endpoint,
+            )
+            result["review"] = _report2.to_dict()
+
+    # P1.4 (Phase 1): attach the STRUCTURED replan decision so the parent LLM
+    # observes an explicit verdict → action mapping (gather missing evidence /
+    # revise / resolve contradictions) with the concrete gaps named verbatim.
+    # Advisory only — never fabricates; the existing bounded targeted
+    # re-investigation above remains the active mechanism. Flag-gated.
+    if getattr(settings, "REVIEWER_REPLAN_GUIDANCE_ENABLED", True) and isinstance(result.get("review"), dict):
+        try:
+            from app.services.synexia.replan_policy import evaluate_reviewer_findings
+
+            result["review_guidance"] = evaluate_reviewer_findings(result["review"])
+        except Exception:  # noqa: BLE001 — guidance must never break delegation
+            logger.debug("reviewer guidance evaluation failed", exc_info=True)
+    # Phase 2.2/2.3: attach the EXECUTION DECISION — the structured
+    # observation → action mapping the decision model computes from the
+    # reviewer findings (11-value taxonomy, no chain-of-thought).
+    try:
+        from app.services.execution_decisions import decision_from_review
+
+        result["execution_decision"] = decision_from_review(
+            result.get("review") if isinstance(result.get("review"), dict) else None,
+            specialist_available=True,  # the broker gates the actual delegation
+            objective=task,
+        ).to_dict()
+    except Exception:  # noqa: BLE001 — decision attachment is advisory
+        logger.debug("execution decision attachment failed", exc_info=True)
+    return result
+
+
+def _published_agent_candidates(db: Session | None) -> list[dict]:
+    """Phase 2.4: published AgentApps as fallback-selection candidates.
+
+    Light read-only directory scan (name + description) — the SAME authority
+    gate as ``_resolve_agent_app`` / ``_list_available_agents``: only
+    ``status == "published"`` rows. Best-effort; errors yield an empty list
+    (the honest refusal), never a crash.
+    """
+    if db is None:
+        return []
+    try:
+        from app.models.agent_app import AgentApp
+
+        rows = (
+            db.query(AgentApp)
+            .filter(
+                AgentApp.is_deleted == False,  # noqa: E712
+                AgentApp.status == "published",
+            )
+            .all()
+        )
+        return [
+            {
+                "name": r.name,
+                "description": (r.description or "")[:300] if hasattr(r, "description") else "",
+                "published": True,
+                "kind": "specialist_agent",
+                "source": "agent_directory",
+            }
+            for r in rows
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("published agent scan failed (non-fatal): %s", exc)
+        return []
+
+
 async def _delegate_task(
     args: dict,
     db: Session,
@@ -307,29 +439,87 @@ async def _delegate_task(
     max_iterations = min(args.get("max_iterations", settings.DELEGATE_MAX_ITERATIONS), _delegate_clamp)
     endpoint: LLMEndpoint | None = (context or {}).get("endpoint")
 
+    # P2 (Part 1): selective fact-safe review. The caller opts in per-delegation
+    # (review=True). We copy the context (never mutate the caller's dict) and flag
+    # it so the child's result is reviewed after it returns. Simple questions do
+    # not set this, so they are never reviewed.
+    if bool(args.get("review")):
+        context = dict(context or {})
+        context["_enable_review"] = True
+
+    # Check for batch mode (list of tasks). P1 (2026-10-31, roadmap M1):
+    # items may be plain strings OR {task, agent_name, max_iterations}
+    # objects — heterogeneous multi-specialist fan-out in ONE call
+    # (Production ∥ Inventory ∥ Supply Chain). Missing agent_name on an
+    # item falls back to the call-level agent_name.
+    # BUGFIX (P1): the batch check must precede the empty-task rejection —
+    # the schema documents `tasks` as an "alternative to task", but the
+    # old order rejected every batch-only call with "task is required".
+    tasks = args.get("tasks")
+    if tasks and isinstance(tasks, list):
+        _norm: list[dict] = []
+        for _t in tasks:
+            if isinstance(_t, dict):
+                _norm.append({
+                    "task": str(_t.get("task") or "").strip(),
+                    "agent_name": (str(_t.get("agent_name") or "").strip() or agent_name),
+                    "max_iterations": _t.get("max_iterations", max_iterations),
+                })
+            else:
+                _norm.append({"task": str(_t), "agent_name": agent_name, "max_iterations": max_iterations})
+        _norm = [t for t in _norm if t["task"]]
+        if not _norm:
+            return {"success": False, "error": "task is required"}
+        return await _delegate_batch(_norm, db, user_id, endpoint, context)
+
     if not task:
         return {"success": False, "error": "task is required"}
 
-    # Check for batch mode (list of tasks)
-    tasks = args.get("tasks")
-    if tasks and isinstance(tasks, list):
-        return await _delegate_batch(tasks, agent_name, db, user_id, max_iterations, endpoint, context)
-
     # Single task
     result = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint, context=context)
+    # Phase 1.5 (Gap 4): record the ACTUAL execution strategy on the result so
+    # the parent LLM (and the recorded plan_meta) can be checked against what
+    # really ran — a single delegation IS a single_specialist execution.
+    if isinstance(result, dict):
+        result.setdefault("actual_execution_strategy", "single_specialist")
+    # Phase 2.4: on failure, discover AUTHORIZED alternative capabilities
+    # (published-only, capability-matched, failed agent excluded). Advisory —
+    # the parent LLM decides; destructive rerouting is refused upstream.
+    if isinstance(result, dict) and not result.get("success"):
+        try:
+            # Phase 3.2: semantic matching first (local embeddings, auto
+            # degrade to the Phase-2 lexical matcher when the model is
+            # unavailable). Published-only + exclusions are enforced inside.
+            from app.services.semantic_capability_match import (
+                semantic_select_specialists,
+            )
+
+            result["alternative_capabilities"] = semantic_select_specialists(
+                task,
+                _published_agent_candidates(db),
+                embedder="auto",
+                exclude={agent_name},
+            )
+        except Exception:  # noqa: BLE001 — fallback discovery is advisory
+            logger.debug("alternative capability discovery failed", exc_info=True)
+            result.setdefault("alternative_capabilities", [])
     return result
 
 
 async def _delegate_batch(
-    tasks: list[str],
-    agent_name: str,
+    tasks: list[dict],
     db: Session,
     user_id: str | None,
-    max_iterations: int,
     endpoint: LLMEndpoint | None = None,
     context: dict | None = None,
 ) -> dict:
     """Run multiple sub-agent tasks concurrently.
+
+    P1 (2026-10-31, roadmap M1): each item is ``{task, agent_name,
+    max_iterations}`` — DIFFERENT specialists can fan out in one call
+    (Production ∥ Inventory ∥ Supply Chain), each under its own AgentApp
+    prompt/toolset and its own authorized bindings. Concurrency, wall-clock
+    budgets, session isolation and invocation linking are unchanged.
 
     When the v3 FSM passes ``context["progress_emitter"]`` (mutable list) +
     ``context["step_counter"]`` ([int]), emits one activity_step pair per
@@ -352,8 +542,8 @@ async def _delegate_batch(
         )
 
     starts = [_time.monotonic() for _ in tasks]
-    for i, task in enumerate(tasks):
-        _emit(f"Sub-agent {i + 1}: {task[:60]}", "running")
+    for i, t in enumerate(tasks):
+        _emit(f"{t['agent_name']} #{i + 1}: {t['task'][:60]}", "running")
 
     # IBM MAS fix (2026-10-08): batch fan-out was unbounded — every sub-agent
     # launched at once, hammering the LLM provider and the DB pool. Bound it.
@@ -362,15 +552,24 @@ async def _delegate_batch(
     _max_conc = max(1, int(getattr(settings, "DELEGATE_MAX_CONCURRENT", 4)))
     _sem = _asyncio.Semaphore(_max_conc)
 
-    async def _run_one(i: int, task: str) -> dict:
+    async def _run_one(i: int, item: dict) -> dict:
         async with _sem:
             try:
-                res = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint, context=context)
+                res = await _run_sub_agent(
+                    item["task"], item["agent_name"], db, user_id,
+                    item["max_iterations"], endpoint, context=context,
+                )
             except Exception as exc:  # noqa: BLE001
-                res = {"success": False, "error": str(exc), "task": task}
+                res = {"success": False, "error": str(exc), "task": item["task"]}
+        # P1 contract: a failed child must carry status=failed even when the
+        # exception path skipped the _run_sub_agent contract fields.
+        if res.get("success"):
+            res.setdefault("status", "partial" if res.get("truncated") else "completed")
+        else:
+            res["status"] = "failed"
         dur = int((_time.monotonic() - starts[i]) * 1000)
         _emit(
-            f"Sub-agent {i + 1}: {task[:60]}",
+            f"{item['agent_name']} #{i + 1}: {item['task'][:60]}",
             "done" if res.get("success") else "failed",
             dur_ms=dur,
         )
@@ -382,21 +581,104 @@ async def _delegate_batch(
     for i, r in enumerate(results):
         if isinstance(r, Exception):
             batch_results.append({
-                "task": tasks[i][:100],
+                "task": tasks[i]["task"][:100],
+                "agent_name": tasks[i]["agent_name"],
                 "success": False,
+                "status": "failed",
                 "error": str(r),
             })
         else:
-            batch_results.append({
-                "task": tasks[i][:100],
+            item = {
+                "task": tasks[i]["task"][:100],
+                "agent_name": tasks[i]["agent_name"],
                 **r,
-            })
+            }
+            # P1 contract: EVERY result carries a machine-readable status.
+            # _run_sub_agent only sets it on the truncated path; the happy
+            # path (max iterations reached → final text) returns no status,
+            # so force one here — the UI evidence card and the parent LLM
+            # both key off it.
+            item.setdefault(
+                "status",
+                "failed" if not item.get("success")
+                else ("partial" if item.get("truncated") else "completed"),
+            )
+            batch_results.append(item)
 
+    # P1/P2 contract: batch-level summary the parent LLM cannot miss —
+    # completed/partial/failed counts, plus per-agent attribution.
+    # Honest partial-completion semantics (scenario F): a batch that produced
+    # SOME successful results but also had failures is "partial" (you got real
+    # findings from the survivors), not "failed". Only a batch with ZERO
+    # successes is "failed". Truncation on a survivor still yields "partial".
+    _succeeded = [b for b in batch_results if b.get("success")]
+    _failed = [b for b in batch_results if not b.get("success")]
+    _partial = [b for b in batch_results if b.get("success") and b.get("truncated")]
     return {
         "success": all(r.get("success", False) for r in batch_results),
+        # Phase 1.5 (Gap 4): a batch fan-out IS a multi_agent execution —
+        # recorded so plan_meta strategy claims stay checkable against reality.
+        "actual_execution_strategy": "multi_agent",
+        "status": (
+            "failed" if not _succeeded
+            else "partial" if (_failed or _partial)
+            else "completed"
+        ),
+        "summary": (
+            f"{len(batch_results) - len(_failed) - len(_partial)} completed, "
+            f"{len(_partial)} partial, {len(_failed)} failed"
+        ),
         "results": batch_results,
         "count": len(batch_results),
     }
+
+
+def _compute_child_cost(token_usage: dict | None) -> float | None:
+    """Estimate sub-agent cost ONLY from known pricing metadata.
+
+    Returns None when the model is not in the known pricing table — we never
+    invent a cost for an unknown model (Part 1.3: measured vs estimated). The
+    fallback rate in cost_service is intentionally NOT used here so that an
+    unpriced model stays explicitly unknown. Pricing infra is optional — if it
+    cannot be imported, metering simply yields None (never breaks delegation).
+    """
+    if not token_usage:
+        return None
+    _model = (token_usage.get("model") or "").lower()
+    _p = int(token_usage.get("prompt_tokens") or 0)
+    _c = int(token_usage.get("completion_tokens") or 0)
+    if not _model or (_p == 0 and _c == 0):
+        return None
+    try:
+        from app.services.governance.cost_service import TOKEN_COSTS
+        for key, rates in TOKEN_COSTS.items():
+            if key in _model:
+                return float((_p / 1000 * rates["prompt"]) + (_c / 1000 * rates["completion"]))
+    except Exception:  # pragma: no cover - pricing infra optional
+        return None
+    return None
+
+
+def _invocation_row_exists(db: Session, invocation_id: str) -> bool:
+    """True iff the AgentInvocation start row actually persisted.
+
+    Chat-experience repair: the finally-block fallback must only insert a
+    terminal row when the start row is genuinely ABSENT — a refused terminal
+    update on an existing row means first-terminal-wins, never a duplicate.
+    """
+    if not invocation_id:
+        return False
+    try:
+        from app.models.agent_invocation import AgentInvocation
+
+        row = (
+            db.query(AgentInvocation.id)
+            .filter(AgentInvocation.id == invocation_id)
+            .first()
+        )
+        return row is not None
+    except Exception:  # noqa: BLE001 — conservative: assume present
+        return True
 
 
 async def _run_sub_agent(
@@ -715,9 +997,53 @@ async def _run_sub_agent(
                 duration_ms=max(0, int((datetime.now(timezone.utc) - _started).total_seconds() * 1000)),
                 model_name=endpoint.model_id if endpoint else None,
                 tool_call_count=_it if isinstance(_it, int) else None,
+                parent_invocation_id=_child_context.get("parent_invocation_id"),
+                trace_id=_child_context.get("trace_id"),
+                delegation_mode="peer" if _requesting and _requesting != "general_assistant" else "supervisor",
+                # Part 1.3: persist measured token usage + (where reliable
+                # pricing exists) estimated cost. Unknown model => cost None.
+                token_usage=_tu,
+                cost_amount=_compute_child_cost(_tu),
             )
         except Exception as _inv_err:  # noqa: BLE001 — non-fatal
             logger.warning("delegate: invocation record failed (non-fatal): %s", _inv_err)
+    # ── Multi-agent milestone: terminal live event for the specialist's
+    # execution card (matches the finalized invocation row's state).
+    try:
+        from app.services.agent_loop.sse_builders import (
+            append_agent_execution_event,
+        )
+
+        _term_ok = bool(result.get("success")) and result.get("status") not in (
+            "failed", "partial",
+        )
+        append_agent_execution_event(
+            (context or {}).get("progress_emitter"),
+            "agent_completed" if _term_ok else "agent_failed",
+            {
+                "agent_execution_id": _agent_execution_id,
+                "parent_agent_execution_id": _child_context.get("parent_invocation_id"),
+                "agent_name": agent_name,
+                "agent_label": (_agent_app.name if _agent_app else agent_name),
+                "status": (
+                    "completed" if _term_ok
+                    else (result.get("status") or "failed")
+                ),
+                "duration_ms": max(
+                    0, int((datetime.now(timezone.utc) - _started).total_seconds() * 1000)
+                ),
+                "delegation_mode": (
+                    "peer" if _requesting and _requesting != "general_assistant"
+                    else "supervisor"
+                ),
+                "evidence_ids": (result.get("evidence_ids") or [])[:20],
+                "evidence_count": len(result.get("evidence_ids") or []),
+                "error": (str(result.get("error"))[:300]
+                          if result.get("error") and not _term_ok else None),
+            },
+        )
+    except Exception:  # noqa: BLE001 — observability never breaks delegation
+        pass
     return result
 
 
@@ -729,17 +1055,40 @@ async def _run_sub_agent_inner(
     max_iterations: int,
     endpoint: LLMEndpoint | None = None,
     context: dict | None = None,
+    agent_app=None,
+    wall_seconds: float | None = None,
 ) -> dict:
     """Run a sub-agent conversation with restricted tools."""
     from app.services.agent_prompts import get_system_prompt, _get_all_crud_schemas
 
-    # Build system prompt for the sub-agent
-    system_prompt = get_system_prompt(agent_name) or (
+    # P0-1 (2026-10-31, audit breakpoint 2): when the caller resolved a
+    # published AgentApp for this name, run the child with ITS OWN 5-layer
+    # prompt instead of the generic fallback. get_system_prompt already
+    # assembles the layered prompt from an AgentApp (agent_prompts.py).
+    system_prompt = get_system_prompt(agent_name, agent_app=agent_app) or (
         "You are a helpful AI assistant. Complete the task concisely and accurately."
     )
-    # Add delegation context
-    system_prompt += "\n\nYou are operating as a sub-agent with a restricted toolset. " \
-                     "Complete the task efficiently and return your findings."
+    # Add delegation context — the child-side finding contract (mission §2.4).
+    # Structured, grounded, honest: the supervisor synthesizes, so the child
+    # must return material it can cite and limitations it can flag.
+    system_prompt += (
+        "\n\nYou are operating as a delegated specialist inside a "
+        "multi-agent workflow.\n"
+        "TOOLS: your specialization determines your PRIORITY tools, not a "
+        "cap. If the task needs a tool that is not in your current list, "
+        "call `search_tools` to discover it, then invoke it — every "
+        "invocation is permission-checked, and a denied tool fails "
+        "honestly.\n"
+        "FINDING CONTRACT — return:\n"
+        "1. A direct answer to the delegated question first.\n"
+        "2. Grounding: cite the concrete source for every figure or claim "
+        "(table/query/file/document section). Do not state numbers you did "
+        "not retrieve this run.\n"
+        "3. Limitations: explicitly report missing data, failed tool calls, "
+        "or scope you could not cover — never paper over them.\n"
+        "4. Keep it structured and concise; the supervisor will synthesize "
+        "across specialists."
+    )
 
     # IBM MAS fix (2026-10-08): sub-agents used to start with ZERO parent
     # context — only the task string. Inject a compact digest of the parent
@@ -753,21 +1102,137 @@ async def _run_sub_agent_inner(
                 "do not answer it directly]\n" + parent_digest
             )
 
-    # Build available tools (exclude restricted tools)
-    all_tool_names = registry.list_available()
-    available_names = [t for t in all_tool_names if t not in _RESTRICTED_TOOLS]
+    # Build available tools (exclude restricted tools).
+    # ── Universal Tool Access — unified contract (milestone 2026-11-01) ──
+    # POLICY, three separated layers (discovery ≠ availability ≠
+    # authorization):
+    #   1. Every eligible child may DISCOVER the shared tool registry.
+    #   2. An AgentApp's ``enabled_tools`` are PREFERENCES (priority head
+    #      of the tool list); ``disabled_tools`` are a hard operator deny;
+    #      ``tool_config.strict_tools: true`` is the explicit opt-in that
+    #      turns ``enabled_tools`` into an EXACT allowlist (no discovery).
+    #   3. AVAILABILITY is bounded, not exhaustive: the child's prompt
+    #      carries its priority head + the top-K task-relevant tools +
+    #      ``search_tools`` (see ``_bound_child_toolset``) instead of the
+    #      entire registry. AUTHORIZATION is never relaxed: schemas pass
+    #      through the registry's RBAC filter (B1) and every invocation is
+    #      permission-checked again inside ``execute_tool`` (org/project
+    #      boundaries, per-tool RBAC, data-source policies, credential
+    #      isolation).
+    # Rollback: AGENT_UNIVERSAL_TOOL_ACCESS=false restores the legacy
+    # contract (AgentApp exact allowlist / builtin enabled_by_default).
+    _universal = getattr(settings, "AGENT_UNIVERSAL_TOOL_ACCESS", True)
+    _nested_ok = (
+        getattr(settings, "COLLAB_NESTED_DELEGATION_ENABLED", True)
+        and getattr(settings, "COLLAB_POLICY_ENFORCED", True)
+    )
+    _restricted = set(_RESTRICTED_TOOLS)
+    if _nested_ok:
+        _restricted.discard("delegate_task")
+    _crud_schemas: dict = {}
+    _head_names: list = []
+    _strict_tools = False
+    if agent_app is not None:
+        _tc = agent_app.tool_config or {}
+        _disabled = set(_tc.get("disabled_tools") or [])
+        _strict_tools = bool(_tc.get("strict_tools", False))
+        _head_names = [
+            t for t in (_tc.get("enabled_tools") or [])
+            if t not in _restricted and t not in _disabled
+            and registry.get_entry(t) is not None
+        ]
+        if _strict_tools or not _universal:
+            # Explicit operator strict mode (or global rollback): exact
+            # allowlist, no discovery beyond the configured tools.
+            available_names = _head_names
+        else:
+            # Default contract: configured tools are the priority head;
+            # the rest of the shared registry is discoverable (bounded
+            # at injection time, see _bound_child_toolset below).
+            _head_set = set(_head_names)
+            available_names = _head_names + [
+                t for t in registry.list_available()
+                if t not in _restricted and t not in _disabled
+                and t not in _head_set
+            ]
+    elif _universal:
+        # Builtin child + universal access: the whole shared registry,
+        # minus restricted tools (no role-based tool locking).
+        available_names = [
+            t for t in registry.list_available() if t not in _restricted
+        ]
+        _crud_schemas = _get_all_crud_schemas()
+    else:
+        # Legacy builtin child: only default-enabled tools.
+        available_names = [
+            t for t in registry.list_available()
+            if t not in _restricted
+            and (registry.get_entry(t) is not None and registry.get_entry(t).enabled_by_default)
+        ]
+        _crud_schemas = _get_all_crud_schemas()
+    # Availability honesty (unified contract layer 2): strip tools the
+    # current role cannot invoke — the SAME RBAC availability filter
+    # registry.get_schemas applies (B1) — so the child is never advertised
+    # a tool it cannot use. Non-fatal: execute_tool re-checks permission
+    # at invocation time regardless.
+    try:
+        from app.services.authz import get_authorizer
+        from app.services.authz.base import ResourceType as _RT
+        from app.services.tracing import TraceContext as _TC
+
+        available_names = get_authorizer().filter_resources(
+            role=(_TC.current_role() or "user"),
+            resource_type=_RT.TOOL,
+            resource_ids=list(available_names),
+        )
+    except Exception as _exc:  # noqa: BLE001
+        logger.debug("delegate_tool: RBAC availability filter skipped (non-fatal): %s", _exc)
     tool_schemas = []
+    _added_names: set = set()
     for name in available_names:
         entry = registry.get_entry(name)
-        if entry and entry.enabled_by_default:
+        if entry is None:
+            continue
+        if agent_app is not None or entry.enabled_by_default or _universal:
             tool_schemas.append(_normalize_subagent_schema(name, entry.schema, entry.description or ""))
+            _added_names.add(name)
 
     # Also include CRUD tool schemas if the sub-agent needs them
     # (but exclude delegate_task which is not in CRUD anyway)
-    crud_schemas = _get_all_crud_schemas()
-    for name, schema in crud_schemas.items():
-        if name not in _RESTRICTED_TOOLS and schema not in tool_schemas:
+    for name, schema in _crud_schemas.items():
+        if name not in _restricted and schema not in tool_schemas:
             tool_schemas.append(schema)
+            _added_names.add(name)
+
+    # P2 (Part 3): shared-evidence tools are ALWAYS available to sub-agents — they
+    # are how specialists exchange findings by reference (no dataset copies). The
+    # supervisor aggregates via the registry directly and does not need them.
+    for _ev_name in ("provide_evidence", "request_evidence"):
+        if _ev_name in _added_names:
+            continue
+        # Unified contract: an explicit operator deny (disabled_tools)
+        # wins even over the always-on evidence contract.
+        if agent_app is not None and _ev_name in _disabled:
+            continue
+        _ev = registry.get_entry(_ev_name)
+        if _ev is not None:
+            tool_schemas.append(_normalize_subagent_schema(_ev_name, _ev.schema, _ev.description or ""))
+            _added_names.add(_ev_name)
+
+    # Dynamic tool discovery (milestone §1.3): bound the injected schema
+    # list — priority head + always-on evidence tools kept, remainder
+    # ranked by task relevance, ``search_tools`` escape hatch appended.
+    # Skipped for strict operator allowlists (exact contract) and the
+    # legacy rollback path. The child can still INVOKE any tool it
+    # discovers via search_tools: the tool loop executes by name through
+    # the permission-checked execute_tool layer.
+    if not (_strict_tools or not _universal):
+        _protected = set(_head_names) | {"provide_evidence", "request_evidence"}
+        if _crud_schemas:
+            # Dynamic entity-CRUD schemas are the builtin child's
+            # record-operation contract — never dropped by bounding.
+            _protected |= set(_crud_schemas.keys())
+        tool_schemas = _bound_child_toolset(task, tool_schemas, protected=_protected)
 
     # Build messages
     messages = [
@@ -831,7 +1296,20 @@ async def _run_sub_agent_inner(
     import time as _time
 
     _wall_start = _time.monotonic()
-    _wall_s = float(getattr(settings, "DELEGATE_WALL_SECONDS", 600))
+    # Part 1.2: `_run_sub_agent` passes the effective deadline (already chosen
+    # from COLLAB_TIMEOUT_SECONDS / DELEGATE_WALL_SECONDS) so the inner loop and
+    # the real asyncio.wait_for cancellation share ONE deadline. Fall back to the
+    # settings-derived value when called directly (tests / other callers).
+    _wall_s = wall_seconds
+    if _wall_s is None:
+        _wall_s = float(getattr(settings, "DELEGATE_WALL_SECONDS", 600))
+        if getattr(settings, "COLLAB_POLICY_ENFORCED", True):
+            _wall_s = float(getattr(settings, "COLLAB_TIMEOUT_SECONDS", _wall_s))
+
+    # Part 1.3: accumulate provider token usage across the sub-agent's LLM calls
+    # so cost can be metered per child (and against the parent task budget).
+    _usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    _models: list = []
 
     # P1-4 ReWOO light mode: research-shaped sub-agent tasks run as
     # plan→execute→solve (2 LLM calls instead of one per tool step).
@@ -887,15 +1365,31 @@ async def _run_sub_agent_inner(
 
         content = llm_response.get("content", "")
         raw_tool_calls = llm_response.get("tool_calls", [])
+        # Part 1.3: accumulate provider token usage (never invented — straight
+        # from the provider response surfaced by call_llm_with_reliability).
+        _u = llm_response.get("usage") or {}
+        _usage["prompt_tokens"] += int(_u.get("prompt_tokens") or 0)
+        _usage["completion_tokens"] += int(_u.get("completion_tokens") or 0)
+        _usage["total_tokens"] += int(_u.get("total_tokens") or 0)
+        if llm_response.get("model"):
+            _models.append(llm_response["model"])
 
         if not raw_tool_calls:
             # Final text response
             metrics.record_budget(conv_budget.used, conv_budget.max_total)
+            # P1/P2: a single LLM call may itself exceed the wall-clock budget.
+            # Don't silently report it complete — break so the unified post-loop
+            # return marks it truncated/partial (the parent must never treat a
+            # cut-off child as whole).
+            if _time.monotonic() - _wall_start > _wall_s:
+                break
             return {
                 "success": True,
                 "task": task,
                 "response": content,
                 "iterations": iteration + 1,
+                "token_usage": {**_usage, "model": _models[-1] if _models else None},
+                "_agent_app_id": agent_app.id if agent_app is not None else None,
             }
 
         # Process tool calls — parallel execution for multiple calls,
@@ -920,15 +1414,64 @@ async def _run_sub_agent_inner(
 
         # Execute tools with P0 guardrail before_call checks.
         from app.services.agent_tools import execute_tool
+
+        # ── Multi-agent milestone: per-tool live events under THIS child's
+        # execution identity, so the Agent Execution panel renders each
+        # specialist's own tool loop in real time (tools under the agent
+        # that invoked them — never counted as agents).
+        _child_exec_id = _child_ctx.get("_agent_execution_id")
+
+        def _tool_live(event_type: str, tool_name: str, *,
+                       status: str = "running", duration_ms: int | None = None,
+                       rows: int = 0, error: str | None = None) -> None:
+            if not _child_exec_id:
+                return
+            try:
+                from app.services.agent_loop.sse_builders import (
+                    append_agent_execution_event,
+                )
+
+                _p = {
+                    "agent_execution_id": _child_exec_id,
+                    "parent_agent_execution_id": _child_ctx.get("parent_invocation_id"),
+                    "agent_name": agent_name,
+                    "tool_name": tool_name,
+                    "status": status,
+                    "row_count": rows,
+                }
+                if duration_ms is not None:
+                    _p["duration_ms"] = duration_ms
+                if error:
+                    _p["error"] = str(error)[:200]
+                append_agent_execution_event(
+                    _child_ctx.get("progress_emitter"), event_type, _p)
+            except Exception:  # noqa: BLE001 — observability only
+                pass
+
         if len(parsed_calls) == 1:
             call = parsed_calls[0]
             _gd = guard_ctrl.before_call(call["tool_name"], call["tool_args"])
             if _gd.allows_execution:
-                results = [await execute_tool(
+                _tt0 = time.monotonic()
+                _tool_live("agent_tool_started", call["tool_name"])
+                _r1 = await execute_tool(
                     call["tool_name"],
                     call["tool_args"],
                     db, user_id,
-                )]
+                    context=_child_ctx,
+                )
+                _tool_live(
+                    "agent_tool_completed", call["tool_name"],
+                    status=(
+                        "completed" if (isinstance(_r1, dict) and _r1.get("success"))
+                        else "failed"
+                    ),
+                    duration_ms=int((time.monotonic() - _tt0) * 1000),
+                    rows=(len(_r1.get("rows") or []) if isinstance(_r1, dict) else 0),
+                    error=(None if (isinstance(_r1, dict) and _r1.get("success"))
+                           else (_r1 or {}).get("error")),
+                )
+                results = [_r1]
             else:
                 results = [json.loads(synthetic_blocked_result(_gd))]
         else:
@@ -937,9 +1480,32 @@ async def _run_sub_agent_inner(
                 with tool_session() as _s:
                     _gd = guard_ctrl.before_call(call["tool_name"], call["tool_args"])
                     if _gd.allows_execution:
-                        return await execute_tool(
-                            call["tool_name"], call["tool_args"], _s, user_id,
+                        _tt0 = time.monotonic()
+                        _tool_live("agent_tool_started", call["tool_name"])
+                        try:
+                            _r = await execute_tool(
+                                call["tool_name"], call["tool_args"], _s, user_id,
+                                context=_child_ctx,
+                            )
+                        except Exception as _te:
+                            _tool_live(
+                                "agent_tool_completed", call["tool_name"],
+                                status="failed",
+                                duration_ms=int((time.monotonic() - _tt0) * 1000),
+                                error=str(_te))
+                            raise
+                        _tool_live(
+                            "agent_tool_completed", call["tool_name"],
+                            status=(
+                                "completed" if (isinstance(_r, dict) and _r.get("success"))
+                                else "failed"
+                            ),
+                            duration_ms=int((time.monotonic() - _tt0) * 1000),
+                            rows=(len(_r.get("rows") or []) if isinstance(_r, dict) else 0),
+                            error=(None if (isinstance(_r, dict) and _r.get("success"))
+                                   else (_r or {}).get("error")),
                         )
+                        return _r
                     return json.loads(synthetic_blocked_result(_gd))
             raw_results = await asyncio.gather(
                 *[_exec_one(c) for c in parsed_calls],
@@ -1017,13 +1583,60 @@ async def _run_sub_agent_inner(
     # Exceeded max iterations, wall-clock budget, or guardrail halt — return
     # last content. Flag wall-clock truncation so the parent can re-plan.
     _wall_exceeded = (_time.monotonic() - _wall_start) > _wall_s
+    # P1 child-result contract (2026-10-31, roadmap Q3): the parent must see
+    # partial/failed states EXPLICITLY — never silently consume a truncated
+    # child result as complete. status is machine-readable; the response
+    # prefix makes it unavoidable in the parent's context window.
+    _status = "partial" if _wall_exceeded else "completed"
+    _response = content or "Sub-agent completed but did not produce a final response."
+    if _wall_exceeded:
+        _response = (
+            "[PARTIAL RESULT — sub-agent hit its wall-clock budget before "
+            "finishing; figures below may be incomplete. Re-delegate with a "
+            "narrower task if completeness matters.]\n\n" + _response
+        )
+    # Part 1.3: record cumulative token consumption against the per-conversation
+    # budget store (best-effort; only when a conversation id is known so that
+    # ephemeral/dedup-isolated calls stay isolated).
+    if context and context.get("conversation_id") and _usage["total_tokens"]:
+        try:
+            from app.services.agent_collaboration.governance_store import get_store
+            get_store().conv_token_add(
+                context["conversation_id"], _usage["total_tokens"],
+            )
+        except Exception as _tok_err:  # noqa: BLE001 — non-fatal metering
+            logger.warning("delegate: token metering update failed: %s", _tok_err)
+
+    # P2 (Part 3): surface the evidence THIS child produced (the provide_evidence
+    # tool already stored the items in the shared registry). The parent /
+    # orchestrator references them by id instead of re-querying. We only list
+    # items produced by this agent during this run (created_at >= _wall_start).
+    _ev_ids: list = []
+    _conv = (context or {}).get("conversation_id")
+    if _conv:
+        try:
+            from app.services.agent_collaboration.shared_evidence import get_registry
+            for _it in get_registry().list_items(_conv):
+                if _it.producer_agent == agent_name and _it.created_at >= (_wall_start - 0.001):
+                    _ev_ids.append(_it.evidence_id)
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("delegate: evidence id collection failed (non-fatal): %s", _e)
+
     return {
         "success": True,
+        "status": _status,
         "task": task,
-        "response": content or "Sub-agent completed but did not produce a final response.",
+        "agent_name": agent_name,
+        "response": _response,
         "iterations": max_iterations,
         "truncated": _wall_exceeded,
-        "note": "Reached max iterations or wall-clock budget",
+        "note": "Reached max iterations or wall-clock budget" if _wall_exceeded else None,
+        "evidence_ids": _ev_ids,
+        "token_usage": {
+            **_usage,
+            "model": _models[-1] if _models else None,
+        },
+        "_agent_app_id": agent_app.id if agent_app is not None else None,
     }
 
 
@@ -1048,8 +1661,10 @@ DELEGATE_TASK_SCHEMA = {
         "name": "delegate_task",
         "description": (
             "Delegate a task to a sub-agent with isolated context. "
-            "The sub-agent runs with a restricted toolset (no delegation, no memory) "
-            "and returns its final response. "
+            "The sub-agent gets its own toolset (its specialization's tools "
+            "first, plus dynamic discovery of the shared registry — every "
+            "invocation stays permission-checked) and returns a structured, "
+            "grounded response with stated limitations. "
             "Use for complex subtasks that need focused attention, or when you need "
             "to parallelize independent tasks.\n\n"
             "Pass 'tasks' (array of strings) instead of 'task' to run multiple "
@@ -1064,8 +1679,21 @@ DELEGATE_TASK_SCHEMA = {
                 },
                 "tasks": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Multiple tasks to run concurrently (batch mode). Alternative to 'task'.",
+                    "items": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "task": {"type": "string", "description": "The subtask description."},
+                                    "agent_name": {"type": "string", "description": "Specialist agent for THIS task (from list_available_agents)."},
+                                    "max_iterations": {"type": "integer"},
+                                },
+                                "required": ["task"],
+                            },
+                        ]
+                    },
+                    "description": "Multiple tasks to run concurrently (batch mode). Items may be plain strings (all use agent_name) or {task, agent_name} objects for multi-specialist fan-out. Alternative to 'task'.",
                 },
                 "agent_name": {
                     "type": "string",
@@ -1076,6 +1704,18 @@ DELEGATE_TASK_SCHEMA = {
                     "type": "integer",
                     "description": "Max tool-calling iterations for the sub-agent (default 5)",
                     "default": 5,
+                },
+                "review": {
+                    "type": "boolean",
+                    "description": (
+                        "P2 (Part 1) optional fact-safe REVIEW of the sub-agent output "
+                        "(numerical accuracy, evidence completeness, source attribution, "
+                        "contradictory findings, unsupported conclusions, assumptions/"
+                        "uncertainty, whether the question was answered). SELECTIVE — use "
+                        "only for complex or high-risk tasks. If the reviewer finds missing "
+                        "evidence it may trigger a bounded targeted re-investigation."
+                    ),
+                    "default": False,
                 },
             },
             "required": [],
@@ -1092,6 +1732,16 @@ registry.register(
     description="Delegate a task to a sub-agent with isolated context.",
 )
 
+# P2 (Part 3): register the shared-evidence tools so they are available to the
+# sub-agent (child) toolset. They are opt-in there (enabled_by_default=False on
+# the registry entry) and explicitly added to children in _run_sub_agent_inner.
+try:
+    from app.services.agent_collaboration.evidence_tools import register_evidence_tools
+
+    register_evidence_tools()
+except Exception as _ev_reg_err:  # pragma: no cover - registration is best-effort
+    logger.debug("delegate: evidence tools registration skipped: %s", _ev_reg_err)
+
 
 # ── IBM MAS: LLM-queryable agent directory (task allocation) ────────────
 # The LLM used to pick sub-agent names from a hardcoded prompt list. This
@@ -1104,9 +1754,39 @@ async def _list_available_agents(
     user_id: str | None,
     context: dict | None = None,
 ) -> dict:
-    """List every agent available for delegation, with capabilities."""
+    """List every agent available for delegation, with capabilities.
+
+    P1 (2026-10-31): capability-based routing (docs/architecture/
+    zhanlu-enterprise-agent-discovery-and-routing.md §4.2). Published
+    AgentApp entries are enriched with department / home project / bound
+    data domains / portfolio lifecycle so the parent LLM can route by
+    CAPABILITY + DATA AVAILABILITY, not by guessing names. DISCOVERY ONLY —
+    this tool never grants data access; delegated children still run under
+    their own bindings and the fail-closed permission checker.
+    """
     from app.services.agent_definitions import list_agent_definitions
     from app.models.agent_app import AgentApp
+    from app.models.project import Project
+    from app.models.knowledge_base import KnowledgeBase
+    from app.models.agent_portfolio import AgentPortfolioEntry
+    from app.models.agent_conversation import AgentConversation
+
+    dept_filter = (args.get("department") or "").strip() or None
+    cap_filter = (args.get("capability") or "").strip().lower() or None
+
+    # Default department: the conversation's selected department (chat UI
+    # department chip → conversation metadata.department). Explicit arg wins.
+    if dept_filter is None and context and context.get("conversation_id"):
+        try:
+            conv = (
+                db.query(AgentConversation)
+                .filter(AgentConversation.id == context["conversation_id"])
+                .first()
+            )
+            if conv is not None:
+                dept_filter = ((conv.metadata_ or {}).get("department") or "").strip() or None
+        except Exception:  # noqa: BLE001 — metadata lookup is best-effort
+            pass
 
     agents = []
     for d in list_agent_definitions():
@@ -1258,11 +1938,24 @@ LIST_AVAILABLE_AGENTS_SCHEMA = {
         "name": "list_available_agents",
         "description": (
             "List every agent available for delegation (builtin specialist "
-            "agents + published user agents) with their capabilities. Call "
-            "this BEFORE delegate_task / swarm_spawn_agent when unsure which "
-            "specialist fits the subtask."
+            "agents + published user agents) with capabilities, department, "
+            "home project, bound data domains and lifecycle stage. Call "
+            "this BEFORE delegate_task when a request needs specialist "
+            "capabilities; filter by department when the user selected one."
         ),
-        "parameters": {"type": "object", "properties": {}},
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "department": {
+                    "type": "string",
+                    "description": "Optional department filter (defaults to the conversation's selected department).",
+                },
+                "capability": {
+                    "type": "string",
+                    "description": "Optional capability keyword filter (e.g. 'forecast', 'quality', 'inventory').",
+                },
+            },
+        },
     },
 }
 
