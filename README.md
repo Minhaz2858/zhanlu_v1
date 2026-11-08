@@ -6,6 +6,11 @@
 
 `FastAPI` · `React 18 + Vite` · `PostgreSQL + pgvector` · `Redis` · `MinIO` · `Docker sandboxes` · `SSE streaming`
 
+[![CI](https://github.com/Minhaz2858/zhanlu_v1/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Minhaz2858/zhanlu_v1/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+![React](https://img.shields.io/badge/react-18-61dafb)
+![License](https://img.shields.io/badge/license-proprietary-lightgrey)
+
 </div>
 
 ---
