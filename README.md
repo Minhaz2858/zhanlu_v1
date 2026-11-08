@@ -1,71 +1,141 @@
-# Zhanlu
+<div align="center">
 
-FastAPI backend + React (Vite) frontend, glued together by the `@base44/sdk`.
+# Zhanlu (展鹭) — Enterprise AI Operating System
 
-## Authentication
+**A governed, multi-tenant AI agent platform: chat that queries your real databases, executes code in disposable sandboxes, and ships verifiable deliverables — with a receipt for every step.**
 
-Login is **required for every page and every mutating/LLM/data endpoint** — there
-is no anonymous access (see `docs/superpowers/plans/2026-07-27-claude-style-auth-hardening.md`).
+`FastAPI` · `React 18 + Vite` · `PostgreSQL + pgvector` · `Redis` · `MinIO` · `Docker sandboxes` · `SSE streaming`
 
-- **Methods:** email + password only. Registration verifies via an emailed OTP
-  code (unless no users exist yet, for first-time setup).
-- **Tokens:** a short-lived access JWT (default 15 min, carries a `jti`) plus a
-  long-lived refresh token (default 30 days, rotated on each refresh, stored as
-  a SHA-256 hash in `refresh_tokens`). On logout the access token's JTI is
-  blacklisted (`revoked_tokens`) and all of the user's refresh tokens are
-  invalidated, so a logged-out session cannot be replayed.
-- **Frontend:** `<ProtectedRoute>` redirects unauthenticated visitors to
-  `/login?next=…`. On page load, an expired access token is silently refreshed
-  once via `POST /api/apps/{appId}/auth/refresh` before retrying `me()`.
-- **Password policy:** minimum 10 characters, at least one letter and one digit
-  (configurable).
-- **Rate limits** (in-memory, per IP): login 5/min, register/OTP/reset 3 per
-  10 min. Set any to `0` to disable.
+</div>
 
-### Configuration
+---
 
-See `backend/.env.example` under the `===== Auth =====` section. Key settings:
+> Enterprises can't treat an LLM chatbot as production software. Zhanlu runs every
+> agent as a **versioned harness** — layered constitutional prompts, iteration
+> budgets, grounding gates, tenant-isolated data access, and audit events — so
+> answers are **verifiable, sandboxed, and auditable** rather than merely conversational.
 
-| Setting | Default | Notes |
-|---|---|---|
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | 15 | access JWT lifetime |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | 30 | refresh token lifetime |
-| `PASSWORD_MIN_LENGTH` | 10 | minimum password length |
-| `PASSWORD_REQUIRE_LETTER` / `PASSWORD_REQUIRE_DIGIT` | true | complexity flags |
-| `RATE_LIMIT_LOGIN_PER_MIN` | 5 | login attempts per IP per minute |
-| `RATE_LIMIT_REGISTER_PER_10MIN` | 3 | registrations per IP per 10 min |
+## What it does
 
-### Migrations
+| Capability | How it works |
+|---|---|
+| 🤖 **Governed agent runtime** | A main agent that plans work, delegates to specialized sub-agents, and streams live activity (plan steps, tool progress) over SSE. Every tool call passes a registry with risk tiers + approval gates. |
+| 🗄️ **Policy-enforced NL2SQL** | Questions become SQL only through a gateway: schema grounding, source-verification gates, row caps, read-only boundaries, and tenant-scoped data sources — never free-form queries against your ERP. |
+| 📦 **Real deliverables, not chat text** | Reports ship as PPTX / DOCX / XLSX / PDF / HTML dashboards and mini-apps, generated in disposable Docker sandboxes and stored as permission-checked artifacts. |
+| 🔁 **n8n-parity workflow engine** | Visual workflow canvas (build-with-AI), ~18 node types, topological execution, cron scheduling with exactly-once occurrence claims across processes. |
+| ⏱️ **Durable automation runtime** | Scheduled tasks with fenced state-machine writes (lease tokens), persisted retries, crash recovery, and durable execution-event ledgers — see [Automation Architecture](docs/architecture). |
+| 👥 **Multi-tenant by construction** | `org_id` / `app_id` scoping on every entity, project-scoped knowledge bases, RBAC, and admin-gated capabilities. |
+| 🧠 **Memory & context engineering** | Layered context compaction, pgvector semantic memory, and conversation summarization — long sessions stay inside budget without losing the plot. |
 
-The `refresh_tokens` + `revoked_tokens` tables are created by Alembic revision
-`031` (chains off `030`). Apply with `python -m alembic upgrade head` against
-the target database.
+## Architecture
 
-### Deployment
+```mermaid
+flowchart TB
+    subgraph Client["Frontend — React 18 + Vite (nginx :8089)"]
+        UI1["Chat — SSE live activity stream"]
+        UI2["Workflow Canvas — build with AI"]
+        UI3["Agent Studio · Automation Center<br/>Dashboards · Marketplace"]
+    end
 
-**HARD RULE — every backend deploy restarts BOTH backend containers:**
+    subgraph API["FastAPI Backend (:5002) — 40+ routers under /api"]
+        AUTH["Auth — JWT + rotating refresh,<br/>OTP registration, rate limits"]
+        AGENTS["Agent chat loop — tool registry,<br/>guardrails, delegation"]
+        WF["Workflow runtime +<br/>automation dispatcher"]
+        ART["Artifact pipeline —<br/>PPTX/DOCX/XLSX/PDF/HTML"]
+    end
 
-```bash
-docker restart zhanlu-backend zhanlu-sandbox-worker
+    subgraph Data[("Data plane")]
+        PG[("PostgreSQL<br/>+ pgvector")]
+        RD[("Redis")]
+        S3[("MinIO<br/>artifacts & files")]
+        CH[("ChromaDB<br/>vectors")]
+    end
+
+    subgraph Sand["Execution plane"]
+        SBX["Disposable Docker sandboxes<br/>(python / office / pptx / webapp)"]
+    end
+
+    Client -->|SSE / REST| API
+    API --> PG & RD & S3
+    API --> SBX
+    AGENTS -->|"NL2SQL gateway<br/>(grounded, read-only, row-capped)"| PG
 ```
 
-- Both containers bind-mount the same repo (`/home/ysk2025/zhanlu_7_30/backend` →
-  `/app`), but a bind-mount **never reloads a running process's imported modules** —
-  a process keeps the code it imported at startup until it is restarted.
-- `zhanlu-backend` runs the API + agent FSM + the dashboard pipeline
-  (`create_fullstack_dashboard` / `update_fullstack_dashboard` execute **in-process**
-  here via `DashboardAppGenerator` — they do NOT route through the sandbox).
-- `zhanlu-sandbox-worker` runs `python -m sandbox_worker.main`: it BRPOPs the Redis
-  `sandbox:queue` (jobs enqueued by `SandboxService` from `run_sandbox_skill`) and
-  spawns disposable Docker containers via the docker socket. A stale worker silently
-  runs old skill-runner code even though the repo is already updated.
-- Frontend-only changes need no restart (dist is bind-mounted `:ro`).
+## Quickstart
 
-### Known follow-ups
+```bash
+# Full stack (builds sandbox images first, then starts everything)
+make up
 
-- The access/refresh tokens live in `localStorage` (constrained by the
-  `@base44/sdk` transport). Migrating to httpOnly cookies requires forking the
-  SDK's axios client + rewriting `AuthContext.jsx` — see
-  `docs/superpowers/followups/httpOnly-cookie-auth-migration.md`.
-- Mid-session 401 auto-refresh (for ongoing SDK calls, not just page load) is
-  part of that same follow-up.
+# Services
+#   UI       → http://localhost:8089
+#   API      → http://localhost:5002/healthz
+#   Postgres → localhost:5400   Redis → localhost:6300   MinIO → localhost:9400
+
+# Other commands
+make logs      # tail all service logs
+make smoke     # API E2E smoke test suite
+make db-info   # which database the backend is actually connected to
+make reset     # full teardown + rebuild
+```
+
+First visit registers the initial admin (first user bypasses email OTP); every
+subsequent account verifies via emailed OTP. Configuration templates live in
+[`backend/.env.example`](backend/.env.example) and [`.env.example`](.env.example).
+
+## Project structure
+
+```
+├── backend/            # FastAPI app (40+ routers, ~139-tool registry, sandbox worker)
+│   ├── app/routers/    #   HTTP layer
+│   ├── app/services/   #   Agent runtime, NL2SQL gateway, workflows, artifacts
+│   ├── alembic/        #   130+ migrations
+│   └── tests/          #   Large pytest suite (unit + PG acceptance)
+├── frontend/           # React 18 + Vite (chat, workflow canvas, studio, admin)
+├── deploy/             # nginx + deployment configs
+├── infra/              # Postgres init, local infra
+├── scripts/            # DB setup / seeding / maintenance scripts
+├── docs/               # Architecture, audits, plans, reports
+├── Makefile            # make up / down / logs / smoke / db-*
+└── docker-compose.yml  # backend · frontend · postgres · redis · minio · sandboxes
+```
+
+## Testing
+
+```bash
+cd backend && python -m pytest tests/ -k automation   # backend suites
+cd frontend && npm test                               # frontend (vitest)
+make smoke                                            # end-to-end API smoke
+```
+
+The backend distinguishes **implemented ≠ tested ≠ production-ready** — suites
+cover unit, integration, and real-PostgreSQL acceptance scenarios (fencing,
+crash recovery, multi-process exactly-once scheduling).
+
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [`ZHANLU_PROJECT_OVERVIEW.md`](ZHANLU_PROJECT_OVERVIEW.md) | Traceable technical overview — architecture, subsystems, every claim sourced to a file |
+| [`PROJECT.md`](PROJECT.md) | Full deep-dive: agent runtime, workflow engine, infrastructure, domain subsystems |
+| [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) | Auth & security model: tokens, rotation, revocation, rate limits, configuration table |
+| [`docs/architecture/`](docs/architecture) | Automation target architecture & decision records |
+| [`docs/audits/`](docs/audits) | Security & consistency audits |
+| [`docs/reports/`](docs/reports) | Implementation reports and progress records |
+
+## Security model (summary)
+
+- **No anonymous access** — every page and every mutating/LLM/data endpoint requires auth.
+- Short-lived access JWT (15 min) + long-lived rotating refresh token (30 days,
+  SHA-256-hashed at rest); logout blacklists the token family.
+- Password policy (length + complexity) and per-IP rate limits on auth endpoints.
+- Tool calls pass a **risk-tiered registry with approval gates**; database access
+  is read-only by default with row caps and tenant scoping.
+
+Full details: [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md).
+
+---
+
+<div align="center">
+<sub>Built by SYNEXIA — Zhanlu (展鹭) & Synexia™ are working names of the platform and its agent core.</sub>
+</div>
