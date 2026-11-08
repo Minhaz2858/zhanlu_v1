@@ -73,3 +73,6 @@ logs/
 agent_qa/
 outputs/
 backend/data/
+
+# Large local archives (never upload)
+zhanlu_*_src.zip
