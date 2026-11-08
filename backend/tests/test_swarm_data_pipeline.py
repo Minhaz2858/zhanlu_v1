@@ -159,8 +159,11 @@ async def test_dispatcher_enforces_whitelist_and_injects_source(monkeypatch):
     rt = _FakeRuntime.last_instance
     assert rt.agent_name == "data_agent"
 
-    # whitelist enforcement
-    blocked = await rt.dispatcher("write_file", {}, None, "u", None)
+    # whitelist enforcement. Under Universal Tool Access the fixed data
+    # toolset widens to the registry minus _DATA_AGENT_DENIED, so use a tool
+    # that is denied under EVERY configuration (delegate_task is a
+    # delegation/meta tool — loops + unbounded delegation).
+    blocked = await rt.dispatcher("delegate_task", {}, None, "u", None)
     assert blocked["success"] is False and "not allowed" in blocked["error"]
 
     # data_source_id injection when missing
